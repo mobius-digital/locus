@@ -1,0 +1,10588 @@
+import { useFetch as tiktokFetch, tiktokStatus, tiktokStart, tiktokCallback, tiktokReport, setTiktokLink } from './tiktok.js';
+import { useFetch as assetsFetch, syncAssets, tagAssets, listAssets, assetsTick, assetFile, removeLook, tagBacklog } from './assets.js';
+import { guardBrands, brandsFor, clientScope, isClientEmail } from './brandguard.js';
+import { handleCommand } from './command.js';
+import { handleAgency } from './agency.js';
+import { handleClients, clientAsk, clientOwnsRun, touchClient, meClient, claimInvite } from './clients.js';
+import { listBrands, addConnection, createBrand, brandByChannel, connectionNote, KINDS as BRAND_KINDS, metaOf, isBrandId, resolveBrandId, acctOf, metaSyncRows, setTripleWhale, storagePrefix, brandOf, connGet, connSet } from './brands.js';
+import { whoIs, channelInfo, brandForChannel, readAccess, writeAccess } from './slackaccess.js';
+import { movedTick, movedPreview } from './moved.js';
+import { ensureCreative, putCover, serveCover, assetKeyOf, creativeTick, tagTick, keyTick, adBreakdown as adSplit, adOriginal, useFetch as creativeFetch } from './creative.js';
+import { marketFor, metaDay, chatterFor, useFetch as marketFetch } from './market.js';
+import { pulseTick, pulseStatus, pulseImport, pulseButton } from './pulse.js';
+import { handleSchedules, scheduleTick } from './askschedule.js';
+import { handleReview, reviewTick } from './review.js';
+import { handleAlerts, alertTick } from './alerts.js';
+import { handleSocial, socialTick, serveSocialMedia, useFetch as socialFetch } from './social.js';
+import { handleSocialPost, socialPostTick, socialResultsTick, socialNudgeTick, handleSocialButton, useFetch as socialPostFetch } from './socialpost.js';
+import { handleMake as handleMakeApp, serveMakeMedia, runExit } from './make.js';
+import { handleCalendar, calendarTick, calendarView, liveOn as calendarLiveOn, useFetch as calendarFetch, calendarData, teamOf as calendarTeam, clientCalendarFor } from './calendar.js';
+/* The client posts (2026-10-19 reporting audit): the six-line daily and the weekly / monthly shape, built from stored numbers. */
+import { dailyPost, dailyThread, weeklyPost, weekSentence, internalChannel } from './clientpost.js';
+import { handleRequests, createAsk } from './requests.js';
+import { handleMeetings, handleFirefliesHook, meetingsTick } from './meetings.js';
+import { handleCalls } from './callscreen.js';
+import { handleActions, actionTick, handleActionButton, handleReaction, onActionDone, onActionPlaced, slackName, markDone } from './actions.js';
+import { blockActionPlaced, blockActionDone, blockRollTick, setBlockFetch, setBlockDone, handleGcalPush, blockSyncTick, blockMigrate, ensureWatches } from './blocks.js';
+import { minOffTick, handleMinOffButton, minOffOn } from './minoff.js';
+import { checkinTick, checkinAction, submitCheckin, checkinErrors, reviewPost, reviewAction, reviewSubmit, serveReviewPic, ensureDay } from './checkin.js';
+import { handleProduction, listBoard, moveCard as prodMove, formatOf as prodFormat } from './production.js';
+import { readDoc as prodReadDoc } from './asana-brand.js';
+import { serveFile as prodFile, handleReviewLink, savePhoto } from './prodwork.js';
+import { connectGet, connectPost, connectOverview, pendingTick as connectPendingTick, onboardAdsTick } from './connect.js';
+import { morningCardTick, previewCard, teamPost, tagOf, cardActionDone, cardCallMade, cardProdDone, cardBriefState, cardReaction, cardOn, morningHour, DEFAULT_MORNING_HOUR } from './morningcard.js';
+import { handlePrefs, morningPeople } from './prefs.js';
+import { morningTick, handleMorning } from './morning.js';
+import { todayTick } from './todaypost.js';
+/**
+ * Mobius Account Health - data worker (Cloudflare Workers + D1)
+ *
+ * Pulls Meta Marketing API data for every active client ad account into D1:
+ * - daily account-level insights (spend, clicks, purchases, revenue, 3s views)
+ * - the ad-account activity log (every change anyone made), auto-classified
+ * and serves a small JSON API for the dashboard (../index.html).
+ *
+ * Bindings (see wrangler.toml):
+ *   DB - D1 database (schema.sql)
+ * Secrets (wrangler secret put <NAME>):
+ *   META_TOKEN - system-user token with ads_read on every client ad account
+ *   ADMIN_TOKEN - master key for the dashboard (a dashboard password can also
+ *                   be set in Settings; its hash lives in the settings table)
+ *   SLACK_BOT_TOKEN - (Chat 2) same Slack app as Pulse / Restock
+ *   SLACK_SIGNING_SECRET - verifies the Slack button presses on /slack/actions
+ *   ANTHROPIC_API_KEY - (Chat 1) Claude API key for POST /api/summarise
+ *
+ * Build plan lives in ../PRD.md. This file is Chat 0 (foundation); Chats 1–4
+ * add routes + sync jobs for Change Log, Averages/Pacing, Creative Rotation,
+ * and intraday Pacing.
+ */
+
+import { buildStrategist } from './strategist.js';
+import { indexEvent, backfillTick, indexStatus, forgetChannelCache } from './slackindex.js';
+import { consolidate, factsList, remember as stratRemember, forget as stratForget, editFact, skillsList, saveSkill, deleteSkill, usageSummary } from './stratmem.js';
+import { PRESETS as STRAT_PRESETS } from './strattools.js';
+import { accessReport, grantSelf, partnerSweep } from './metaaccess.js';
+import { handleResearch } from './research.js';
+import { handleVoice } from './voice.js';
+import { handleStudioAI } from './studio-ai.js';
+import { serveVideo, serveRef } from './studio-video.js';
+import { handleBrandAsana, handleAsanaHook, brandAsanaTick, unifyGoals, mondayTick, runMondayPlan, testMinimumsDue, refreshAccountAvg, useFetch as brandAsanaFetch, asana, asanaAll, readDoc as brandReadDoc } from './asana-brand.js';
+import { ideaStart, runIdeaJob, handleIdeaAction, adminIdea, useExits, useFetch as ideasFetch } from './ideas.js';
+import { handleAtria, useFetch as atriaFetch } from './atria.js';
+import { handleMcp } from './mcp.js';
+import { handleNewClient, newClientTick, handleStripeWebhook, welcomeOnJoinByChannel, handleNewClientAction, onCallBooked, useFetch as newClientFetch } from './newclient.js';
+import { handleCalendly, useFetch as calendlyFetch } from './calendly.js';
+import { useFetch as mailFetch } from './mail.js';
+import { handleSign, useFetch as contractFetch } from './contract.js';
+import { handleFrame, useFetch as frameFetch } from './frame.js';
+import { handleMake } from './stratmake.js';
+import { integrationsReport } from './integrations.js';
+import { smokeTick, handleSmoke } from './smoke.js';
+import { useFetch as clarityFetch, clarityReport, storeClarity, setClarityProject, forgetClarity } from './clarity.js';
+import { useFetch as surveyFetch, surveyReport, storeFairing, storeKno, forgetSurvey, setSurveyQuestion } from './survey.js';
+import { storeKey as klaviyoStore, forgetKey as klaviyoForget, useFetch as klaviyoFetch, klaviyoView } from './klaviyo.js';
+import { klaviyoWriteRoute, klaviyoCan } from './klaviyowrite.js';
+import { handleLeaks, leaksFor } from './leaks.js';
+import { adsInvite as googleAdsInvite } from './google.js';
+import { useFetch as googleFetch, googleProbe, autoMatch as googleMatch, linkFor as googleLink, setLink as googleSetLink, websiteReport, websiteDrill, searchReport, adsReport, adsAds, adsTerms, adsChanges, enableApis, adsAccounts, adsCampaignWrite } from './google.js';
+import { locusWrite as metaLocusWrite, locusUndo as metaLocusUndo, metaLive, metaActs } from './metawrite.js';
+import { handleDrops, dropsTick } from './drops.js';
+import { handleLaunch, refreshStatus as launchRefresh } from './launch.js';
+import { handleSiteReview } from './sitereview.js';
+import { handleBuyer, buyerPostTick, buyerSettings } from './buyerlist.js';
+import { buyerAITick } from './buyerai.js';
+import { handleTrybe, trybeTick, handleTrybeJoin } from './trybe.js';
+import { handleLucky } from './lucky.js';
+import { dataTools } from './stratdata.js';
+import { extraTools } from './allwrite.js';
+import { runStudioMake, studioMakeTools } from './studiomake.js';
+/* /api/tw-day's 60-second memo (2026-10-26, Locus speed): key = brand | shop | day -> { at, p }. */
+const TW_DAY_MEMO = new Map();
+
+const GRAPH = 'https://graph.facebook.com/v23.0';
+const BACKFILL_DAYS = 90;       // first sync of a new account
+const RESYNC_DAYS = 3;          // nightly re-pull window (conversions settle late)
+// Bump when ad_daily gains columns: every account then re-walks the 90-day
+// window once, filling the new fields on rows that already exist.
+// 1 = hook/hold (2026-08-29)   2 = reach, clicks, outbound, p25/50/75, watch time (2026-08-30)
+// 3 = video_plays - the correct denominator for the retention curve. Dividing
+//     by 3-second views produced 150%, because a 25% view of a 7-second video
+//     happens BEFORE 3 seconds.
+const ADS_METRICS_VERSION = 4;   // 4 (2026-09-24): add_to_cart per ad, for the Brand tab's test scorecard
+const ACTIVITY_BACKFILL_DAYS = 90;
+// One platform: the Meta screens are now a tab inside Mobius (was the separate
+// Account Health dashboard, which is kept only as a redirect). This worker is
+// unchanged - it still owns the Meta sync, both crons and every secret.
+const DASHBOARD_URL = 'https://locus.go-mobius-digital.com/profit/';
+
+/* ------------------------------------------------------------------ */
+/*  SUBREQUEST BUDGET - the thing this worker never had                */
+/* ------------------------------------------------------------------ */
+/* Cloudflare counts EVERY outbound call made during ONE invocation, and the
+   part that caught us is that D1 counts: "a subrequest is any request a Worker
+   makes using the Fetch API or to Cloudflare services like R2, KV, or D1."
+   Free plan allows 50. Paid allows 10,000.
+ *
+ * Nothing here was counting, and every scheduled job looped all six brands
+ * doing ~10-20 calls each. So each job ran flat into the ceiling and the
+ * platform killed it mid-brand. Whatever ran first won; everything after it
+ * got nothing. On 2026-08-31 that meant: the nightly synced Bonk Golf and
+ * abandoned the other five, every Triple Whale sync failed, and the weekly
+ * reports were generated with no narrative and never posted to Slack - while
+ * `lastRun` cheerfully recorded ok:true. It also left daily_insights a day
+ * stale, which is what made the delivery check shout that Dartee had spent
+ * nothing. One unmetered loop, five visible symptoms.
+ *
+ * THE RULE NOW: a job never runs into the ceiling. It counts what it spends,
+ * stops while it can still afford to record what it did, and leaves the rest
+ * for the next tick. Every loop here is already idempotent - brands that are
+ * done are skipped on the way back in - so stopping early is free and resuming
+ * is automatic. The hourly trigger gives us 24 chances a day to finish.
+ *
+ * This is why the fix is not "buy the paid plan". Paid raises the ceiling 200x
+ * and is well worth $5, but an uncounted loop still has no idea where the
+ * ceiling is - it just moves the cliff further out and hits it at 60 clients
+ * instead of 6, silently, exactly the same way. Counting is the fix. The plan
+ * is headroom. */
+
+/* D1 BATCH SIZE IS A SUBREQUEST DIAL. Each batch() call is ONE subrequest no
+   matter how many statements it carries, so a small chunk size is pure waste:
+   syncTwDaily was writing 45 days x ~12 metrics in chunks of 30, which is 18
+   subrequests for work that fits in 4. Measured 2026-09-01: one brief cost 51
+   calls, more than the whole free-plan budget, and most of it was this.
+   150 is already proven in this file (the ad_daily writer has used it since
+   August). Do not lower these without measuring what it costs. */
+const D1_CHUNK = 150;
+
+const SUB_LIMIT_FREE = 50;
+/* Held back so a job that runs out of budget can still WRITE DOWN that it ran
+   out and post the alert saying so. Every silent failure we hit came from the
+   bookkeeping being the thing that got cut off. */
+const SUB_RESERVE = 8;
+
+/* Module scope is reused across invocations in a warm isolate, so this MUST be
+   reset at every entry point - see `scheduled` and `fetch`. Concurrent requests
+   in one isolate share it; that only ever makes a job more conservative (it
+   defers work to the next tick), never less, so the race is safe by design. */
+let SUB_USED = 0;
+let SUB_LIMIT = SUB_LIMIT_FREE;
+
+function subReset(env) {
+  SUB_USED = 0;
+  // Learned costs are per-invocation. Carrying them between ticks would let one
+  // pathological brand ratchet the estimate up permanently and starve the rest.
+  COST_SEEN.clear();
+  // Set SUB_LIMIT in wrangler.toml [vars] after upgrading to Workers Paid and
+  // every job simply does more per tick - no other change needed.
+  const n = +(env?.SUBREQUEST_LIMIT ?? 0);
+  SUB_LIMIT = Number.isFinite(n) && n > 0 ? n : SUB_LIMIT_FREE;
+}
+function subSpend(n = 1) { SUB_USED += n; }
+function subUsed() { return SUB_USED; }
+/** How many calls are still safe to make, after the bookkeeping reserve. */
+function subLeft() { return SUB_LIMIT - SUB_USED - SUB_RESERVE; }
+/** Can this invocation afford a unit of work costing roughly `n` calls? */
+function subCanAfford(n) { return subLeft() >= n; }
+
+/* Per-brand cost SEEDS. These are only the opening guess - `costOf` replaces
+   them with what the work actually cost the moment one brand has been through,
+   because the first real tick proved the guesses were badly low: the estimate
+   for a brief was 12 and the invocation finished at 53 of a 50 budget having
+   drafted one brand. Guessing a fixed number is the same mistake as not
+   counting, one level up. Measure, then decide. */
+const COST_SYNC_BRAND = 20;    // insights + activities + ad-level slices
+const COST_BRIEF_BRAND = 22;   // TW sync + brief data + Claude + Slack + writes
+const COST_REPORT_BRAND = 22;  // report data + Claude + Slack + writes
+const COST_DELIVERY_BRAND = 4; // D1 reads, sometimes one Meta pacing call
+
+/* Observed cost per unit of work, highest seen this invocation. Highest rather
+   than average: the decision being made is "will the NEXT one fit", and a brand
+   that needs a Triple Whale backfill costs several times one that does not. */
+const COST_SEEN = new Map();
+function costOf(kind, seed) { return Math.max(COST_SEEN.get(kind) || 0, seed); }
+/** Wrap one unit of work, recording what it really cost. */
+async function measured(kind, fn) {
+  const before = subUsed();
+  try { return await fn(); }
+  finally {
+    const spent = subUsed() - before;
+    if (spent > (COST_SEEN.get(kind) || 0)) COST_SEEN.set(kind, spent);
+  }
+}
+function costReport() { return Object.fromEntries(COST_SEEN); }
+
+/** Wrap `env` so every D1 call counts itself. Done once at the entry point
+ *  rather than at 112 call sites, so nothing can be added later that forgets.
+ *  Statements keep a `__raw` handle because D1's batch() needs the real
+ *  objects, not these wrappers. */
+function meterEnv(env) {
+  if (env.__metered) return env;
+  const raw = env.DB;
+  if (!raw) return env;
+  const wrapStmt = st => ({
+    __raw: st,
+    bind: (...a) => wrapStmt(st.bind(...a)),
+    first: (...a) => { subSpend(); return st.first(...a); },
+    all: (...a) => { subSpend(); return st.all(...a); },
+    run: (...a) => { subSpend(); return st.run(...a); },
+    raw: (...a) => { subSpend(); return st.raw(...a); },
+  });
+  const DB = {
+    prepare: q => wrapStmt(raw.prepare(q)),
+    batch: list => { subSpend(); return raw.batch((list || []).map(s => (s && s.__raw) || s)); },
+    exec: q => { subSpend(); return raw.exec(q); },
+    dump: () => raw.dump(),
+  };
+  return new Proxy(env, {
+    get: (t, k) => (k === 'DB' ? DB : k === '__metered' ? true : t[k]),
+  });
+}
+
+/** Every outbound HTTP call in this worker goes through here so it is counted.
+ *  Same signature as fetch; the only difference is the meter. */
+function xfetch(...args) { subSpend(); return fetch(...args); }
+brandAsanaFetch(xfetch);
+ideasFetch(xfetch);
+atriaFetch(xfetch);
+newClientFetch(xfetch);
+mailFetch(xfetch);
+calendlyFetch(xfetch);
+contractFetch(xfetch);
+frameFetch(xfetch);
+klaviyoFetch(xfetch);
+calendarFetch(xfetch);
+socialFetch(xfetch);
+socialPostFetch(xfetch);
+/* Locus Social posting (socialpost.js): the Slack fallback, the tray's profit reads and the budget check. */
+function socialPostDeps() { return { slackPost, slackApi, mintSession, subCanAfford: n => subCanAfford(n), isAdmin, sessionEmail }; }
+/* Make (2026-10-20): the Organic post and Ad brief exits run from the Slack card and from Locus through one function (make.js). */
+useExits((env, row, acct, d, pushed, who, exit) => runExit(env, row, acct, d, pushed, who, exit, meetingDeps()));
+googleFetch(xfetch);
+clarityFetch(xfetch);
+surveyFetch(xfetch);
+assetsFetch(xfetch);
+tiktokFetch(xfetch);
+marketFetch(xfetch);
+creativeFetch(xfetch);
+
+/* ------------------------------------------------------------------ */
+/*  Date helpers (bucketing is always in the account's own timezone)   */
+/* ------------------------------------------------------------------ */
+
+function localDate(tz, d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+function localHourFrac(tz, d = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(d);
+  const h = +(parts.find(p => p.type === 'hour')?.value || 0) % 24;
+  const m = +(parts.find(p => p.type === 'minute')?.value || 0);
+  return h + m / 60;
+}
+function addDays(ymd, n) {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function daysInMonth(ymd) {
+  const [y, m] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+const monthOf = ymd => ymd.slice(0, 7);
+function prevMonth(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 2, 1));
+  return d.toISOString().slice(0, 7);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Meta Graph API                                                     */
+/* ------------------------------------------------------------------ */
+
+class MetaError extends Error {
+  constructor(msg, code, sub) { super(msg); this.code = code; this.sub = sub; }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Meta rate limiting - back off, do not keep knocking                */
+/* ------------------------------------------------------------------ */
+/* Meta's limits are per app and per ad account, and they do not reset because
+   you retried. Codes 4 and 17 are "you have used your quota"; 1 and 2 are
+   transient "service temporarily unavailable" but mean the same in practice - 
+   stop calling for a while.
+ *
+ * Before this, a rate-limited account was retried on the next tick and every
+ * tick after, which is the behaviour that earns a longer ban rather than
+ * clearing one. Now the first limit error parks ALL Meta work for an hour.
+ * Deliberately global rather than per account: the app-level quota is shared,
+ * so one brand hitting it means the others are about to. */
+const META_BACKOFF_CODES = new Set([1, 2, 4, 17, 32, 613]);
+const META_BACKOFF_MS = 60 * 60 * 1000;
+
+async function noteMetaError(env, e) {
+  const code = e?.code;
+  const rateish = META_BACKOFF_CODES.has(code) ||
+    /request limit reached|temporarily unavailable|rate limit/i.test(e?.message || '');
+  if (!rateish) return false;
+  await putSetting(env, 'metaBackoffUntil', String(Date.now() + META_BACKOFF_MS)).catch(() => {});
+  return true;
+}
+/** True while Meta has told us to stop. Cheap: one settings read. */
+async function metaBackedOff(env) {
+  const until = +(await getSetting(env, 'metaBackoffUntil') || 0);
+  return Number.isFinite(until) && until > Date.now();
+}
+
+async function meta(env, path, params = {}) {
+  if (!env.META_TOKEN) throw new MetaError('META_TOKEN secret is not set', 0);
+  const url = new URL(`${GRAPH}/${path.replace(/^\//, '')}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v == null) continue;
+    url.searchParams.set(k, typeof v === 'string' ? v : JSON.stringify(v));
+  }
+  url.searchParams.set('access_token', env.META_TOKEN);
+  const res = await xfetch(url.toString());
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.error) {
+    const e = body.error || {};
+    throw new MetaError(e.message || `HTTP ${res.status}`, e.code, e.error_subcode);
+  }
+  return body;
+}
+
+/** Follow `paging.next` up to maxPages, concatenating `data`. */
+async function metaAll(env, path, params, maxPages = 30) {
+  const out = [];
+  let page = await meta(env, path, params);
+  let n = 0;
+  while (page) {
+    out.push(...(page.data || []));
+    const next = page.paging?.next;
+    if (!next || ++n >= maxPages) break;
+    const res = await xfetch(next);
+    page = await res.json();
+    if (page.error) throw new MetaError(page.error.message, page.error.code);
+  }
+  return out;
+}
+
+/* ---------- Meta structure (Locus v2, 2026-10-07) ----------
+   Campaign and ad set NAMES, objective, status and budgets. `ads` always carried the ids;
+   the v2 Paid screens need the names to draw "campaign > ad set > ad". Two paged calls per
+   brand, refreshed at most every 6 hours (`metaStructAt:<act>`), inside the hourly sync. */
+let structTabled = false;
+async function ensureStructTables(env) {
+  if (structTabled) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta_campaigns (act_id TEXT NOT NULL, campaign_id TEXT PRIMARY KEY, name TEXT, objective TEXT, status TEXT,
+    daily_budget REAL, lifetime_budget REAL, bid_strategy TEXT, created_time TEXT, synced_at TEXT NOT NULL DEFAULT (datetime('now')))`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS meta_adsets (act_id TEXT NOT NULL, adset_id TEXT PRIMARY KEY, campaign_id TEXT, name TEXT, status TEXT,
+    daily_budget REAL, optimization_goal TEXT, min_spend REAL, created_time TEXT, synced_at TEXT NOT NULL DEFAULT (datetime('now')))`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS meta_adsets_camp ON meta_adsets (act_id, campaign_id)`).run().catch(() => {});
+  /* 2026-11-03: start and end, so the Buyer list's "not spending" row skips sets scheduled for later (BFCM) or ended */
+  for (const c of ['start_time', 'end_time']) await env.DB.prepare(`ALTER TABLE meta_adsets ADD COLUMN ${c} TEXT`).run().catch(() => {});
+  structTabled = true;
+}
+async function syncMetaStructure(env, acct, force = false) {
+  await ensureStructTables(env);
+  const key = `metaStructAt:${acct.act_id}`;
+  const at = await getSetting(env, key);
+  if (!force && at && Date.now() - Date.parse(at) < 6 * 3600e3) return { skipped: 'fresh' };
+  const cents = v => v == null || v === '' ? null : (+v) / 100;
+  const camps = await metaAll(env, `${acct.act_id}/campaigns`, { fields: 'id,name,objective,status,effective_status,daily_budget,lifetime_budget,bid_strategy,created_time', limit: 200 }, 10);
+  const sets = await metaAll(env, `${acct.act_id}/adsets`, { fields: 'id,name,campaign_id,status,effective_status,daily_budget,optimization_goal,daily_min_spend_target,created_time,start_time,end_time', limit: 200 }, 15);
+  const stmts = [];
+  for (const c of camps) stmts.push(env.DB.prepare(`INSERT INTO meta_campaigns (act_id, campaign_id, name, objective, status, daily_budget, lifetime_budget, bid_strategy, created_time, synced_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,datetime('now')) ON CONFLICT(campaign_id) DO UPDATE SET name = excluded.name, objective = excluded.objective, status = excluded.status,
+      daily_budget = excluded.daily_budget, lifetime_budget = excluded.lifetime_budget, bid_strategy = excluded.bid_strategy, synced_at = excluded.synced_at`)
+    .bind(acct.act_id, String(c.id), c.name || null, c.objective || null, c.effective_status || c.status || null, cents(c.daily_budget), cents(c.lifetime_budget), c.bid_strategy || null, c.created_time || null));
+  for (const a of sets) stmts.push(env.DB.prepare(`INSERT INTO meta_adsets (act_id, adset_id, campaign_id, name, status, daily_budget, optimization_goal, min_spend, created_time, start_time, end_time, synced_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,datetime('now')) ON CONFLICT(adset_id) DO UPDATE SET campaign_id = excluded.campaign_id, name = excluded.name, status = excluded.status,
+      daily_budget = excluded.daily_budget, optimization_goal = excluded.optimization_goal, min_spend = excluded.min_spend, start_time = excluded.start_time, end_time = excluded.end_time, synced_at = excluded.synced_at`)
+    .bind(acct.act_id, String(a.id), a.campaign_id ? String(a.campaign_id) : null, a.name || null, a.effective_status || a.status || null, cents(a.daily_budget), a.optimization_goal || null, cents(a.daily_min_spend_target), a.created_time || null, a.start_time || null, a.end_time || null));
+  for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50).map(x => x.__raw || x));
+  await putSetting(env, key, new Date().toISOString());
+  return { campaigns: camps.length, adsets: sets.length };
+}
+
+const PURCHASE_TYPES = ['omni_purchase', 'purchase', 'offsite_conversion.fb_pixel_purchase'];
+const ATC_TYPES = ['omni_add_to_cart', 'add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart'];
+/* Leads per ad (2026-10-15): the cost-per-lead goal on Today's calls for lead campaigns. Instant forms and pixel leads. */
+const LEAD_TYPES = ['lead', 'onsite_conversion.lead_grouped', 'offsite_conversion.fb_pixel_lead'];
+function pickAction(list, types) {
+  if (!Array.isArray(list)) return 0;
+  for (const t of types) {
+    const hit = list.find(a => a.action_type === t);
+    if (hit) return +hit.value || 0;
+  }
+  return 0;
+}
+
+function parseInsightRow(r) {
+  return {
+    date: r.date_start,
+    spend: +r.spend || 0,
+    impressions: +r.impressions || 0,
+    reach: +r.reach || 0,
+    clicks: +r.clicks || 0,
+    link_clicks: +r.inline_link_clicks || 0,
+    purchases: pickAction(r.actions, PURCHASE_TYPES),
+    revenue: pickAction(r.action_values, PURCHASE_TYPES),
+    video_views: pickAction(r.actions, ['video_view']),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Accounts                                                           */
+/* ------------------------------------------------------------------ */
+
+/* `me/adaccounts` on a SYSTEM USER token returns only the ad accounts that user
+   has been individually assigned in Business Manager - not everything the
+   business owns. Cole reported accounts missing from the picker; that is why,
+   and it is a Meta permission fact, not a bug here.
+   So we also walk the businesses the token can see and take their owned AND
+   client ad accounts. Every extra call is wrapped: business_management scope may
+   be absent, in which case discovery must degrade to exactly what it did before
+   rather than failing outright. Returns {found, direct, viaBusiness}. */
+/* WHICH BUSINESS PORTFOLIOS CAN THIS TOKEN SEE?
+   `me/businesses` is the obvious call and it returns 0 for a SYSTEM USER, even
+   one holding Admin business access with business_management granted - measured
+   on Cole's live token, 2026-08-30. A system user is OWNED BY a business rather
+   than a member of one, so the /me/businesses edge simply does not apply to it,
+   and no amount of re-ticking permissions changes that. It cost a wrong
+   instruction to him before the diagnostic proved it.
+   So derive it instead: ask an ad account the token ALREADY has who owns it.
+   `GET /act_x?fields=business` names the portfolio, and from that id the owned
+   and client edges list everything the portfolio holds - now and in future.
+   One assigned account is therefore enough to unlock the whole portfolio. */
+async function businessesFor(env, seedAccounts) {
+  const byId = new Map();
+  /* OUR OWN portfolio first, and it has to be configured because nothing can
+     derive it. Measured on Cole's token 2026-08-30: the six businesses derived
+     from his ad accounts are the CLIENTS' portfolios (Lucky Golf, Dartee Golf,
+     …) - every account is owned by the client and merely shared with Mobius
+     Digital, so Mobius Digital never appears among them, and a system user
+     cannot enumerate another business's assets (all twelve edges returned 0).
+     The accounts we want are Mobius Digital's `client_ad_accounts`: the ones
+     shared TO us, which is exactly the set that grows when a new client
+     arrives. Set once in Settings, stored as settings.metaBusinessId. */
+  try {
+    const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'metaBusinessId'`).first();
+    const id = String(safeJson(row?.value, row?.value) || '').trim();
+    if (id) {
+      let name = 'your portfolio';
+      try { name = (await meta(env, id, { fields: 'name' }))?.name || name; } catch { /* id may be wrong; the edges will say so */ }
+      byId.set(id, { id, name });
+    }
+  } catch { /* no id configured yet */ }
+  try {
+    for (const b of await metaAll(env, 'me/businesses', { fields: 'id,name' }, 5)) byId.set(b.id, b);
+  } catch { /* expected to fail or return nothing for a system user token */ }
+  // Ask a handful of known accounts who owns them. Distinct portfolios are few,
+  // so a few probes find them all without a call per account.
+  for (const a of (seedAccounts || []).slice(0, 8)) {
+    try {
+      const r = await meta(env, a.id, { fields: 'business' });
+      if (r?.business?.id && !byId.has(r.business.id)) byId.set(r.business.id, r.business);
+    } catch { /* an account with no business, or no permission to read it */ }
+  }
+  return [...byId.values()];
+}
+
+async function discoverAdAccounts(env) {
+  const FIELDS = 'id,account_id,name,currency,timezone_name,account_status';
+  const byId = new Map();
+  const direct = await metaAll(env, 'me/adaccounts', { fields: FIELDS, limit: 200 });
+  for (const a of direct) byId.set(a.id, a);
+  const before = byId.size;
+
+  const businesses = await businessesFor(env, direct);
+  for (const b of businesses) {
+    for (const edge of ['owned_ad_accounts', 'client_ad_accounts']) {
+      try {
+        for (const a of await metaAll(env, `${b.id}/${edge}`, { fields: FIELDS, limit: 200 }, 5)) {
+          if (!byId.has(a.id)) byId.set(a.id, a);
+        }
+      } catch { /* one edge failing must not lose the other, or the direct list */ }
+    }
+  }
+  return { rows: [...byId.values()], direct: before, viaBusiness: byId.size - before };
+}
+
+/* NEW CLIENT SHARED META (2026-10-03, Cole: "when they share Meta can this be done automatically?").
+   A client made with Locus's New client button has no ad account yet. Each hour, while one is waiting,
+   discovery runs; when exactly ONE untracked ad account's name matches the client ("Ice and Gold New"
+   for Ice & Gold), Locus checks it can actually read it, then switches it on as that brand: name, Slack
+   channels, Triple Whale shop from their form's store address. The hourly sync backfills it (a new
+   account sorts first), and the onboarding tick moves the Asana link and answers onto it. Two or more
+   matches, or none, does nothing: a wrong brand is worse than a late one. Cole is told either way. */
+const COLE_SLACK = 'U06C37MDWD7';
+const NEWBIZ_CH = 'C0BV9L8NV33';   // #mobius-newbiz: questions about clients not yet tied to a channel
+const normBrand = s => String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\b(ad|ads|account|acct|new|inc|llc|co|the|meta|facebook|fb|main|official|\d+)\b/g, ' ').replace(/\s+/g, ' ').trim();
+const myshopify = v => { const m = /([a-z0-9][a-z0-9-]*)\.myshopify\.com/i.exec(String(v || '')); return m ? `${m[1].toLowerCase()}.myshopify.com` : null; };
+async function autoConnectMeta(env) {
+  /* 45 days is plenty for a client to share Meta; after that discovery stops running for them hourly. */
+  /* Waiting = no brand yet, or a brand with no Meta account connected (phase 3: act_id is the brand id). */
+  const runs = (await env.DB.prepare(`SELECT * FROM p_newclient WHERE (act_id IS NULL OR NOT EXISTS (SELECT 1 FROM connections c WHERE c.brand_id = p_newclient.act_id AND c.kind = 'meta'))
+      AND slack_internal IS NOT NULL AND created_at > datetime('now', '-45 days')`).all().catch(() => ({ results: [] }))).results || [];
+  if (!runs.length) return { waiting: 0 };
+  const disc = await discoverAccounts(env).catch(() => null);
+  /* An account we once synced (an old client switched off) is never a NEW client's account. `accounts` is
+     Meta ad accounts only now: untracked = on no brand and never synced. */
+  const untracked = (await env.DB.prepare(`SELECT act_id, name FROM accounts WHERE act_id LIKE 'act_%'
+      AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.kind = 'meta' AND c.external_id = accounts.act_id)
+      AND NOT EXISTS (SELECT 1 FROM daily_insights d WHERE d.act_id = accounts.act_id)`).all()).results || [];
+  const out = { waiting: runs.length, connected: [] };
+  for (const r of runs) {
+    const want = normBrand(r.name);
+    if (want.length < 3) continue;
+    /* An exact name wins; otherwise whole words only ("ice" never matches "office"). */
+    const exact = untracked.filter(a => normBrand(a.name) === want);
+    const hits = exact.length ? exact : untracked.filter(a => { const n = normBrand(a.name); return n.length >= 3 && (` ${n} `.includes(` ${want} `) || ` ${want} `.includes(` ${n} `)); });
+    if (hits.length !== 1) continue;
+    const a = hits[0];
+    const res = await connectMetaFor(env, r, a);
+    if (res.ok) out.connected.push({ client: r.name, act: a.act_id });
+  }
+  /* The name did not give it away (Yak Sports shared "Hockeyak"): any ad account that is new since the
+     last look and matched nobody is put to Cole, once, with a button per waiting client. */
+  const fresh = (disc?.fresh || []).filter(f => !out.connected.some(c => c.act === f.act_id));
+  if (fresh.length) {
+    const still = runs.filter(r => !out.connected.some(c => c.client === r.name));
+    for (const f of fresh) {
+      if (!still.length) break;
+      const text = `<@${COLE_SLACK}> A new ad account showed up in Meta: *${f.name}*. Is it one of these clients'?`;
+      const blocks = [{ type: 'section', text: { type: 'mrkdwn', text } }, { type: 'actions', elements: still.slice(0, 5).map(r => ({ type: 'button', text: { type: 'plain_text', text: `Yes, it is ${r.name}'s` }, action_id: 'nc_meta_yes', value: JSON.stringify({ id: r.id, act: f.act_id }) })) },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: 'Not theirs? Ignore this. You can also connect it later in Locus > Settings > New client > the client.' }] }];
+      await slackPost(env, NEWBIZ_CH, text, blocks, { username: 'Locus' }).catch(() => {});
+    }
+  }
+  return out;
+}
+
+/** Switches an ad account on as a waiting new client, after checking Locus can read it. */
+async function connectMetaFor(env, r, a) {
+  const steps = safeJson(r.steps_json, {});
+  /* One key at a time: r may be an hour old and other writers touch steps_json too. */
+  const save = k => env.DB.prepare(`UPDATE p_newclient SET steps_json = json_set(steps_json, '$.' || ?2, json(?3)), updated_at = datetime('now') WHERE id = ?1`).bind(r.id, k, JSON.stringify(steps[k])).run();
+  try { await meta(env, `${a.act_id}/insights`, { date_preset: 'last_7d', fields: 'spend', limit: 1 }); }
+  catch (e) {
+    if (!steps.meta_blocked || steps.meta_blocked.act !== a.act_id) {
+      await slackPost(env, r.slack_internal, `<@${COLE_SLACK}> *${r.name}* shared the ad account "${a.name}", but Locus cannot read it yet. In Business Settings > Ad accounts > ${a.name} > Assign people, add the *Mobius Tools* system user. Locus switches it on within the hour after that. (Meta said: ${String(e.message).slice(0, 120)})`, null, { username: 'Locus' }).catch(() => {});
+      steps.meta_blocked = { act: a.act_id, at: new Date().toISOString() }; await save('meta_blocked');
+    }
+    return { error: 'Locus cannot read that ad account yet: add the Mobius Tools system user to it in Business Settings.' };
+  }
+  const ans = safeJson((await env.DB.prepare(`SELECT answers_json FROM p_br_onboard WHERE token = ?1`).bind(r.token || '').first().catch(() => null))?.answers_json, {});
+  const shop = myshopify(ans.shopify_url);
+  /* Phase 3: the client's BRAND gets a meta connection (the brand is made now if the client has none yet);
+     the Meta account itself is only sync state in `accounts`. Brand fields go on brands. */
+  let brand = (r.act_id && await brandOf(env, r.act_id).catch(() => null)) || (r.pending_act && await brandOf(env, r.pending_act).catch(() => null)) || null;
+  if (!brand) {
+    const made = await createBrand(env, { name: r.name, internal_channel: r.slack_internal, client_channel: r.slack_client || null })
+      .catch(() => createBrand(env, { name: r.name }));
+    brand = await brandOf(env, made.id);
+  }
+  await addConnection(env, brand.id, { kind: 'meta', external_id: a.act_id, label: a.name, is_primary: 1 });
+  await env.DB.prepare(`UPDATE brands SET status = 'active', name = ?2,
+      internal_channel = COALESCE(NULLIF(internal_channel, ''), ?3), client_channel = COALESCE(NULLIF(client_channel, ''), ?4), updated_at = datetime('now') WHERE id = ?1`)
+    .bind(brand.id, r.name, r.slack_internal, r.slack_client || null).run();
+  if (shop && !(await env.DB.prepare(`SELECT 1 FROM connections WHERE brand_id = ?1 AND kind = 'triple_whale'`).bind(brand.id).first())) await setTripleWhale(env, brand.id, shop).catch(() => {});
+  await env.DB.prepare(`UPDATE p_newclient SET act_id = ?2, updated_at = datetime('now') WHERE id = ?1`).bind(r.id, brand.id).run();
+  steps.meta_connected = { act: a.act_id, account: a.name, at: new Date().toISOString() }; await save('meta_connected');
+  await slackPost(env, r.slack_internal, `<@${COLE_SLACK}> *${r.name} is on Meta.* Locus switched on their ad account "${a.name}": 90 days of history are syncing now, and the daily brief, reports and their Your ads page fill in from it.${shop ? ` Triple Whale is set to ${shop}.` : ' No store address yet, so Triple Whale is not set: Locus sets it when their form has it.'} Still by hand: add the media buyer to the ad account and page in Business Settings. Wrong account? Settings > the brand > Stop tracking.`, null, { username: 'Locus' }).catch(() => {});
+  return { ok: true };
+}
+
+async function discoverAccounts(env) {
+  const { rows, direct, viaBusiness } = await discoverAdAccounts(env);
+  // Which of these we have never seen before. Cheap (one indexed column) and it
+  // is the only way the UI can say "2 new since last night" rather than making
+  // Cole diff a list of twelve by eye.
+  const { results: existing } = await env.DB.prepare(`SELECT act_id FROM accounts`).all();
+  const known = new Set(existing.map(r => r.act_id));
+  const fresh = rows.filter(a => !known.has(a.id));
+  const stmts = rows.map(a => env.DB.prepare(
+    `INSERT INTO accounts (act_id, name, currency, tz, account_status)
+     VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(act_id) DO UPDATE SET currency = excluded.currency, tz = excluded.tz,
+       account_status = excluded.account_status`,
+  ).bind(a.id, a.name || a.id, a.currency || 'USD', a.timezone_name || 'America/Chicago', a.account_status ?? null));
+  if (stmts.length) await env.DB.batch(stmts);
+  const stamp = {
+    at: new Date().toISOString(), found: rows.length, direct, viaBusiness,
+    // Names, not ids - this is read straight into a sentence on screen.
+    fresh: fresh.map(a => ({ act_id: a.id, name: a.name || a.id })),
+  };
+  await env.DB.prepare(
+    `INSERT INTO settings (key, value) VALUES ('lastDiscover', ?1)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(JSON.stringify(stamp)).run();
+  return { found: rows.length, direct, viaBusiness, fresh: stamp.fresh };
+}
+
+/** Meta ad accounts Locus can see that no brand has connected yet ("Add a brand" picks from these). */
+async function metaAvailable(env) {
+  return ((await env.DB.prepare(`SELECT act_id, name, currency, tz, account_status FROM accounts
+     WHERE act_id NOT IN (SELECT external_id FROM connections WHERE kind = 'meta') ORDER BY name`).all()).results) || [];
+}
+
+/* settings.seasonTab (2026-10-09): the seasonal rail item. label max 40 characters; mode auto (shows in
+   season) | on | off. Accepts the stored JSON string or an object; anything missing falls back. */
+function seasonTabOf(v) {
+  const o = typeof v === 'string' ? safeJson(v, {}) : (v && typeof v === 'object' ? v : {});
+  const label = String(o?.label ?? '').replace(/s+/g, ' ').trim().slice(0, 40) || 'Black Friday';
+  return { label, mode: ['auto', 'on', 'off'].includes(o?.mode) ? o.mode : 'auto' };
+}
+async function listAccounts(env, activeOnly = false) {
+  /* Brands (phase 3): act_id = the brand id, meta_act = its primary Meta account (null when none). */
+  const q = `SELECT * FROM brand_accounts ${activeOnly ? 'WHERE active = 1' : ''} ORDER BY active DESC, name`;
+  const { results } = await env.DB.prepare(q).all();
+  return results.map(a => ({ ...a, budgets: safeJson(a.budgets_json, {}), goals: safeJson(a.goals_json, {}) }));
+}
+
+const safeJson = (s, fb) => { try { return s ? JSON.parse(s) : fb; } catch { return fb; } };
+
+/* Phase 3: a brand's Meta numbers are the sum over its Meta accounts (`act_id IN metaOf`), so a
+   per-day query can return one row per Meta account per date. This folds them into one row per
+   date (numbers summed, everything else from the first row), so day counts and per-day maths stay
+   right for a brand with two ad accounts. One account = the rows come back unchanged. */
+/* activities.client_why (2026-11-07, Ads > Updates): the sentence a client reads about a change. Added on first use;
+   a duplicate-column error means it is already there. */
+let CLIENT_WHY_OK = false;
+async function ensureClientWhy(env) {
+  if (CLIENT_WHY_OK) return;
+  await env.DB.prepare(`ALTER TABLE activities ADD COLUMN client_why TEXT`).run().catch(() => {});
+  CLIENT_WHY_OK = true;
+}
+function sumByDate(rows, key = 'date') {
+  const by = new Map();
+  for (const r of rows || []) {
+    const k = r[key];
+    const have = by.get(k);
+    if (!have) { by.set(k, { ...r }); continue; }
+    for (const [f, v] of Object.entries(r)) if (f !== key && typeof v === 'number') have[f] = (typeof have[f] === 'number' ? have[f] : 0) + v;
+  }
+  return [...by.values()];
+}
+
+/** One brand's Meta ad accounts with their sync state, shaped like metaSyncRows (act_id = the META id,
+ *  brand_id, the brand's name / tz / currency) but for one brand whatever its status. Backups are left
+ *  out, like metaSyncRows (a backup account holds no spend; mark it primary if it ever starts):
+ *  for a sync asked for by hand. Local helper; brands.js has only the all-brands metaSyncRows. */
+async function brandMetaRows(env, brandId) {
+  return ((await env.DB.prepare(`SELECT m.*, b.id AS brand_id, b.name AS name, b.tz AS tz, b.currency AS currency
+      FROM connections c JOIN brands b ON b.id = c.brand_id JOIN accounts m ON m.act_id = c.external_id
+     WHERE c.kind = 'meta' AND c.brand_id = ?1 AND COALESCE(json_extract(c.config_json, '$.role'), '') <> 'backup'
+     ORDER BY c.is_primary DESC, c.added_at`).bind(brandId).all()).results) || [];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sync: daily insights                                               */
+/* ------------------------------------------------------------------ */
+
+async function syncInsights(env, acct, days) {
+  const today = localDate(acct.tz);
+  const since = addDays(today, -days);
+  /* TWO REQUESTS, MERGED BY DAY (2026-10-21). From about Oct 18 Meta answers spend 0 and impressions 0 at the
+     ACCOUNT level whenever the same request also asks for inline_link_clicks, actions or action_values
+     (measured on Bonk: $541 / $515 / $442 a day read back as $0; clicks and purchases still came through).
+     Every brief, the Day check and spendFor read this table, so Bonk's dailies showed no Meta spend. Delivery
+     and conversions are now separate calls; neither can blank the other. Ad-level pulls are not affected. */
+  const base = { level: 'account', time_increment: 1, time_range: { since, until: today }, limit: 100 };
+  const [money, acts] = await Promise.all([
+    metaAll(env, `${acct.act_id}/insights`, { ...base, fields: 'spend,impressions,reach,clicks' }),
+    metaAll(env, `${acct.act_id}/insights`, { ...base, fields: 'inline_link_clicks,actions,action_values' }),
+  ]);
+  const byDay = new Map(money.map(r => [r.date_start, { ...r }]));
+  for (const r of acts) byDay.set(r.date_start, { ...(byDay.get(r.date_start) || { date_start: r.date_start }),
+    inline_link_clicks: r.inline_link_clicks, actions: r.actions, action_values: r.action_values });
+  const rows = [...byDay.values()];
+  const stmts = rows.map(parseInsightRow).map(r => env.DB.prepare(
+    `INSERT INTO daily_insights (act_id, date, spend, impressions, reach, clicks, link_clicks, purchases, revenue, video_views, synced_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+     ON CONFLICT(act_id, date) DO UPDATE SET spend = excluded.spend, impressions = excluded.impressions,
+       reach = excluded.reach, clicks = excluded.clicks, link_clicks = excluded.link_clicks,
+       purchases = excluded.purchases, revenue = excluded.revenue, video_views = excluded.video_views,
+       synced_at = excluded.synced_at`,
+  ).bind(acct.act_id, r.date, r.spend, r.impressions, r.reach, r.clicks, r.link_clicks, r.purchases, r.revenue, r.video_views));
+  if (stmts.length) await env.DB.batch(stmts);
+  await env.DB.prepare(`UPDATE accounts SET last_sync_insights = datetime('now'), last_error = NULL WHERE act_id = ?1`).bind(acct.act_id).run();
+  return rows.length;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sync: activity log                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Auto-classification. Order matters: first match wins. */
+const CATEGORIES = [
+  ['ad_relaunched', /update_ad_run_status/, ev => statusTo(ev) === 'ACTIVE'],
+  ['ad_paused', /update_ad_run_status/, ev => statusTo(ev) === 'PAUSED'],
+  ['campaign_paused', /update_(campaign|ad_set)_run_status/, ev => statusTo(ev) === 'PAUSED'],
+  ['campaign_relaunched', /update_(campaign|ad_set)_run_status/, ev => statusTo(ev) === 'ACTIVE'],
+  ['new_creative', /^create_ad$|create_ad_creative|update_ad_creative/],
+  ['new_adset', /^create_ad_set$/],
+  ['new_campaign', /^create_campaign/],
+  ['budget', /budget|spend_cap|spend_limit/],
+  ['bid_strategy', /bid|roas_floor|cost_cap/],
+  ['targeting', /target|audience|placement|geo/],
+  ['optimisation', /optimization|optimisation|attribution|conversion|pixel|event|learning/],
+  ['schedule', /schedule|duration|start_time|end_time/],
+  ['name', /name|friendly/],
+  ['review', /review|policy|disapprov|reject/],
+  ['billing', /funding|billing|payment|invoice/],
+];
+
+function statusTo(ev) {
+  const x = safeJson(ev.extra_data, {});
+  const v = String(x.new_value ?? x.new_status ?? '').toUpperCase();
+  if (/PAUS|OFF|DISABLE/.test(v)) return 'PAUSED';
+  if (/ACTIVE|ON|ENABLE/.test(v)) return 'ACTIVE';
+  const t = (ev.translated_event_type || '').toLowerCase();
+  if (/paus|turned off|deactivat/.test(t)) return 'PAUSED';
+  if (/activ|turned on|resum|relaunch/.test(t)) return 'ACTIVE';
+  return null;
+}
+
+function classify(ev) {
+  const type = (ev.event_type || '').toLowerCase();
+  for (const [cat, re, test] of CATEGORIES) {
+    if (re.test(type) && (!test || test(ev))) return cat;
+  }
+  return 'other';
+}
+
+const money = (n, cur) => {
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: cur || 'USD' }).format(n); }
+  catch { return `${cur} ${n.toFixed(2)}`; }
+};
+
+/** Budget extra_data comes in two shapes: flat {old_value, new_value} in cents, or
+ *  "composite_data" where each side is {type:'payment_amount', currency, old_value|new_value,
+ *  additional_value:'Per day'|...}. Normalize both to {oldCents, newCents, cur, perStr}. */
+function budgetValues(x, ev) {
+  let oldV = x.old_value, newV = x.new_value;
+  let cur = x.currency, perStr = `${x.type || ''} ${ev.event_type || ''}`;
+  if (oldV && typeof oldV === 'object') { cur = oldV.currency || cur; perStr += ` ${oldV.additional_value || ''}`; oldV = oldV.old_value ?? oldV.new_value; }
+  if (newV && typeof newV === 'object') { cur = newV.currency || cur; perStr += ` ${newV.additional_value || ''}`; newV = newV.new_value ?? newV.old_value; }
+  if (oldV == null || newV == null || !isFinite(+oldV) || !isFinite(+newV)) return null;
+  return { oldCents: +oldV, newCents: +newV, cur, perStr };
+}
+
+/** One readable line per event: "Budget: $210.00/day → $300.00/day" etc. */
+function summarise(ev, category, currency) {
+  const x = safeJson(ev.extra_data, {});
+  const obj = ev.object_name ? ` "${ev.object_name}"` : '';
+  const kind = (ev.object_type || '').toLowerCase().replace('adset', 'ad set').replace('adgroup', 'ad');
+  if (category === 'budget') {
+    const b = budgetValues(x, ev);
+    if (b) {
+      const per = /lifetime/i.test(b.perStr) ? '/lifetime' : '/day';
+      const cur = b.cur || currency;
+      return `Budget: ${money(b.oldCents / 100, cur)}${per} → ${money(b.newCents / 100, cur)}${per}${obj}`;
+    }
+  }
+  if (category === 'ad_paused') return `Paused ad${obj}`;
+  if (category === 'ad_relaunched') return `Relaunched ad${obj}`;
+  if (category === 'campaign_paused') return `Paused ${kind || 'campaign'}${obj}`;
+  if (category === 'campaign_relaunched') return `Relaunched ${kind || 'campaign'}${obj}`;
+  if (category === 'new_creative') return `New ad${obj}`;
+  if (category === 'new_adset') return `New ad set${obj}`;
+  if (category === 'new_campaign') return `New campaign${obj}`;
+  // Only print old → new when both are short scalars - Meta stuffs whole JSON blobs in here for audience/targeting events.
+  const printable = v => v != null && typeof v !== 'object' && String(v).length <= 60 && !/^[[{]/.test(String(v).trim());
+  if (printable(x.old_value) && printable(x.new_value)) {
+    return `${ev.translated_event_type || ev.event_type}: ${x.old_value} → ${x.new_value}${obj}`;
+  }
+  return `${ev.translated_event_type || ev.event_type}${obj}`;
+}
+
+/** 'good' | 'bad' | null - how the account was trending going into `day` (3d vs 30d). */
+function perfSignal(insights, day) {
+  const win = n => insights.filter(r => r.date < day && r.date >= addDays(day, -n));
+  const stat = rows => {
+    const s = rows.reduce((a, r) => ({ spend: a.spend + r.spend, pur: a.pur + r.purchases, rev: a.rev + r.revenue }), { spend: 0, pur: 0, rev: 0 });
+    return { roas: s.spend ? s.rev / s.spend : null, cpa: s.pur ? s.spend / s.pur : null };
+  };
+  const a = stat(win(3)), b = stat(win(30));
+  if (a.roas == null || b.roas == null) return null;
+  const good = a.roas >= b.roas * 1.05 || (a.cpa != null && b.cpa != null && a.cpa <= b.cpa * 0.95);
+  const bad = a.roas <= b.roas * 0.95 || (a.cpa != null && b.cpa != null && a.cpa >= b.cpa * 1.05);
+  return good && !bad ? 'good' : bad && !good ? 'bad' : null;
+}
+
+/** Auto-suggested "why" - only where the data direction makes it defensible. */
+function suggestReason(cat, ev, insights) {
+  const day = String(ev.event_time || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  if (cat === 'budget') {
+    const b = budgetValues(safeJson(ev.extra_data, {}), ev);
+    if (!b || b.newCents === b.oldCents) return null;
+    const sig = perfSignal(insights, day);
+    if (b.newCents > b.oldCents && sig === 'good') return 'Positive performance';
+    if (b.newCents < b.oldCents && sig === 'bad') return 'Negative performance';
+    return null;
+  }
+  if (cat === 'ad_paused' || cat === 'campaign_paused') {
+    return perfSignal(insights, day) === 'bad' ? 'Negative performance' : null;
+  }
+  return null;
+}
+
+async function syncActivities(env, acct, sinceISO) {
+  const since = Math.floor(new Date(sinceISO).getTime() / 1000);
+  const until = Math.floor(Date.now() / 1000);
+  /* "Please reduce the amount of data" is a RESPONSE-SIZE refusal (big extra_data after a bulk edit, e.g. Lucky's
+     137-ad tracking-tag pass on 2026-10-20). It stopped the whole brand sync before the ad rows. Smaller pages, same data. */
+  let rows;
+  for (const limit of [500, 100, 25]) {
+    try {
+      rows = await metaAll(env, `${acct.act_id}/activities`, {
+        fields: 'event_time,event_type,translated_event_type,actor_name,object_type,object_id,object_name,extra_data',
+        since, until, limit,
+      }, limit === 500 ? 40 : limit === 100 ? 120 : 300);
+      break;
+    } catch (e) { if (limit === 25 || !/reduce the amount of data|unknown error/i.test(e.message)) throw e; }
+  }
+  const { results: insights } = await env.DB.prepare(
+    `SELECT date, spend, purchases, revenue FROM daily_insights WHERE act_id = ?1 ORDER BY date`,
+  ).bind(acct.act_id).all();
+  const stmts = rows.map(ev => {
+    const cat = classify(ev);
+    const id = ev.id || `${acct.act_id}:${ev.event_time}:${ev.event_type}:${ev.object_id || ''}`;
+    return env.DB.prepare(
+      `INSERT OR IGNORE INTO activities (id, act_id, event_time, event_type, translated, actor, object_type, object_id, object_name, extra_json, category, summary, confirmed, suggested_reason)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+    ).bind(id, acct.act_id, ev.event_time, ev.event_type || null, ev.translated_event_type || null,
+      ev.actor_name || null, ev.object_type || null, ev.object_id || null, ev.object_name || null,
+      typeof ev.extra_data === 'string' ? ev.extra_data : JSON.stringify(ev.extra_data ?? null),
+      cat, summarise(ev, cat, acct.currency),
+      (cat === 'name' || /^asa_auto/.test(ev.object_name || '')) ? -1 : 0,   // renames + Meta's auto-generated ASC audiences are noise; ✓/✗ can override
+      suggestReason(cat, ev, insights));
+  });
+  for (let i = 0; i < stmts.length; i += D1_CHUNK) await env.DB.batch(stmts.slice(i, i + D1_CHUNK));
+  await env.DB.prepare(`UPDATE accounts SET last_sync_activities = datetime('now') WHERE act_id = ?1`).bind(acct.act_id).run();
+  return rows.length;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sync: ad-level daily (Chat 3 - creative rotation)                  */
+/* ------------------------------------------------------------------ */
+
+const ymdDiff = (a, b) => Math.round((new Date(a + 'T12:00:00Z') - new Date(b + 'T12:00:00Z')) / 86400e3);
+
+/** One 14-day slice of level=ad insights. Small on purpose - Meta rejects huge ad-level
+ *  pulls, and slices keep each invocation well under Workers subrequest limits. */
+async function syncAdSlice(env, acct, since, until) {
+  /* Two requests merged by ad and day, for the same Meta bug as syncInsights (2026-10-21): asking for action
+     fields in the same request as spend makes Meta answer spend and impressions as 0. */
+  const base = { level: 'ad', time_increment: 1, time_range: { since, until }, limit: 500 };
+  const [money, acts] = await Promise.all([
+    metaAll(env, `${acct.act_id}/insights`, { ...base, fields: 'ad_id,ad_name,adset_id,campaign_id,spend,impressions,reach,clicks' }, 25),
+    // NO `video_3_sec_watched_actions` - Meta REMOVED it, and asking for it
+    // fails the WHOLE request with "(#100) not valid for fields param", which
+    // silently broke every brand's ad sync for two nights in August 2026. The
+    // 3-second view now lives in `actions` as action_type `video_view`.
+    metaAll(env, `${acct.act_id}/insights`, { ...base, fields: 'ad_id,inline_link_clicks,outbound_clicks,'
+      + 'actions,action_values,video_play_actions,video_thruplay_watched_actions,'
+      + 'video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,'
+      + 'video_avg_time_watched_actions' }, 25),
+  ]);
+  const key = r => `${r.ad_id}|${r.date_start}`;
+  const merged = new Map(money.map(r => [key(r), { ...r }]));
+  for (const r of acts) { const k = key(r); merged.set(k, { ...(merged.get(k) || {}), ...r, ...(merged.has(k) ? { spend: merged.get(k).spend, impressions: merged.get(k).impressions, reach: merged.get(k).reach, clicks: merged.get(k).clicks } : { spend: 0, impressions: 0, reach: 0, clicks: 0 }) }); }
+  const rows = [...merged.values()];
+  // Video metrics arrive as action arrays with a single video_view entry; sum
+  // defensively in case Meta ever splits them by attribution window.
+  const sumActs = a => Array.isArray(a) ? a.reduce((s, x) => s + (+x.value || 0), 0) : 0;
+  const daily = rows.filter(r => r.ad_id).map(r => [acct.act_id, r.ad_id, r.date_start, +r.spend || 0, +r.impressions || 0,
+    pickAction(r.actions, PURCHASE_TYPES), pickAction(r.action_values, PURCHASE_TYPES),
+    +r.inline_link_clicks || 0, pickAction(r.actions, ['video_view']),
+    sumActs(r.video_thruplay_watched_actions), sumActs(r.video_p100_watched_actions),
+    +r.reach || 0, +r.clicks || 0, sumActs(r.outbound_clicks),
+    sumActs(r.video_p25_watched_actions), sumActs(r.video_p50_watched_actions), sumActs(r.video_p75_watched_actions),
+    // avg watch time is SECONDS per impression-ish, not a count - never summed.
+    sumActs(r.video_avg_time_watched_actions), sumActs(r.video_play_actions), pickAction(r.actions, ATC_TYPES), pickAction(r.actions, LEAD_TYPES)]);
+  const COLS = 21;
+  const per = Math.floor(100 / COLS);                  // D1 caps a statement at 100 bound params
+  const stmts = [];
+  for (let i = 0; i < daily.length; i += per) {
+    const chunk = daily.slice(i, i + per);
+    stmts.push(env.DB.prepare(
+      `INSERT INTO ad_daily (act_id, ad_id, date, spend, impressions, purchases, revenue, link_clicks, video_3s,
+         video_thruplay, video_p100, reach, clicks_all, outbound_clicks, video_p25, video_p50, video_p75, video_avg_watch, video_plays, add_to_cart, leads) VALUES ` +
+      chunk.map(() => `(${Array(COLS).fill('?').join(',')})`).join(',') +
+      ` ON CONFLICT(act_id, ad_id, date) DO UPDATE SET spend = excluded.spend, impressions = excluded.impressions,
+        purchases = excluded.purchases, revenue = excluded.revenue, link_clicks = excluded.link_clicks,
+        video_3s = excluded.video_3s, video_thruplay = excluded.video_thruplay, video_p100 = excluded.video_p100,
+        reach = excluded.reach, clicks_all = excluded.clicks_all, outbound_clicks = excluded.outbound_clicks,
+        video_p25 = excluded.video_p25, video_p50 = excluded.video_p50, video_p75 = excluded.video_p75,
+        video_avg_watch = excluded.video_avg_watch, video_plays = excluded.video_plays, add_to_cart = excluded.add_to_cart, leads = excluded.leads`,
+    ).bind(...chunk.flat()));
+  }
+  const ads = new Map();
+  for (const r of rows) if (r.ad_id && r.ad_name && !ads.has(r.ad_id)) ads.set(r.ad_id, [acct.act_id, r.ad_id, r.ad_name, r.adset_id || null, r.campaign_id || null]);
+  const adRows = [...ads.values()];
+  for (let i = 0; i < adRows.length; i += 20) {
+    const chunk = adRows.slice(i, i + 20);
+    stmts.push(env.DB.prepare(
+      `INSERT INTO ads (act_id, ad_id, name, adset_id, campaign_id) VALUES ` +
+      chunk.map(() => '(?,?,?,?,?)').join(',') +
+      ` ON CONFLICT(act_id, ad_id) DO UPDATE SET name = excluded.name, adset_id = excluded.adset_id, campaign_id = excluded.campaign_id`,
+    ).bind(...chunk.flat()));
+  }
+  for (let i = 0; i < stmts.length; i += D1_CHUNK) await env.DB.batch(stmts.slice(i, i + D1_CHUNK));
+  return rows.length;
+}
+
+async function updFirstSpend(env, actId) {
+  await env.DB.prepare(
+    `UPDATE ads SET first_spend_date = (SELECT MIN(d.date) FROM ad_daily d
+       WHERE d.act_id = ads.act_id AND d.ad_id = ads.ad_id AND d.spend > 0) WHERE act_id = ?1`,
+  ).bind(actId).run();
+}
+
+/** True creation dates from Meta - without them, ads older than our 90-day history
+ *  would all look "brand new" at the start of the window. */
+async function syncAdMeta(env, acct) {
+  const rows = await metaAll(env, `${acct.act_id}/ads`, { fields: 'id,created_time', limit: 500 }, 10);
+  const vals = rows.filter(r => r.id && r.created_time).map(r => [acct.act_id, r.id, r.created_time]);
+  const stmts = [];
+  for (let i = 0; i < vals.length; i += 30) {
+    const chunk = vals.slice(i, i + 30);
+    stmts.push(env.DB.prepare(
+      `INSERT INTO ads (act_id, ad_id, created_time) VALUES ` + chunk.map(() => '(?,?,?)').join(',') +
+      ` ON CONFLICT(act_id, ad_id) DO UPDATE SET created_time = excluded.created_time`,
+    ).bind(...chunk.flat()));
+  }
+  for (let i = 0; i < stmts.length; i += D1_CHUNK) await env.DB.batch(stmts.slice(i, i + D1_CHUNK));
+  return vals.length;
+}
+
+/** Resumable ad-level sync. Backfill walks backwards 14 days at a time until 90 days are
+ *  in; once done, each call is a cheap 3-day resync. Errors land in accounts.last_error. */
+async function syncAdDaily(env, acct, { maxSlices = 2 } = {}) {
+  const today = localDate(acct.tz);
+  try {
+    if (acct.ads_backfill_done) {
+      let n = await syncAdSlice(env, acct, addDays(today, -RESYNC_DAYS), today);
+      // Metric re-backfill. Every time ad_daily gains columns, the rows already
+      // stored hold zeros for them, so the window has to be walked again in the
+      // same resumable 14-day slices - the upsert fills the new columns without
+      // touching anything a report already froze.
+      //
+      // Keyed on a VERSION rather than a per-feature boolean: the first round of
+      // this (hook/hold, 2026-08-29) used `ads_video_done`, and adding a second
+      // batch of columns a day later would have needed a second flag, then a
+      // third. Bump ADS_METRICS_VERSION when columns are added and every account
+      // re-backfills itself once.
+      if ((acct.ads_metrics_version || 0) < ADS_METRICS_VERSION) {
+        const target = addDays(today, -BACKFILL_DAYS);
+        let cursor = acct.ads_metrics_cursor || addDays(today, -RESYNC_DAYS);   // the resync above just covered the recent days
+        let slices = maxSlices;
+        while (slices-- > 0 && cursor > target) {
+          const since = addDays(cursor, -14) < target ? target : addDays(cursor, -14);
+          n += await syncAdSlice(env, acct, since, cursor);
+          cursor = since;
+        }
+        const done = cursor <= target;
+        await env.DB.prepare(
+          `UPDATE accounts SET ads_metrics_cursor = ?2, ads_metrics_version = ?3 WHERE act_id = ?1`,
+        ).bind(acct.act_id, done ? null : cursor, done ? ADS_METRICS_VERSION : (acct.ads_metrics_version || 0)).run();
+      }
+      await updFirstSpend(env, acct.act_id);
+      await syncAdMeta(env, acct);
+      return { rows: n, done: true };
+    }
+    const target = addDays(today, -BACKFILL_DAYS);
+    let cursor = (await env.DB.prepare(`SELECT MIN(date) AS d FROM ad_daily WHERE act_id = ?1`).bind(acct.act_id).first())?.d || today;
+    let total = 0, slices = maxSlices;
+    while (slices-- > 0 && cursor > target) {
+      const since = addDays(cursor, -14) < target ? target : addDays(cursor, -14);
+      total += await syncAdSlice(env, acct, since, cursor);
+      cursor = since;
+    }
+    const done = cursor <= target;
+    // A fresh backfill pulls the video columns from day one, so it settles both flags.
+    if (done) await env.DB.prepare(`UPDATE accounts SET ads_backfill_done = 1, ads_metrics_version = ?2 WHERE act_id = ?1`).bind(acct.act_id, ADS_METRICS_VERSION).run();
+    await updFirstSpend(env, acct.act_id);
+    await syncAdMeta(env, acct);
+    return { rows: total, done, daysDone: Math.min(BACKFILL_DAYS, Math.max(0, ymdDiff(today, cursor))), daysTotal: BACKFILL_DAYS };
+  } catch (e) {
+    await env.DB.prepare(`UPDATE accounts SET last_error = ?2 WHERE act_id = ?1`).bind(acct.act_id, `ad sync: ${e.message}`).run().catch(() => {});
+    /* A RATE LIMIT IS A DELAY, NOT A FAULT. Meta's app quota refused Dartee's
+       ad-level pull on 2026-09-02, 09-06 and 09-12, and each time the brand
+       simply waited 24 hours for the next nightly while Slack said "failing".
+       Now the brand is queued and the hourly tick retries it once the backoff
+       clears; the alert only fires if the retries are still refused 12 hours
+       later (see adRetryPass). Every other error still alerts at once. */
+    if (await noteMetaError(env, e).catch(() => false)) {
+      await queueAdRetry(env, acct.act_id).catch(() => {});
+      return { deferred: 'Meta rate limit - retrying on the hourly tick', error_detail: e.message };
+    }
+    await alertSyncFailure(env, acct, e.message).catch(() => {});
+    return { error: e.message };
+  }
+}
+
+/* The ad-level retry queue: { act_id: firstRefusedAtMs }. */
+async function queueAdRetry(env, actId) {
+  const q = safeJson(await getSetting(env, 'adRetry'), {}) || {};
+  if (!q[actId]) q[actId] = Date.now();
+  await putSetting(env, 'adRetry', JSON.stringify(q));
+}
+
+async function adRetryPass(env) {
+  const q = safeJson(await getSetting(env, 'adRetry'), {}) || {};
+  const ids = Object.keys(q);
+  if (!ids.length) return undefined;
+  if (await metaBackedOff(env)) return { waiting: ids.length, deferred: 'Meta rate limit - backing off' };
+  /* Keyed by the META account id: the queue is Meta's, so it walks the Meta sync rows. */
+  const accounts = (await metaSyncRows(env)).filter(a => q[a.act_id]);
+  const out = [];
+  for (const a of accounts) {
+    if (!subCanAfford(costOf('ads', COST_SYNC_BRAND))) { out.push({ name: a.name, deferred: 'out of budget' }); break; }
+    const r = await measured('ads', () => syncAdDaily(env, a, { maxSlices: 8 }));
+    const cur = safeJson(await getSetting(env, 'adRetry'), {}) || {};
+    if (!r.error && !r.deferred) {
+      delete cur[a.act_id];
+      await putSetting(env, 'adRetry', JSON.stringify(cur)).catch(() => {});
+      out.push({ name: a.name, recovered: true });
+    } else {
+      if (r.deferred && Date.now() - (cur[a.act_id] || Date.now()) > 12 * 3600e3) {
+        await alertSyncFailure(env, a, `${r.error_detail || 'Application request limit reached'} (still refused after 12 hours of hourly retries)`).catch(() => {});
+      }
+      out.push({ name: a.name, ...r });
+      if (r.deferred) break;   // Meta said stop; the rest wait for the next tick
+    }
+  }
+  // Brands no longer active drop out of the queue.
+  const live = new Set(accounts.map(a => a.act_id));
+  const cur = safeJson(await getSetting(env, 'adRetry'), {}) || {};
+  for (const id of Object.keys(cur)) if (!live.has(id)) delete cur[id];
+  await putSetting(env, 'adRetry', JSON.stringify(cur)).catch(() => {});
+  return out;
+}
+
+/** Full sync for one account. `days` overrides the insights window. */
+/* `includeAds` exists because the two halves of this function have completely
+   different appetites for Meta's rate limit.
+ *
+ * Account-level insights and the activity log are a couple of cheap calls and
+ * are what everything time-critical reads - the delivery check, the brief, every
+ * dashboard number. Ad-level is a 14-day-sliced walk, up to 8 slices a brand,
+ * and it feeds creative cards and the report ad table: useful, never urgent.
+ *
+ * When per-brand syncing moved from the nightly onto the hourly tick
+ * (2026-09-01) the ad-level walk came with it, and six brands x 8 slices went
+ * from ~48 Meta calls a day to over a thousand. Meta answered with "Application
+ * request limit reached", which is how Cole found out. The staleness fix needed
+ * the cheap half hourly; it never needed the expensive half. So the hourly tick
+ * takes insights and activities, and ad-level stays on the nightly where it
+ * always belonged. */
+async function syncAccount(env, acct, days, { includeAds = true } = {}) {
+  const out = { act_id: acct.act_id, name: acct.name };
+  try {
+    const insightDays = days ?? (acct.last_sync_insights ? RESYNC_DAYS : BACKFILL_DAYS);
+    out.insights = await syncInsights(env, acct, insightDays);
+    const since = acct.last_sync_activities
+      ? new Date(new Date(acct.last_sync_activities).getTime() - 6 * 3600e3).toISOString()  // 6h overlap
+      : new Date(Date.now() - ACTIVITY_BACKFILL_DAYS * 86400e3).toISOString();
+    out.activities = await syncActivities(env, acct, since);
+    out.structure = await syncMetaStructure(env, acct).catch(e => ({ error: e.message }));
+    if (includeAds) out.ad = await syncAdDaily(env, acct, { maxSlices: 8 });
+  } catch (e) {
+    out.error = e.message;
+    // A rate limit is not this brand's fault and not this brand's problem alone.
+    if (await noteMetaError(env, e)) out.backoff = true;
+    await env.DB.prepare(`UPDATE accounts SET last_error = ?2 WHERE act_id = ?1`).bind(acct.act_id, e.message).run();
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Summarise (Chat 1) - Claude writes the daily/weekly update         */
+/* ------------------------------------------------------------------ */
+
+const ANTHROPIC_MODEL = 'claude-opus-5';
+
+/* The system prompt is the part that repeats (the same brief/report prompt
+ * for every brand in a cron run, the same skill model file for every file in a
+ * build), so it is marked for caching. Under the model's minimum it just
+ * does not cache; no error. An array system is passed through as given. */
+const cachedSystem = s => typeof s === 'string' && s ? [{ type: 'text', text: s, cache_control: { type: 'ephemeral' } }] : s;
+
+async function claude(env, { system, user, maxTokens = 4000, model = ANTHROPIC_MODEL }) {
+  if (!env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY secret is not set - run `npx wrangler secret put ANTHROPIC_API_KEY` in account-health/worker/');
+  }
+  const res = await xfetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      system: cachedSystem(system),
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error?.message || `Claude API HTTP ${res.status}`);
+  if (body.stop_reason === 'refusal') throw new Error('Claude declined to write this summary');
+  return body.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+}
+
+/* ---------- The read (Locus hub, 2026-10-07) ----------
+ * Three lines at the top of a screen: what is happening, where it is leaking, what to
+ * do today. Then up to three leaks (a number and a cause) and one focus. The screen
+ * posts the FACTS it is drawing, so the read can only cite what is on the page. Cached
+ * an hour per exact set of facts in `settings` (`read:<hash>`); a new hour or a changed
+ * number makes a new read. Sonnet tier: about a cent. Never on a cron. */
+const READ_MODEL = 'claude-sonnet-5-5';
+const READ_TTL_MS = 60 * 60 * 1000;
+const fnv = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h.toString(16); };
+const READ_SYSTEM = `You are the Strategist at Mobius Digital reading one screen of Locus for the team (owner, media buyer, strategist). You get the exact numbers on that screen as JSON. Write:
+- "lines": exactly three short sentences in plain English. 1: what is happening (the one thing the numbers say). 2: where it is leaking or lagging, with the number. 3: what to do today, concrete.
+- "leaks": up to three, each {"what": a number and a cause in one short sentence, "where": the brand or channel}. Only leaks the numbers show. Empty list if nothing leaks.
+- "focus": one short sentence, the single most useful thing to do today.
+Rules: cite ONLY numbers in the JSON (rounded is fine; say "about"). Never invent a cause the numbers do not show; say "the numbers do not say why" when so. Compare against the compare period or the plan when they are in the JSON, else against nothing. Attribution is Triple Whale's. No jargon, no exclamation marks, no em dashes, no headers. Money in the brand's currency as given. Return ONLY a JSON object {lines, leaks, focus}.`;
+/* THE COMMAND CENTER READ (2026-10-09): Locus Home for All clients (profit/command.js) posts every brand's numbers
+ * and its attention reasons; the read says what to look at first ACROSS brands and connects the signals on one brand
+ * into a likely cause. Same route, cache and model as the screen read; `order` is the extra field. */
+const COMMAND_SYSTEM = `You are the Strategist at Mobius Digital reading the agency command center in Locus: every client brand with its numbers for the period on screen and the reasons it may need attention (results against goal and for how many days, days since a new Meta ad launched, creative fatigue signs, overdue or stuck Asana tasks, setup gaps, bad days on the Day check, alerts that fired). Decide what the team should focus on first across ALL brands. Write JSON:
+- "order": up to 4 items, most urgent first, each {"brand": the brand name exactly as in the JSON, "why": one sentence that connects that brand's signals into a likely cause, citing the numbers (for example "CPA has been over goal 8 days, no new ad in 12 days and CTR is down 18%: likely creative fatigue"), "do": one short concrete action for today}.
+- "lines": exactly two short sentences: how the agency looks overall, and what can wait.
+- "leaks": an empty list.
+- "focus": one sentence, the single first thing to do today.
+Rules: connect signals only on the same brand and only when the numbers support it; say "likely" for a cause, never certain; money off goal and many days off goal outrank a setup gap; a setup gap or an overdue task alone is low unless it blocks results; never list a paused brand; cite ONLY numbers in the JSON (rounded is fine). Plain English, no jargon, no exclamation marks, no em dashes, no headers. Return ONLY the JSON object {order, lines, leaks, focus}.`;
+/* THE DAY CHECK VERDICT (2026-10-09, Cole: "combine all that into a comprehensive analysis: was it bad, is it
+ * across the board, why, and is there anything we can do or is it just waiting"). Locus posts the facts on the Day
+ * check screen (each brand against its own normal, our brands moving together, Breezeway's outside panel, Pulse
+ * outages, what advertisers said online) and gets one verdict. Cached per date and facts; Sonnet tier, about a cent.
+ * `client_line` is safe to repeat to a client: it talks about the platform, never about other brands or how many. */
+const DAYCHECK_SYSTEM = `You write the Day check for Mobius Digital: was yesterday a bad day ON META, for advertisers in general.
+You get JSON: the day's verdict (normal, mixed, bad, very bad) from four independent signs (our brands paying more per sale than usual, other advertisers' panel, Meta posting a problem on its status page, advertisers reporting problems online), which signs agreed, the last 14 days of verdicts, and how each of our brands' Meta cost per sale compared with its own normal.
+Reply with JSON only:
+{"headline": one short sentence, e.g. "A bad day on Meta: costs jumped for advertisers across the board." or "A normal day on Meta." or "Mixed signals: other advertisers struggled, our accounts did not.",
+ "scope": "market" (a bad day on Meta) | "some" (mixed) | "none" (normal),
+ "why": one or two sentences: which signs agree and what moved (costs, clicks, delivery),
+ "todo": one sentence: what to do today (hold changes and wait it out, or carry on as normal, or look at a named brand that moved on its own),
+ "client_line": one sentence safe to tell a client about Meta that day; never mention other brands, how many we manage, or Breezeway}
+Rules: cite only the facts given; when signs disagree say so; plain words, no em dashes.`;
+async function dayCheckVerdict(env, b) {
+  const date = String(b.date || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'date looks like 2026-10-08' };
+  const facts = b.facts && typeof b.facts === 'object' ? b.facts : {};
+  const key = `daycheck:${date}:${fnv(JSON.stringify(facts))}`;
+  const cached = safeJson(await getSetting(env, key).catch(() => null), null);
+  if (cached && cached.headline) return { ...cached, cached: true };
+  let text;
+  try { text = await claude(env, { system: DAYCHECK_SYSTEM, user: `DAY: ${date}
+
+FACTS:
+${JSON.stringify(facts).slice(0, 20000)}`, maxTokens: 2000, model: READ_MODEL }); }
+  catch (e) { return { error: 'The verdict could not run: ' + e.message }; }
+  const m = String(text || '').match(/\{[\s\S]*\}/);
+  let out; try { out = JSON.parse(m ? m[0] : '{}'); } catch { return { error: 'The verdict did not come back clean.' }; }
+  const clean = s => String(s || '').replace(/—|–/g, ',').trim().slice(0, 400);
+  const res = { date, headline: clean(out.headline), scope: ['market', 'some', 'none'].includes(out.scope) ? out.scope : 'none', why: clean(out.why), todo: clean(out.todo), client_line: clean(out.client_line), at: new Date().toISOString() };
+  if (!res.headline) return { error: 'The verdict came back empty.' };
+  await putSetting(env, key, JSON.stringify(res)).catch(() => {});
+  return res;
+}
+async function screenRead(env, b) {
+  const screen = String(b.screen || 'overview').slice(0, 40);
+  const facts = b.facts && typeof b.facts === 'object' ? b.facts : {};
+  const scope = String(b.scope || 'all').slice(0, 80);
+  const key = `read:${fnv(JSON.stringify({ screen, scope, facts }))}`;
+  const cached = safeJson(await getSetting(env, key).catch(() => null), null);
+  if (cached && cached.at && Date.now() - Date.parse(cached.at) < READ_TTL_MS) return { ...cached, cached: true };
+  const user = `SCREEN: ${screen}\nSCOPE: ${scope}\nRANGE: ${String(b.range || '').slice(0, 120)}\nCOMPARE: ${String(b.compare || 'none').slice(0, 60)}\n\nFACTS (everything on the screen):\n${JSON.stringify(facts).slice(0, 24000)}`;
+  let text;
+  /* The model thinks inside max_tokens; 700 cut the JSON mid-sentence on the first live run. */
+  const cmd = screen === 'command';
+  try { text = await claude(env, { system: cmd ? COMMAND_SYSTEM : READ_SYSTEM, user, maxTokens: cmd ? 4000 : 3000, model: READ_MODEL }); }
+  catch (e) { return { error: 'The read could not run: ' + e.message }; }
+  const m = String(text || '').match(/\{[\s\S]*\}/);
+  let out; try { out = JSON.parse(m ? m[0] : '{}'); } catch { return { error: 'The read did not come back clean.', raw: String(text || '').slice(0, 600) }; }
+  const clean = s => String(s || '').replace(/—|–/g, ',').trim();
+  const res = {
+    lines: (Array.isArray(out.lines) ? out.lines : []).slice(0, 3).map(clean).filter(Boolean),
+    leaks: (Array.isArray(out.leaks) ? out.leaks : []).slice(0, 3).map(l => ({ what: clean(l?.what), where: clean(l?.where) })).filter(l => l.what),
+    focus: clean(out.focus), at: new Date().toISOString(), screen, scope,
+    ...(cmd ? { order: (Array.isArray(out.order) ? out.order : []).slice(0, 4).map(o => ({ brand: clean(o?.brand), why: clean(o?.why), do: clean(o?.do) })).filter(o => o.brand && o.why) } : {}),
+  };
+  if (!res.lines.length) return { error: 'The read came back empty.', raw: String(text || '').slice(0, 400) };
+  await putSetting(env, key, JSON.stringify(res)).catch(() => {});
+  return res;
+}
+
+/* ---------- Saved dashboards, posted to Slack (the hub, 2026-10-07) ----------
+ * A dashboard the Strategist saved (p_dashboard, shared D1) with a schedule posts itself
+ * to its channel at 8am Central: every day, Mondays, or the 1st. The numbers are the same
+ * store-level figures the Strategist's `store` view reads (storePeriod), per brand in the
+ * dashboard's scope, over the dashboard's own range, against its compare period. The chart
+ * and channel blocks say "open it in Locus"; the post is the numbers, the link is the page.
+ * Runs inside the hourly tick after the cheaper jobs; one dashboard costs a few D1 reads
+ * per brand and one Slack call. `POST /api/dashboard-post {id}` posts one now. */
+const DASH_POST_HOUR = 8;
+const DASH_URL = 'https://locus.go-mobius-digital.com/profit/?open=dash&id=';
+const DASH_TABLE = `CREATE TABLE IF NOT EXISTS p_dashboard (id TEXT PRIMARY KEY, act_id TEXT, name TEXT NOT NULL, for_who TEXT, spec_json TEXT NOT NULL, schedule TEXT, channel TEXT, pinned INTEGER NOT NULL DEFAULT 1, created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), last_posted TEXT)`;
+const centralDate = (d = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: BRIEF_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+function dashRange(acct, range, from, to) {
+  /* A block's own custom dates (2026-10-10, cleaned by profit dashboard.js cleanDates). */
+  if (range === 'custom' && /^\d{4}-\d{2}-\d{2}$/.test(from || '') && /^\d{4}-\d{2}-\d{2}$/.test(to || '') && from <= to) return { from, to, label: `${from} to ${to}` };
+  const today = localDate(acct.tz), y = addDays(today, -1);
+  if (range === 'yesterday') return { from: y, to: y, label: `Yesterday, ${y}` };
+  if (range === 'mtd') return { from: `${today.slice(0, 7)}-01`, to: y, label: `Month to date, ${today.slice(0, 7)}-01 to ${y}` };
+  if (range === 'lastmonth') { const first = `${today.slice(0, 7)}-01`; const lastEnd = addDays(first, -1); return { from: `${lastEnd.slice(0, 7)}-01`, to: lastEnd, label: `Last month, ${lastEnd.slice(0, 7)}` }; }
+  const n = Math.max(1, Math.min(90, +range || 30));
+  return { from: addDays(y, -(n - 1)), to: y, label: `Last ${n} days, ${addDays(y, -(n - 1))} to ${y}` };
+}
+function dashPrev(from, to, compare) {
+  if (compare === 'none') return null;
+  if (compare === 'yoy') return { from: `${+from.slice(0, 4) - 1}${from.slice(4)}`, to: `${+to.slice(0, 4) - 1}${to.slice(4)}` };
+  const span = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
+  const pTo = addDays(from, -1);
+  return { from: addDays(pTo, -(span - 1)), to: pTo };
+}
+const dMoney = (n, cur) => n == null ? '-' : Math.abs(n) >= 1000 ? `${cur === 'USD' || !cur ? '$' : cur + ' '}${(n / 1000).toFixed(1)}K` : new Intl.NumberFormat('en-US', { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 0 }).format(n);
+const dPct = n => n == null ? '-' : `${Math.round(n * 100)}%`;
+const dX = n => n == null ? '-' : `${n.toFixed(2)}x`;
+const dDelta = (c, p) => c != null && p ? ` (${c / p - 1 >= 0 ? '+' : ''}${Math.round((c / p - 1) * 100)}%)` : '';
+const DASH_METRICS = {
+  revenue: ['Revenue', (t, c) => dMoney(t.revenue, c), 'revenue'], orders: ['Orders', t => t.orders == null ? '-' : Math.round(t.orders).toLocaleString('en-US'), 'orders'],
+  aov: ['AOV', (t, c) => t.aov == null ? '-' : new Intl.NumberFormat('en-US', { style: 'currency', currency: c || 'USD', maximumFractionDigits: 0 }).format(t.aov), 'aov'],
+  spend: ['Ad spend', (t, c) => dMoney(t.ad_spend, c), 'ad_spend'], mer: ['MER', t => dX(t.mer), 'mer'], amer: ['aMER', t => dX(t.amer), 'amer'],
+  new_share: ['New customer share', t => dPct(t.new_customer_share_of_revenue), 'new_customer_share_of_revenue'], new_orders: ['First orders', t => t.new_customers == null ? '-' : Math.round(t.new_customers).toLocaleString('en-US'), 'new_customers'],
+  cac: ['Cost per new customer', (t, c) => t.cac == null ? '-' : new Intl.NumberFormat('en-US', { style: 'currency', currency: c || 'USD', maximumFractionDigits: 0 }).format(t.cac), 'cac'],
+  cm: ['Contribution margin', (t, c) => dMoney(t.contribution_margin, c), 'contribution_margin'],
+  email_rev: ['Email and SMS revenue', (t, c) => dMoney(t.email_revenue, c), 'email_revenue'], email_share: ['Email share', t => dPct(t.email_share_of_revenue), 'email_share_of_revenue'],
+  meta_spend: ['Meta spend', (t, c) => dMoney(t.meta_spend, c), 'meta_spend'], google_spend: ['Google spend', (t, c) => dMoney(t.google_spend, c), 'google_spend'],
+};
+/** Add the store periods of several brands into one (sums for money and counts, ratios recomputed). */
+function dashSum(list) {
+  if (list.length === 1) return list[0];
+  const keys = ['revenue', 'ad_spend', 'meta_spend', 'google_spend', 'contribution_margin', 'orders', 'new_customers', 'new_customer_revenue', 'returning_orders', 'returning_revenue', 'email_revenue'];
+  const t = {}; for (const k of keys) { let x = 0, any = false; for (const r of list) { if (r && r[k] != null) { x += r[k]; any = true; } } t[k] = any ? x : null; }
+  t.mer = t.ad_spend ? t.revenue / t.ad_spend : null; t.amer = t.ad_spend && t.new_customer_revenue != null ? t.new_customer_revenue / t.ad_spend : null;
+  t.aov = t.orders ? t.revenue / t.orders : null; t.cac = t.new_customers && t.ad_spend != null ? t.ad_spend / t.new_customers : null;
+  t.new_customer_share_of_revenue = t.revenue && t.new_customer_revenue != null ? t.new_customer_revenue / t.revenue : null;
+  t.email_share_of_revenue = t.revenue && t.email_revenue != null ? t.email_revenue / t.revenue : null;
+  return t;
+}
+/* One range over every brand in scope: per brand numbers, the sum, and the compare period. */
+async function dashPeriod(env, accts, dt, read = storePeriod) {
+  const out = [];
+  let label = '';
+  for (const a of accts) {
+    const r = dashRange(a, dt.range || '30', dt.from, dt.to); label = label || r.label;
+    const prev = dashPrev(r.from, r.to, dt.compare || 'prev');
+    const cur = await read(env, a, r.from, r.to).catch(() => null);
+    const pr = prev ? await read(env, a, prev.from, prev.to).catch(() => null) : null;
+    out.push({ a, cur, prev: pr });
+  }
+  return { accts: out, label, compare: dt.compare || 'prev', cur: dashSum(out.map(x => x.cur).filter(Boolean)), prev: dt.compare === 'none' ? null : dashSum(out.map(x => x.prev).filter(Boolean)) };
+}
+/** A block's own dates (2026-10-10): `dates` on a block overrides the dashboard's range; compare
+ *  left out follows the dashboard's. Null = the dashboard's dates. */
+const DASH_DATED = new Set(['tiles', 'brands', 'channels', 'daily', 'email', 'ads']);
+function dashBlockDates(spec, b) {
+  const o = b && DASH_DATED.has(b.type) && b.dates && typeof b.dates === 'object' ? b.dates : null;
+  if (!o || !o.range) return null;
+  return { range: String(o.range), from: o.from, to: o.to, compare: ['prev', 'yoy', 'none'].includes(o.compare) ? o.compare : (spec.compare || 'prev') };
+}
+const dashKey = dt => [dt.range, dt.from || '', dt.to || '', dt.compare].join('|');
+/* `deps` (accounts, read) is for the offline test (test-dashrange.mjs); the worker never passes it. */
+async function dashNumbers(env, row, deps = {}) {
+  const spec = safeJson(row.spec_json, {}) || {};
+  const all = deps.accounts || await listAccounts(env, true);
+  /* A dashboard saved before phase 3 may hold an old act id as its scope. */
+  const scope = spec.scope && spec.scope !== 'all' ? (deps.accounts ? spec.scope : await resolveBrandId(env, spec.scope)) : null;
+  const accts = scope ? all.filter(a => a.act_id === scope) : all;
+  if (!accts.length) throw new Error('No brand in this dashboard\'s scope is active.');
+  const read = deps.read || storePeriod;
+  const main = { range: String(spec.range || '30'), compare: spec.compare || 'prev' };
+  const base = await dashPeriod(env, accts, main, read);
+  /* One read per distinct block range; a block whose dates equal the dashboard's reuses it. */
+  const seen = new Map([[dashKey(main), base]]);
+  const blk = [];
+  for (const b of spec.blocks || []) {
+    const dt = dashBlockDates(spec, b);
+    if (!dt) { blk.push(null); continue; }
+    const k = dashKey(dt);
+    if (!seen.has(k)) seen.set(k, await dashPeriod(env, accts, dt, read));
+    const p = seen.get(k);
+    blk.push(p === base ? null : p);
+  }
+  return { spec, ...base, blk, cur_code: [...new Set(accts.map(a => a.currency))].length === 1 ? accts[0].currency : null };
+}
+function dashBlocks(row, d) {
+  const cur = d.cur_code, mixed = !cur;
+  const scopeName = d.accts.length === 1 ? d.accts[0].a.name : `${d.accts.length} brands`;
+  const blocks = [{ type: 'header', text: { type: 'plain_text', text: row.name.slice(0, 150) } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `${scopeName} · ${d.label}${d.prev ? ` · deltas vs ${d.spec.compare === 'yoy' ? 'same dates last year' : 'the period before'}` : ''}${row.for_who ? ` · for ${row.for_who}` : ''}` }] }];
+  const vsOf = c => c === 'yoy' ? 'same dates last year' : 'the period before';
+  const base = d;
+  for (const [bi, b] of (base.spec.blocks || []).entries()) {
+    /* A block with its own dates (2026-10-10) reads its own numbers and says its range under the title. */
+    const own = base.blk && base.blk[bi];
+    const d = own ? { ...base, ...own } : base;
+    const deflt = { channels: 'Where the money came from', email: 'Email and SMS', daily: 'Day by day', tiles: 'The numbers', brands: 'By brand' };
+    const title = (b.title ? `*${b.title}*\n` : own && deflt[b.type] ? `*${deflt[b.type]}*\n` : '')
+      + (own ? `_${own.label}${own.prev ? `, deltas vs ${vsOf(own.compare)}` : ''}_\n` : '');
+    if (b.type === 'tiles') {
+      if (mixed) { blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}_Brands report in different currencies; open in Locus for the per-brand view._` } }); continue; }
+      const lines = (b.metrics || []).map(m => DASH_METRICS[m]).filter(Boolean).map(([l, f, k]) => `• ${l}: *${f(d.cur, cur)}*${d.prev ? dDelta(d.cur[k], d.prev[k]) : ''}`);
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}${lines.join('\n')}` } });
+    } else if (b.type === 'brands') {
+      const cols = (b.columns || []).filter(c => ['revenue', 'spend', 'mer', 'amer', 'new_share', 'orders', 'aov', 'cac', 'cm', 'email_rev'].includes(c)).slice(0, 4);
+      const use = cols.length ? cols : ['revenue', 'spend', 'mer', 'cm'];
+      const head = ['Brand', ...use.map(c => DASH_METRICS[c][0])];
+      const rows = d.accts.map(x => [x.a.name.slice(0, 14), ...use.map(c => x.cur ? DASH_METRICS[c][1](x.cur, x.a.currency) : '-')]);
+      const w = head.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
+      const line = r => r.map((v, i) => i === 0 ? v.padEnd(w[i]) : v.padStart(w[i])).join('  ');
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}\`\`\`${[line(head), ...rows.map(line)].join('\n')}\`\`\`` } });
+    } else if (b.type === 'email') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}• Email and SMS revenue: *${mixed ? '-' : dMoney(d.cur.email_revenue, cur)}*${d.prev ? dDelta(d.cur.email_revenue, d.prev.email_revenue) : ''}\n• Share of store revenue: *${dPct(d.cur.email_share_of_revenue)}*` } });
+    } else if (b.type === 'channels') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}• Meta spend: *${mixed ? '-' : dMoney(d.cur.meta_spend, cur)}*\n• Google spend: *${mixed ? '-' : dMoney(d.cur.google_spend, cur)}*\n_Revenue per platform (Triple Whale) is on the dashboard in Locus._` } });
+    } else if (b.type === 'daily') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `${title}_The day-by-day chart is on the dashboard in Locus._` } });
+    } else if (b.type === 'note' && b.text) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: b.text.slice(0, 2900) } });
+    } else if (b.type === 'chart') {
+      /* A Strategist answer pinned from the chat (2026-10-08): the picture lives in Locus. */
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${(b.title || b.spec?.title || 'A pinned chart').slice(0, 150)}*
+_A chart pinned from the Strategist${b.pinned_at ? ` on ${String(b.pinned_at).slice(0, 10)}` : ''}; open in Locus to see it._` } });
+    } else if (b.type === 'ads') {
+      /* A view saved from Ads > Creative (2026-10-09): the ad cards live in Locus. */
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${(b.title || 'Ads').slice(0, 150)}*${own ? `\n_${own.label}_` : ''}
+_The ad cards (sorted by ${b.sort || 'spend'}${b.group ? ', one per creative' : ''}) are on the dashboard in Locus._` } });
+    }
+  }
+  blocks.push({ type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open in Locus' }, url: DASH_URL + row.id, action_id: 'noop_open' }] });
+  return blocks.slice(0, 48);
+}
+async function postDashboard(env, row) {
+  if (!row.channel) throw new Error('This dashboard has no Slack channel. Set one on the dashboard in Locus.');
+  const d = await dashNumbers(env, row);
+  const blocks = dashBlocks(row, d);
+  const r = await slackPost(env, row.channel, `${row.name}: ${d.label}`, blocks);
+  await env.DB.prepare(`UPDATE p_dashboard SET last_posted = ?2 WHERE id = ?1`).bind(row.id, new Date().toISOString()).run().catch(() => {});
+  return { ok: true, posted: r?.ts || true, brands: d.accts.length };
+}
+async function dashboardTick(env) {
+  if (centralHour() < DASH_POST_HOUR) return { skipped: 'before 8am Central' };
+  await env.DB.prepare(DASH_TABLE).run().catch(() => {});
+  const { results } = await env.DB.prepare(`SELECT * FROM p_dashboard WHERE schedule IN ('daily','monday','first') AND channel IS NOT NULL AND channel != ''`).all().catch(() => ({ results: [] }));
+  const today = centralDate(), dow = new Date(today + 'T12:00:00Z').getUTCDay(), dom = +today.slice(8, 10);
+  const out = { posted: [], skipped: 0, errors: [] };
+  for (const row of results || []) {
+    const due = row.schedule === 'daily' || (row.schedule === 'monday' && dow === 1) || (row.schedule === 'first' && dom === 1);
+    if (!due || (row.last_posted && centralDate(new Date(row.last_posted)) === today)) { out.skipped++; continue; }
+    if (!subCanAfford(12)) { out.deferred = true; break; }
+    try { await postDashboard(env, row); out.posted.push(row.name); }
+    catch (e) { out.errors.push(`${row.name}: ${e.message}`); }
+  }
+  return out;
+}
+
+const SUMMARISE_TEMPLATES = {
+  daily: {
+    label: 'Daily standup',
+    system: `You are a senior media buyer at Mobius Digital writing the internal daily Slack update.
+Write a tight update from the change log + performance data you're given. Rules:
+- One short section per client (bold name), bullets under it. Skip clients with nothing to say.
+- Lead each bullet with what changed and why (use the reason/note tags when present), then a one-line read on performance if the data supports it.
+- Ignore housekeeping noise (renames, drafts, system events) unless it's the only activity.
+- Money stays in each account's own currency. The last ~3 days of conversions are still settling - hedge accordingly.
+- Plain text with Slack-style *bold*, no headers, no preamble, no sign-off.`,
+  },
+  weekly: {
+    label: 'Weekly recap',
+    system: `You are a senior media buyer at Mobius Digital writing the internal weekly recap.
+For each client with meaningful activity or spend, write a short block:
+- *Client name* - performance vs the previous window (spend, CPA, ROAS - only metrics that actually moved),
+- what we changed and why (group related changes; use reason/note tags),
+- one line on what's next if the changes imply it.
+Ignore housekeeping noise. Money stays in each account's own currency; the last ~3 days are still settling.
+Plain text with Slack-style *bold*, no preamble, no sign-off.`,
+  },
+  client: {
+    label: 'Client-facing update',
+    system: `You are writing a client-facing update from Mobius Digital, their paid-social agency, about their Meta ads account.
+Rules:
+- Warm, confident, plain English - no internal jargon, no ad-account IDs, no "activity log".
+- Summarise what was done and why it's good for them, then how the account is trending (only well-supported numbers, in their currency).
+- Recent conversions still settle for ~72h - phrase recent performance carefully.
+- 100–180 words, no subject line, no greeting or sign-off placeholders.`,
+  },
+};
+
+/** Compact plain-text data pack for one account: window stats + change list. */
+function packAccount(a, cur, prev, events, from, to) {
+  const f = n => n == null ? ' - ' : (Math.round(n * 100) / 100).toString();
+  const stat = s => `spend ${f(s.spend)} ${a.currency}, purchases ${f(s.purchases)}, CPA ${f(s.cpa)}, ROAS ${f(s.roas)}, CTR ${s.ctr == null ? ' - ' : (s.ctr * 100).toFixed(2) + '%'}`;
+  const lines = [`## ${a.name} (${a.currency})`,
+    `Window ${from}..${to}: ${stat(cur)}`,
+    `Previous window (same length): ${stat(prev)}`,
+    `(Spend and CTR are Meta's. Purchases, CPA and ROAS are Triple Whale attribution, last platform click, on Meta ads. " - " means Triple Whale has not synced that window yet, so say nothing about them.)`,
+    `Changes (${events.length}${events.length > 120 ? ', first 120 shown' : ''}):`];
+  for (const ev of events.slice(0, 120)) {
+    const tags = [ev.reason ? `reason: ${ev.reason}` : ev.suggested_reason ? `suggested reason (auto, unreviewed): ${ev.suggested_reason}` : null,
+      ev.note && `note: ${ev.note}`,
+      ev.confirmed === 1 ? 'confirmed' : null, ev.manual ? 'manual entry' : null].filter(Boolean);
+    lines.push(`- ${String(ev.event_time).slice(0, 16).replace('T', ' ')} [${ev.category}] ${ev.summary}${ev.actor ? ` (by ${ev.actor})` : ''}${tags.length ? ` {${tags.join('; ')}}` : ''}`);
+  }
+  if (!events.length) lines.push('- (no changes logged in this window)');
+  return lines.join('\n');
+}
+
+async function writeUpdate(env, { act, from, to, template }) {
+  const tpl = SUMMARISE_TEMPLATES[template] || SUMMARISE_TEMPLATES.daily;
+  act = await resolveBrandId(env, act);   // an older screen may still send an act_ id
+  const accounts = (await listAccounts(env, true)).filter(a => act === 'all' || !act ? true : a.act_id === act);
+  if (!accounts.length) throw new Error('no matching active account');
+  if (template === 'client' && accounts.length > 1) throw new Error('pick one client for a client-facing update');
+  const days = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400e3) + 1);
+  const prevFrom = addDays(from, -days), prevTo = addDays(from, -1);
+  const packs = [];
+  for (const a of accounts) {
+    const { results: evs } = await env.DB.prepare(
+      `SELECT event_time, category, summary, actor, reason, suggested_reason, note, confirmed, manual FROM activities
+       WHERE act_id IN ${metaOf(1)} AND event_time >= ?2 AND event_time <= ?3 AND confirmed != -1 ORDER BY event_time`,
+    ).bind(a.act_id, from, to + 'T23:59:59').all();
+    // Meta tab Summarise: purchases, CPA and ROAS are Triple Whale's (see twMetaDaily).
+    const tw = await twMetaDaily(env, a.act_id, prevFrom, to);
+    const cur = agg(attributeRows(sumByDate((await env.DB.prepare(`SELECT * FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date BETWEEN ?2 AND ?3`).bind(a.act_id, from, to).all()).results), tw), true);
+    const prev = agg(attributeRows(sumByDate((await env.DB.prepare(`SELECT * FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date BETWEEN ?2 AND ?3`).bind(a.act_id, prevFrom, prevTo).all()).results), tw), true);
+    packs.push(packAccount(a, cur, prev, evs, from, to));
+  }
+  const text = await claude(env, {
+    system: tpl.system,
+    user: `Window: ${from} to ${to} (previous window ${prevFrom}..${prevTo} for comparison).\nTags marked "suggested reason (auto, unreviewed)" are machine-inferred from performance direction, not stated by the team - hedge accordingly.\n\n${packs.join('\n\n')}`,
+  });
+  return { text, template: template || 'daily', model: ANTHROPIC_MODEL, from, to, accounts: accounts.map(a => a.name) };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Triple Whale client (Daily Brief only - the four Meta pages never    */
+/*  touch it; spend on those pages is Meta-reported, matching Ads Mgr)   */
+/* ------------------------------------------------------------------ */
+
+/* Triple Whale's summary-page WINDOW IS SHIFTED ONE DAY EARLIER than the dates you
+   ask for. Asking for 2026-08-29..2026-08-29 returns 2026-08-28's numbers; asking
+   2026-08-24..2026-08-30 returns 2026-08-23..2026-08-29. Verified 2026-08-30 on
+   Grunk Dolfer against tw_daily, four windows, matching to the cent.
+
+   Which side is wrong is not a guess: tw_daily is built from charts.current (whose
+   x is a one-based day-of-year and carries its own date), and its fb_ads_spend
+   matches Meta's OWN dated spend to the cent for 2026-08-24 through 2026-08-27. So
+   tw_daily is right and the period totals are the shifted ones.
+
+   twWindow is therefore the ONLY way any period total should be fetched - it asks
+   for [start+1, end+1] so the numbers that come back are [start, end]. twSummary
+   stays raw for syncTwDaily, which reads charts.current and does not care.
+
+   This mattered: every weekly and monthly report ran on the raw call, so a report
+   billed as Mon-Sun actually covered Sun-Sat. */
+/* ---------------- Triple Whale ad-level attribution ----------------
+   Cole's rule: anything attribution-shaped should be Triple Whale's, and Meta
+   only where TW cannot measure it. TW CAN do this - the earlier note in this
+   file saying the endpoint 403s was wrong (see the 2026-08-30 section).
+
+   `attribution/get-orders-with-journeys-v2` returns ORDERS, not aggregated ad
+   metrics, so the aggregation is ours: page the orders for a window, walk each
+   order's touchpoints, and credit its revenue to the ad that touchpoint names.
+
+   ALL SIX MODELS ARE STORED, not one. They arrive in the SAME response - every
+   order carries firstClick, lastClick, fullFirstClick, fullLastClick,
+   lastPlatformClick, linear and linearAll side by side - so storing every one
+   costs no extra call, and picking a single model in code would have forced a
+   decision onto Cole that the UI can simply offer him.
+
+   The two models named "linear" SPLIT one order across its touchpoints; the
+   click models give the whole order to one. Both are handled by weighting each
+   touchpoint 1/n within its own model, which is exactly what linear means and
+   is a harmless no-op for a single-touchpoint click model. */
+const TW_ATTR_MODELS = ['firstClick', 'lastClick', 'fullFirstClick', 'fullLastClick',
+  'lastPlatformClick', 'linear', 'linearAll'];
+/** The model every per-channel figure in briefs and reports uses by default:
+ *  Triple Whale's own default, "last platform click". */
+const BRIEF_ATTR_MODEL = 'lastPlatformClick';
+/** The two that genuinely DIVIDE an order across its touchpoints. Everything
+ *  else names a winner per platform and credits it the whole order. */
+const LINEAR_MODELS = new Set(['linear', 'linearAll']);
+
+/* Triple Whale's touchpoint `source`, reduced to the channel names this app
+   uses everywhere else. Values seen live on these shops: `facebook-ads`,
+   `google-ads`, `organic_and_social`, `Excluded`. Anything unrecognised is kept
+   verbatim rather than bucketed, so a new channel shows up as itself the first
+   time it appears instead of quietly joining another one's total. */
+function twPlatform(source) {
+  const s = String(source || '').toLowerCase();
+  if (!s) return null;
+  if (s.includes('facebook') || s.includes('instagram') || s.includes('meta')) return 'meta';
+  if (s.includes('google')) return 'google';
+  if (s.includes('tiktok')) return 'tiktok';
+  if (s.includes('pinterest')) return 'pinterest';
+  return s;
+}
+
+async function twJourneys(env, shopDomain, start, end, page) {
+  const res = await xfetch('https://api.triplewhale.com/api/v2/attribution/get-orders-with-journeys-v2', {
+    method: 'POST',
+    headers: { 'x-api-key': env.TW_API_KEY, 'content-type': 'application/json' },
+    /* Send the exact key set the probe proved returns 200. `shopId` gives a
+       403 Access Denied; `shopDomain` alone also 403s here, so TW evidently
+       wants `shop` too. Both date spellings are sent because the probe carried
+       both and it is not worth another round trip to discover which it reads. */
+    body: JSON.stringify({ shopDomain, shop: shopDomain,
+      startDate: start, endDate: end, start_date: start, end_date: end, page }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Triple Whale attribution: ${body.message || body.error || `HTTP ${res.status}`}`);
+  return body;
+}
+
+/* How far back attribution is kept. Chosen to cover the longest window the
+   period control offers (90 days) with room to spare, so a range the UI can ask
+   for is never one the data cannot answer. */
+const TW_ATTR_HISTORY_DAYS = 120;
+
+/** Pull journeys for a window and roll them up to (date, ad_id, model).
+ *  Pass {from,to} to pull an explicit range; otherwise the last `days`. */
+/* ORDERS, per customer (2026-10-05). The same journeys response carries order_id, customer_id,
+   total_price and the cart events, which is everything a cohort needs: who bought first when,
+   whether they came back, how long it took, what they put in the cart. Stored in tw_orders so
+   Customers can state a real LTV and LTV:CAC without a Shopify install. Backfilled 400 days,
+   one slice a night (`twOrdersCursor:<act>`); nothing extra is fetched for the rolling window. */
+const TW_ORDERS_HISTORY_DAYS = 400;
+let ordersTabled = false;
+async function ensureOrdersTable(env) {
+  if (ordersTabled) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tw_orders (act_id TEXT NOT NULL, order_id TEXT NOT NULL, customer_id TEXT, date TEXT NOT NULL,
+    total REAL NOT NULL DEFAULT 0, currency TEXT, products_json TEXT, source TEXT, synced_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (act_id, order_id))`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS tw_orders_cust ON tw_orders (act_id, customer_id, date)`).run().catch(() => {});
+  ordersTabled = true;
+}
+async function storeTwOrders(env, acct, list) {
+  if (!list.length) return 0;
+  await ensureOrdersTable(env);
+  // 8 columns -> 12 rows a chunk under D1's 100 bound parameters.
+  for (let i = 0; i < list.length; i += 12) {
+    const chunk = list.slice(i, i + 12);
+    const sql = `INSERT INTO tw_orders (act_id, order_id, customer_id, date, total, currency, products_json, source) VALUES `
+      + chunk.map((_, n) => `(?${n * 8 + 1},?${n * 8 + 2},?${n * 8 + 3},?${n * 8 + 4},?${n * 8 + 5},?${n * 8 + 6},?${n * 8 + 7},?${n * 8 + 8})`).join(',')
+      + ` ON CONFLICT(act_id, order_id) DO UPDATE SET customer_id = excluded.customer_id, date = excluded.date, total = excluded.total, currency = excluded.currency, products_json = excluded.products_json, source = excluded.source, synced_at = datetime('now')`;
+    const binds = [];
+    for (const o of chunk) binds.push(acct.act_id, o.order_id, o.customer_id, o.date, o.total, o.currency, o.products_json, o.source);
+    await env.DB.prepare(sql).bind(...binds).run();
+  }
+  return list.length;
+}
+/* One older slice per brand per night, walking back from the first stored day to
+   TW_ORDERS_HISTORY_DAYS (or Triple Whale's own earliest date). Resumable; `slices` lets an
+   admin call run several at once. */
+async function backfillTwOrders(env, acct, slices = 1) {
+  if (!acct.tw_shop) return { name: acct.name, skipped: 'no Triple Whale shop' };
+  const doneKey = `twOrdersDone:${acct.act_id}`, curKey = `twOrdersCursor:${acct.act_id}`;
+  if (await getSetting(env, doneKey)) return { name: acct.name, done: true };
+  const today = localDate(acct.tz);
+  const floor = addDays(today, -TW_ORDERS_HISTORY_DAYS);
+  let cursor = await getSetting(env, curKey) || addDays(today, -7);   // the rolling window already holds the last 7 days
+  const out = { name: acct.name, slices: [] };
+  for (let i = 0; i < slices; i++) {
+    const to = addDays(cursor, -1);
+    if (to <= floor) { await putSetting(env, doneKey, today); out.done = true; break; }
+    const from = addDays(to, -13) < floor ? floor : addDays(to, -13);
+    const r = await syncTwAttribution(env, acct, 0, { from, to }, { ordersOnly: true });
+    out.slices.push({ from, to, orders: r.orders, pages: r.pages, earliest: r.earliest });
+    cursor = from;
+    await putSetting(env, curKey, cursor);
+    /* `earliestDate` in the response is the oldest order ON THAT PAGE, not where Triple
+       Whale's history starts (it read 2026-09-17 for a slice that returned 130 orders), so it
+       never ends the walk. Only the floor does; an empty slice costs one call. */
+  }
+  return out;
+}
+
+/* Order -> ad touches for history, one 14-day slice at a time back to 400 days (cursor `twTouchCursor:<act>`).
+   The rolling sync keeps the last weeks; this fills what came before it. */
+async function backfillTwTouches(env, acct, slices = 1) {
+  if (!acct.tw_shop) return { name: acct.name, skipped: 'no Triple Whale shop' };
+  const doneKey = `twTouchDone:${acct.act_id}`, curKey = `twTouchCursor:${acct.act_id}`;
+  if (await getSetting(env, doneKey)) return { name: acct.name, done: true };
+  const today = localDate(acct.tz), floor = addDays(today, -TW_ORDERS_HISTORY_DAYS);
+  const have = await env.DB.prepare(`SELECT MIN(date) d FROM tw_order_touch WHERE act_id = ?1`).bind(acct.act_id).first().catch(() => null);
+  let cursor = await getSetting(env, curKey) || have?.d || addDays(today, -7);
+  const out = { name: acct.name, slices: [] };
+  for (let i = 0; i < slices; i++) {
+    const to = addDays(cursor, -1);
+    if (to <= floor) { await putSetting(env, doneKey, today); out.done = true; break; }
+    const from = addDays(to, -13) < floor ? floor : addDays(to, -13);
+    const r = await syncTwAttribution(env, acct, 0, { from, to }, { ordersOnly: true, withTouches: true });
+    out.slices.push({ from, to, orders: r.orders, touched: r.touched });
+    cursor = from; await putSetting(env, curKey, cursor);
+  }
+  return out;
+}
+
+async function syncTwAttribution(env, acct, days = 7, range = null, opts = {}) {
+  if (!env.TW_API_KEY) return { name: acct.name, skipped: 'TW_API_KEY not set' };
+  if (!acct.tw_shop) return { name: acct.name, skipped: 'no Triple Whale shop' };
+  const today = localDate(acct.tz);
+  const end = range ? range.to : addDays(today, -1);
+  const start = range ? range.from : addDays(end, -(Math.min(days, 120) - 1));
+
+  const agg = new Map();                       // `${date}|${ad}|${model}` -> {rev, ord}
+  const touches = [];                          // order -> paid ad, per model (Locus v2 drill)
+  const seenModels = new Set();                // what TW ACTUALLY sends, not what we assumed
+  const orderRows = [];                        // one per order, for tw_orders
+  let page = 1, orders = 0, pages = 0, earliest = null;
+  // Capped: this runs nightly for six brands and a runaway page loop would
+  // spend the whole invocation budget on one of them.
+  while (page <= 40) {
+    const body = await twJourneys(env, acct.tw_shop, start, end, page);
+    const rows = body.ordersWithJourneys || [];
+    pages++;
+    if (body.earliestDate && /^\d{4}-\d{2}-\d{2}/.test(String(body.earliestDate))) earliest = String(body.earliestDate).slice(0, 10);
+    for (const o of rows) {
+      orders++;
+      const rev = +o.total_price || 0;
+      if (!rev) continue;
+      // The order's OWN date, not the touchpoint's - revenue lands when the
+      // money did, which is what every other figure in Locus is dated by.
+      const date = String(o.created_at || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      if (o.order_id) {
+        /* Products = what the journey put in the cart before this order (add-to-cart events,
+           oldest first, no repeats). Not the receipt, but the only product signal TW gives. */
+        const seen = new Set(); const prods = [];
+        for (const ev of (o.journey || []).slice().reverse()) if (ev && ev.event === 'add2c' && ev.productId != null && !seen.has(String(ev.productId))) { seen.add(String(ev.productId)); prods.push(String(ev.productId)); }
+        const lpc = (o.attribution?.lastPlatformClick || []).find(t => t && t.source);
+        orderRows.push({ order_id: String(o.order_id), customer_id: o.customer_id != null ? String(o.customer_id) : null, date, total: rev, currency: o.currency || acct.currency || null,
+          products_json: prods.length ? JSON.stringify(prods.slice(0, 12)) : null, source: lpc ? (twPlatform(lpc.source) || String(lpc.source).slice(0, 40)) : 'organic' });
+      }
+      for (const k of Object.keys(o.attribution || {})) seenModels.add(k);
+      for (const model of TW_ATTR_MODELS) {
+        const tps = (o.attribution?.[model] || []).filter(t => t && t.adId);
+        if (!tps.length) continue;             // organic, direct, or a non-paid touch
+        /* WEIGHTING FOLLOWS THE MODEL, and this was wrong at first.
+           I split every order 1/n across its touchpoints, including the CLICK
+           models - but a click model's array is not a split, it is one entry
+           PER PLATFORM. Live example: one Lucky order carried google-ads,
+           organic and facebook-ads under `lastPlatformClick`. Splitting it gave
+           Facebook 50% of an order Triple Whale's own interface credits to it
+           in full, so every click-model ROAS read low against the number Cole
+           sees in Triple Whale.
+           Linear models DO mean a split - that is their definition - so they
+           keep 1/n. Click models credit each touchpoint the whole order, which
+           matches Triple Whale and is why per-platform revenue can exceed the
+           order total: the platforms double-count each other, exactly as their
+           UI shows and as the blended MER on the other tabs exists to avoid. */
+        const w = LINEAR_MODELS.has(model) ? 1 / tps.length : 1;
+        if (o.order_id && TOUCH_MODELS.has(model)) for (const t of tps) touches.push([String(o.order_id), date, model, twPlatform(t.source), String(t.adId), w, t.clickDate ? String(t.clickDate).slice(0, 10) : null]);
+        for (const t of tps) {
+          /* PLATFORM COMES FROM THE TOUCHPOINT, and it is the piece that was
+             missing. tw_ad_attr always held Google ad ids alongside Meta's, but
+             nothing recorded WHICH, so the only way to tell them apart was to
+             join against Meta's own `ads` table and treat every miss as "not
+             Meta" - which cannot separate Google from TikTok, and silently drops
+             $419K of attributed revenue on these six brands. Storing the source
+             makes a per-channel rollup a GROUP BY instead of a guess. */
+          const k = `${date}|${t.adId}|${model}`;
+          const cur = agg.get(k) || { rev: 0, ord: 0, platform: null };
+          cur.rev += rev * w; cur.ord += w;
+          cur.platform ??= twPlatform(t.source);
+          agg.set(k, cur);
+        }
+      }
+    }
+    if (body.finishedRange || !rows.length) break;
+    page++;
+  }
+
+  const stored = await storeTwOrders(env, acct, orderRows).catch(e => { console.log('tw_orders: ' + e.message); return 0; });
+  /* The touch backfill (2026-10-08) also keeps which ad each order touched, so a customer's first order can be
+     traced to the ad that brought them in: lifetime value per ad (the Hyros idea). */
+  let bfTouched = 0; if (opts.withTouches) bfTouched = await storeTouches(env, acct, start, end, touches).catch(e => { console.log('touches: ' + e.message); return 0; });
+  if (opts.ordersOnly) return { name: acct.name, from: start, to: end, orders, pages, stored, earliest, touched: bfTouched };
+
+  /* Replace the window wholesale rather than upserting: attribution RESTATES as
+     journeys resolve, so an order that moved from one ad to another must not
+     leave its old credit behind. Deleting the window first makes the sync
+     idempotent - re-running it can only ever converge. */
+  await env.DB.prepare(`DELETE FROM tw_ad_attr WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`)
+    .bind(acct.act_id, start, end).run();
+
+  const rows = [...agg.entries()];
+  // D1 caps a statement at 100 bound parameters; 7 columns -> 14 rows a chunk.
+  for (let i = 0; i < rows.length; i += 14) {
+    const chunk = rows.slice(i, i + 14);
+    const sql = `INSERT INTO tw_ad_attr (act_id, date, ad_id, model, revenue, orders, platform) VALUES `
+      + chunk.map((_, n) => `(?${n * 7 + 1},?${n * 7 + 2},?${n * 7 + 3},?${n * 7 + 4},?${n * 7 + 5},?${n * 7 + 6},?${n * 7 + 7})`).join(',');
+    const binds = [];
+    for (const [k, v] of chunk) {
+      const [date, ad, model] = k.split('|');
+      binds.push(acct.act_id, date, ad, model, v.rev, v.ord, v.platform ?? null);
+    }
+    await env.DB.prepare(sql).bind(...binds).run();
+  }
+  /* Order touches, same window, same delete-then-write rule as tw_ad_attr. */
+  const touched = await storeTouches(env, acct, start, end, touches).catch(e => { console.log('tw_order_touch: ' + e.message); return 0; });
+  return { name: acct.name, from: start, to: end, orders, pages, rows: rows.length, stored, earliest, touches: touched,
+    models_seen: [...seenModels].sort(), models_stored: TW_ATTR_MODELS };
+}
+
+/* ORDER TOUCHES (Locus v2, 2026-10-07). One row per order per paid ad it touched, per model,
+   so a purchases or revenue cell on the Paid screens can open the orders behind it, and an
+   order its customer. Only the models the model switch offers are kept, to hold D1 size down. */
+const TOUCH_MODELS = new Set(['lastPlatformClick', 'fullFirstClick', 'fullLastClick', 'linearAll']);
+let touchTabled = false;
+async function storeTouches(env, acct, start, end, list) {
+  if (!touchTabled) {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tw_order_touch (act_id TEXT NOT NULL, order_id TEXT NOT NULL, date TEXT NOT NULL, model TEXT NOT NULL,
+      platform TEXT, ad_id TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1, click_date TEXT, PRIMARY KEY (act_id, order_id, model, ad_id))`).run();
+    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS tw_order_touch_ad ON tw_order_touch (act_id, ad_id, model, date)`).run().catch(() => {});
+    touchTabled = true;
+  }
+  await env.DB.prepare(`DELETE FROM tw_order_touch WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`).bind(acct.act_id, start, end).run();
+  const seen = new Set(); const rows = list.filter(r => { const k = `${r[0]}|${r[2]}|${r[4]}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  for (let i = 0; i < rows.length; i += 12) {
+    const chunk = rows.slice(i, i + 12);
+    const sql = `INSERT OR REPLACE INTO tw_order_touch (act_id, order_id, date, model, platform, ad_id, weight, click_date) VALUES `
+      + chunk.map((_, n) => `(?${n * 8 + 1},?${n * 8 + 2},?${n * 8 + 3},?${n * 8 + 4},?${n * 8 + 5},?${n * 8 + 6},?${n * 8 + 7},?${n * 8 + 8})`).join(',');
+    const binds = [];
+    for (const r of chunk) binds.push(acct.act_id, ...r);
+    await env.DB.prepare(sql).bind(...binds).run();
+  }
+  return rows.length;
+}
+
+async function twWindow(env, shopDomain, start, end) {
+  const k = await twShift(env, shopDomain);
+  return twSummary(env, shopDomain, addDays(start, k), addDays(end, k));
+}
+/* MEASURED, NOT ASSUMED (2026-10-07). Triple Whale's summary period used to come back one day
+   early (fact 1 above), and every period total asked for [start+1, end+1]. On 2026-10-07 it
+   stopped: asking 10-06 returned 10-06 (fb_ads_spend matched Meta's 10-06 to the cent), so the
+   +1 asked for tomorrow and the live Today chip read $0. The shift is now read from TW itself,
+   once a day per shop: ask a 3-day window ending two days ago and see which day-of-year the
+   daily chart starts on. 0 = correct, 1 = one day early. Unknown = 0 (current behaviour). */
+async function twShift(env, shopDomain) {
+  const key = `twShift:${shopDomain}`, today = new Date().toISOString().slice(0, 10);
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = ?1`).bind(key).first().catch(() => null);
+  try { const v = JSON.parse(row?.value || 'null'); if (v && v.date === today) return v.shift; } catch {}
+  let shift = 0;
+  try {
+    const a = addDays(today, -4), b = addDays(today, -2);
+    const { raw } = await twSummary(env, shopDomain, a, b);
+    let minX = null;
+    for (const m of raw?.metrics || []) { const xs = (m.charts?.current || []).map(p => +p.x).filter(Number.isFinite); if (xs.length) { minX = Math.min(...xs); break; } }
+    const doy = Math.round((Date.parse(a) - Date.parse(a.slice(0, 4) + '-01-01')) / 864e5) + 1;
+    if (minX != null && a.slice(5) > '01-05') shift = Math.max(0, Math.min(1, doy - minX));
+  } catch { return 0; }
+  await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(key, JSON.stringify({ date: today, shift })).run().catch(() => {});
+  return shift;
+}
+
+async function twSummary(env, shopDomain, start, end) {
+  const res = await xfetch('https://api.triplewhale.com/api/v2/summary-page/get-data', {
+    method: 'POST',
+    headers: { 'x-api-key': env.TW_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ shopDomain, period: { start, end }, todayHour: 24 }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Triple Whale: ${body.message || body.error || `HTTP ${res.status}`}`);
+  // Normalize to {name: value} - TW's response shape has varied across versions.
+  const map = {};
+  const num = v => typeof v === 'number' && isFinite(v) ? v
+    : typeof v === 'string' && v.trim() !== '' && isFinite(+v) ? +v
+    : v && typeof v === 'object' ? num(v.value ?? v.metricValue ?? v.total) : null;
+  const add = (k, v) => { const n = num(v); if (k != null && n != null) map[String(k)] = n; };
+  if (Array.isArray(body.metrics)) {
+    // Real observed shape: {metrics: [{id, metricId, title, values: {current, previous}, charts…}]}
+    for (const it of body.metrics) {
+      if (!it || typeof it !== 'object') continue;
+      add(it.metricId ?? it.id ?? it.metricName ?? it.name, it.values?.current ?? it.value ?? it.metricValue ?? it.total);
+    }
+  } else {
+    const walk = node => {
+      if (Array.isArray(node)) { for (const it of node) if (it && typeof it === 'object') add(it.metricName ?? it.name ?? it.id ?? it.key, it.values?.current ?? it.value ?? it.metricValue ?? it.total ?? it); return; }
+      if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) {
+        if (Array.isArray(v) || (v && typeof v === 'object' && !('value' in v) && !('total' in v) && num(v) == null)) walk(v);
+        else add(k, v);
+      }
+    };
+    walk(body);
+  }
+  return { map, raw: body };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Daily Brief (Chat 5) - CTC-style forecast vs actual, per client    */
+/*  Money math is Triple Whale (net sales, new/returning, blended      */
+/*  spend); Meta ROAS stays Meta-attributed. aMER = new-customer       */
+/*  revenue ÷ total ad spend. CM = net sales × margin% − ad spend.     */
+/* ------------------------------------------------------------------ */
+
+/** Which TW metrics are worth keeping per-day (id or title match). */
+/* Which Triple Whale metrics are worth storing per day.
+ *
+ * ctr|cpm|impression|click|purchases|benchmark were added 2026-08-28. Without
+ * them the filter silently dropped Facebook CTR, CPM, Impressions and Clicks -
+ * Triple Whale has always offered those, and their absence was mistaken for TW
+ * not having the data, which nearly sent the Meta section of the report to
+ * Meta own API for numbers Triple Whale could answer. benchmark picks up TW PEER
+ * figures (Peer Facebook CPM/CTR/ROAS), a paid feature elsewhere, being binned.
+ *
+ * Widening this only affects what is STORED from now on; existing rows need a
+ * backfill to gain the new metrics. */
+const TW_KEEP = /sales|revenue|spend|adcost|cost|profit|cogs|orders|\bmer\b|roas|refund|shipping|fees|ads|tax|ltv|cpa|ctr|cpm|impression|click|purchases|benchmark/i;
+/* CAREFUL - Triple Whale's field names do not mean what they say:
+ *   netSales   is titled "Total Sales"  = Shopify TOTAL SALES, i.e. it ALREADY
+ *              includes shipping charged to customers AND sales tax, net of
+ *              discounts and returns.
+ *   totalSales is titled "Order Revenue" = the same thing BEFORE returns.
+ * Verified against Shopify for Lucky Golf, July 2026: TW netSales 77,990.42 vs
+ * Shopify total_sales 77,966.52 (0.03%), while Shopify net_sales was 72,055.46.
+ * So never add totalShippingPrice to this - that counts shipping twice. */
+const TW_SALES = ['netSales', 'totalSales'];
+
+/** Per-day series out of a summary-page response: {metricId: {date: value}}.
+ *  charts.current x = zero-based day-of-year in the shop's timezone (verified 2026-08-20). */
+function twDailySeries(raw, start, end) {
+  const out = {};
+  if (!Array.isArray(raw?.metrics)) return out;
+  const startY = +start.slice(0, 4), endY = +end.slice(0, 4);
+  // TW's chart x is a ONE-BASED day of year: Jan 1 is 1, not 0. Treating it as
+  // zero-based shifts every value a day into the future, which silently reported
+  // yesterday's numbers as today's. Verified against Meta's own dated spend:
+  // Meta booked $678.05 for Bonk on 2026-08-19 and TW returns it at x=231, which
+  // is 1-based for Aug 19.
+  const doyToDate = x => {
+    for (const y of startY === endY ? [startY] : [startY, endY]) {
+      const d = new Date(Date.UTC(y, 0, 1) + (x - 1) * 86400e3).toISOString().slice(0, 10);
+      if (d >= start && d <= end) return d;
+    }
+    return null;
+  };
+  for (const m of raw.metrics) {
+    const id = m.metricId ?? m.id;
+    if (!id || !Array.isArray(m.charts?.current)) continue;
+    if (!TW_KEEP.test(id + ' ' + (m.title || ''))) continue;
+    for (const p of m.charts.current) {
+      const d = doyToDate(+p.x);
+      if (d != null) (out[id] ??= {})[d] = +p.y || 0;
+    }
+  }
+  return out;
+}
+
+/* PAID ORDERS ONLY (Cole, 2026-10-09). Triple Whale counts $0 orders (product seeding to creators, replacements) as
+ * orders AND as new customers: Grunk and Party Patch were ~35% free orders Sep 1 to Oct 8, which made orders too high,
+ * average order too low and cost per new customer look better than it was. So at the door, for EVERY reader (Locus,
+ * the Daily Brief, reports, the Strategist, Day check): `totalOrders` = TW's `totalOrdersWithAmount` (orders with money
+ * on them), and `newCustomersOrders` = new PAYING customers (newPaid below). The raw counts stay as `totalOrdersAll` / `newCustomersOrdersAll`. Revenue is untouched
+ * ($0 adds nothing) and costs come from TW's own cost metrics, so a seeded product still costs money in profit.
+ * History was converted once on 2026-10-09 (scripts/paid-orders-migrate.mjs); never convert a row twice. */
+/* NEW PAYING CUSTOMERS. Measured on Sep 1 to Oct 8: "take every free order off the new-customer count" over-corrects
+ * (Grunk 126 against 271 first paid orders seen order by order: creators seeded twice are repeat customers, not new).
+ * So a day's new-customer orders = the SMALLER of Triple Whale's new-customer count (knows the whole Shopify history,
+ * but counts seeding) and the first PAID orders we see order by order in tw_orders (paid only, but only ~13 months of
+ * history). Until tw_orders has the day (it lands with the nightly attribution sync), the fallback is the raw count
+ * less the free orders; the hourly sync rewrites the last 10 days, so recent days correct themselves.
+ * `seen` = { date: { n: paid orders in tw_orders, firsts: customers whose first paid order is that day } }.
+ * KEEP IN STEP with scripts/paid-orders-migrate.mjs (newPaid). */
+export function newPaid(rawNew, all, paid, seen) {
+  if (rawNew == null) return null;
+  const free = Math.max(0, (all ?? 0) - (paid ?? 0));
+  if (seen && paid > 0 && seen.n >= 0.8 * paid) return Math.min(rawNew, seen.firsts);
+  return Math.max(0, rawNew - free);
+}
+function paidOrdersOnly(daily, seen = {}) {
+  const all = daily.totalOrders, paid = daily.totalOrdersWithAmount, nco = daily.newCustomersOrders;
+  if (!all || !paid) return;
+  daily.totalOrdersAll = { ...all };
+  if (nco) daily.newCustomersOrdersAll = { ...nco };
+  for (const d of Object.keys(all)) {
+    if (paid[d] == null) continue;
+    const raw = all[d];
+    daily.totalOrders[d] = paid[d];
+    if (nco && nco[d] != null) daily.newCustomersOrders[d] = newPaid(nco[d], raw, paid[d], seen[d]);
+  }
+}
+/** First paid orders per day from tw_orders (one query): { date: { n, firsts } }. Empty on any failure. */
+async function firstPaidByDay(env, act, from, to) {
+  try {
+    const { results } = await env.DB.prepare(`WITH f AS (SELECT customer_id, MIN(date) first FROM tw_orders WHERE act_id = ?1 AND customer_id IS NOT NULL AND customer_id != '' AND total > 0 GROUP BY customer_id)
+      SELECT o.date, COUNT(*) n, SUM(CASE WHEN f.first = o.date THEN 1 ELSE 0 END) firsts FROM tw_orders o LEFT JOIN f ON f.customer_id = o.customer_id
+      WHERE o.act_id = ?1 AND o.total > 0 AND o.date BETWEEN ?2 AND ?3 GROUP BY o.date`).bind(act, from, to).all();
+    return Object.fromEntries((results || []).map(r => [r.date, { n: r.n || 0, firsts: r.firsts || 0 }]));
+  } catch { return {}; }
+}
+
+/** Pull the last `days` days of per-day TW metrics into tw_daily (one API call). */
+async function syncTwDaily(env, acct, days = 10) {
+  if (!env.TW_API_KEY) return { name: acct.name, skipped: 'TW_API_KEY secret not set' };
+  if (!acct.tw_shop) return { name: acct.name, skipped: 'no Triple Whale shop set' };
+  const today = localDate(acct.tz);
+  // Up to ~14 months, so the Plan page can show a real six-month history and a
+  // year-ago comparison. One TW call covers the whole window.
+  const start = addDays(today, -Math.min(days, 430));
+  const res = await twSummary(env, acct.tw_shop, start, today);
+  const daily = twDailySeries(res.raw, start, today);
+  paidOrdersOnly(daily, await firstPaidByDay(env, acct.act_id, start, today));
+  const stmts = [];
+  for (const [id, byDate] of Object.entries(daily))
+    for (const [date, v] of Object.entries(byDate))
+      stmts.push(env.DB.prepare(
+        `INSERT INTO tw_daily (act_id, date, metric, value, synced_at) VALUES (?1,?2,?3,?4,datetime('now'))
+         ON CONFLICT(act_id, date, metric) DO UPDATE SET value = excluded.value, synced_at = excluded.synced_at`,
+      ).bind(acct.act_id, date, id, v));
+  // Bigger batches: a 400-day backfill is ~25k rows, and every batch is a
+  // subrequest against the Worker's per-invocation limit.
+  for (let i = 0; i < stmts.length; i += D1_CHUNK) await env.DB.batch(stmts.slice(i, i + D1_CHUNK));
+  if (Array.isArray(res.raw?.metrics)) {
+    await putSetting(env, `twCatalog:${acct.act_id}`,
+      JSON.stringify(res.raw.metrics.map(m => ({ id: m.metricId ?? m.id, title: m.title })))).catch(() => {});
+  }
+  return { name: acct.name, ok: true, metrics: Object.keys(daily).length, from: start, to: today, rows: stmts.length };
+}
+
+/** Suggested monthly goals from the trailing 28 full days: run-rate sales/spend, trailing aMER. */
+async function suggestGoals(env, acct) {
+  const today = localDate(acct.tz);
+  const from = addDays(today, -28);
+  const { results } = await env.DB.prepare(
+    `SELECT date, metric, value FROM tw_daily WHERE act_id = ?1 AND date >= ?2 AND date < ?3
+     AND metric IN ('netSales','totalSales','newCustomerSales','blendedAds','ga_adCost','grossProfit','totalProductCosts','totalPaymentGatewayCosts','totalNetTaxes')`,
+  ).bind(acct.act_id, from, today).all();
+  const piv = {};
+  for (const r of results) (piv[r.metric] ??= {})[r.date] = r.value;
+  const dates = Object.keys(piv.netSales || piv.totalSales || {}).sort();
+  if (dates.length < 14) return { error: 'need at least 14 days of Triple Whale history - hit “Refresh Triple Whale data” first' };
+  const { results: metaRows } = await env.DB.prepare(
+    `SELECT date, SUM(spend) AS spend FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date < ?3 GROUP BY date`,
+  ).bind(acct.act_id, from, today).all();
+  const metaBy = Object.fromEntries(metaRows.map(r => [r.date, r.spend]));
+  let sales = 0, spend = 0, newRev = 0, marginNum = 0, marginDen = 0;
+  for (const d of dates) {
+    // Same revenue basis as everywhere else: Shopify TOTAL SALES minus sales tax.
+    // Shipping is already inside netSales and must never be added. Get this wrong and
+    // a goal set here is measured against a different number for the rest of the month.
+    const s = (piv.netSales?.[d] ?? piv.totalSales?.[d] ?? 0) - (piv.totalNetTaxes?.[d] ?? 0);
+    sales += s;
+    spend += piv.blendedAds?.[d] ?? ((metaBy[d] ?? 0) + (piv.ga_adCost?.[d] ?? 0));
+    newRev += piv.newCustomerSales?.[d] ?? 0;
+    const gp = piv.grossProfit?.[d] ?? (piv.totalProductCosts?.[d] != null ? s - piv.totalProductCosts[d] - (piv.totalPaymentGatewayCosts?.[d] ?? 0) : null);
+    if (gp != null && s > 0) { marginNum += gp; marginDen += s; }
+  }
+  const n = dates.length, dim = daysInMonth(today);
+  const round = (v, step) => Math.round(v / step) * step;
+  return {
+    ok: true, days_used: n,
+    sales: Math.max(500, round(sales / n * dim, 500)),
+    spend: acct.monthly_budget ?? Math.max(250, round(spend / n * dim, 250)),
+    spend_source: acct.monthly_budget != null ? 'the monthly target in Settings' : 'trailing 28-day run-rate',
+    amer: spend > 0 && newRev > 0 ? Math.round(newRev / spend * 20) / 20 : null,
+    margin_28d: marginDen > 0 ? marginNum / marginDen : null,
+    daily_sales: sales / n, daily_spend: spend / n,
+  };
+}
+
+/** Is the client's COGS data in Triple Whale trustworthy enough to state Contribution
+ *  Margin to their face? Real cost data is stable day to day; incomplete COGS (some SKUs
+ *  costed, some not) makes daily margin swing wildly or go negative. */
+function judgeCogs(dayMargins, blended) {
+  const n = dayMargins.length;
+  if (!n || blended == null) return { verdict: 'none', reason: 'no cost data in Triple Whale' };
+  const sorted = dayMargins.slice().sort((a, b) => a - b);
+  const lo = sorted[Math.floor(n * 0.1)], hi = sorted[Math.floor(n * 0.9)];
+  // Same semantics as Profit's judgeCosts - the two tools must not drift apart:
+  // - MATERIALITY FLOOR: a day at -0.3% is product mix, not contamination. Real
+  //    contamination (wholesale paid outside Shopify, an inventory receipt booked
+  //    to one day) is a MULTIPLE of the day's revenue. Anything above -5% ignores.
+  // - PATTERN, not incident: one bad day in 28 used to flip the whole client to
+  //    "broken" and strip CM from the client-facing brief while 27 days ran clean.
+  //    Only more than a tenth of the window means the data itself is untrustworthy.
+  const negatives = dayMargins.filter(m => m < -0.05).length;
+  const spread = hi - lo;
+  const out = { verdict: 'good', days: n, blended, spread, negatives, p10: lo, p90: hi };
+  const heavilyContaminated = negatives > Math.max(1, n * 0.1);
+  if (heavilyContaminated || blended <= 0.15 || spread > 0.6) {
+    out.verdict = 'broken';
+    out.reason = heavilyContaminated
+      ? `${negatives} of the last ${n} days record more variable cost than the store took in - typically wholesale orders paid outside Shopify or an inventory delivery booked as one day's cost`
+      : blended <= 0.15
+      ? `trailing margin of ${Math.round(blended * 100)}% is implausibly thin - COGS in Triple Whale looks wrong`
+      : `daily margin swings ${Math.round(lo * 100)}%–${Math.round(hi * 100)}%, which means only some products have COGS set`;
+  } else if (negatives > 0) {
+    out.verdict = 'noisy';
+    out.reason = `${negatives} of the last ${n} days record more variable cost than the store took in - almost always a wholesale order or inventory delivery; the other ${n - negatives} days are consistent, so the profit figures still stand`;
+  } else if (spread > 0.4) {
+    out.verdict = 'noisy';
+    out.reason = `daily margin ranges ${Math.round(lo * 100)}%–${Math.round(hi * 100)}% - likely a few products missing COGS`;
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Data health - can Triple Whale be trusted for this day?            */
+/*                                                                     */
+/*  2026-09-02: fb_ads_spend went to 0 for five of six brands and      */
+/*  nothing noticed for three days. Bonk's brief reported $204 of       */
+/*  spend against $769 actually spent, and its MER read 7.7x.          */
+/*                                                                     */
+/*  THE CHECK THAT DOES NOT WORK is adding Triple Whale's own numbers   */
+/*  up. `blendedAds` IS the sum of TW's platform rows - measured over   */
+/*  95 days of history it matches fb_ads_spend + ga_adCost + tiktok_    */
+/*  spend + vibeSpend + … to the cent, on the broken days too, because  */
+/*  a platform that drops out contributes a clean zero to both sides.   */
+/*  An internal-consistency check would have passed every day of this   */
+/*  outage.                                                            */
+/*                                                                     */
+/*  Two checks that DO work:                                           */
+/*    1. AN OUTSIDE WITNESS. `daily_insights` is synced hourly from     */
+/*       Meta's own API and owes Triple Whale nothing, so it can        */
+/*       contradict it. This is the only platform we have a second      */
+/*       source for, which is why Meta is treated specially - not       */
+/*       because Meta matters more.                                     */
+/*    2. CONTINUITY. A platform that has spent every day for a          */
+/*       fortnight and reports nothing today has dropped out, whoever   */
+/*       is at fault. It is weaker than a witness (a genuine pause      */
+/*       looks identical) but it is all there is for Google, TikTok     */
+/*       and the rest.                                                  */
+/* ------------------------------------------------------------------ */
+
+/** Triple Whale's per-platform ad spend ids → the name a human uses.
+ *  A platform absent from this map is still counted inside blendedAds; it just
+ *  gets no continuity check of its own, so adding one here only ever helps. */
+const TW_PLATFORM_SPEND = {
+  fb_ads_spend: 'Meta', ga_adCost: 'Google', tiktok_spend: 'TikTok',
+  snapchatSpend: 'Snapchat', pinterestSpend: 'Pinterest', twitter_spend: 'X',
+  redditSpend: 'Reddit', applovinSpend: 'AppLovin', adrollSpend: 'AdRoll',
+  stackadaptSpend: 'StackAdapt', vibeSpend: 'Vibe', impactSpend: 'Impact',
+  influencerSpend: 'Influencer', bingSpend: 'Microsoft',
+};
+/* Below this, a day's Meta spend is too small for the comparison to mean
+   anything: TW and Meta cut the day on different clocks, so a $12 day can
+   legitimately differ by half. */
+const META_WITNESS_FLOOR = 25;
+/* How far under Meta's own figure TW is allowed to sit before we stop
+   believing it. 10% absorbs the timezone edge; a dropped connection is 100%. */
+const META_WITNESS_TOL = 0.9;
+/* A platform reporting less than a fifth of its own fortnight is a dropout,
+   not a slow day. */
+const DROPOUT_RATIO = 0.2;
+/* Ignore continuity on platforms spending pocket change - an influencer line
+   that runs $3 some days and $0 others is not an outage. */
+const DROPOUT_FLOOR = 10;
+
+/** The day's total ad spend, and whether Triple Whale's own total was believable.
+ *  `metaApi` is Meta's own reported spend for that date (daily_insights).
+ *
+ *  When TW's Meta row is materially below Meta's own figure we REBUILD the
+ *  total rather than dropping TW: keep every other platform TW reports
+ *  (its blended total minus its own Meta row) and put Meta's real figure back
+ *  in place. Verified against 2026-09-03: Lucky rebuilt to $1,277 against
+ *  $1,276 actually spent across Meta, Google and Vibe. */
+function spendFor(piv, date, metaApi) {
+  const blended = piv.blendedAds?.[date] ?? null;
+  const twMeta = piv.fb_ads_spend?.[date] ?? null;
+  const google = piv.ga_adCost?.[date] ?? null;
+  const witnessed = metaApi != null && metaApi > META_WITNESS_FLOOR;
+  const metaMissing = witnessed && (twMeta == null || twMeta < metaApi * META_WITNESS_TOL);
+  if (metaMissing) {
+    const others = blended != null
+      ? Math.max(0, blended - (twMeta ?? 0))     // every platform TW still reports
+      : (google ?? 0);
+    return { spend: metaApi + others, source: 'rebuilt', tw_blended: blended, tw_meta: twMeta, meta_api: metaApi };
+  }
+  if (blended != null) return { spend: blended, source: 'triple_whale', tw_blended: blended, tw_meta: twMeta, meta_api: metaApi };
+  // No TW row at all - the pre-existing fallback, kept so a brand mid-backfill
+  // still reports something.
+  const parts = metaApi != null || google != null ? (metaApi ?? 0) + (google ?? 0) : null;
+  return { spend: parts, source: parts == null ? 'none' : 'platforms', tw_blended: null, tw_meta: twMeta, meta_api: metaApi };
+}
+
+/** Median of a platform's last 14 days, as the baseline a dropout is judged against.
+ *  Median not mean: one $0 day must not drag the bar down to where the next $0
+ *  day looks normal. */
+function platformBaseline(piv, metric, date) {
+  const vals = [];
+  for (let i = 1; i <= 14; i++) { const v = piv[metric]?.[addDays(date, -i)]; if (v != null) vals.push(v); }
+  if (!vals.length) return null;
+  vals.sort((a, b) => a - b);
+  return vals[Math.floor(vals.length / 2)];
+}
+
+const fmtUsd = n => n == null ? ' - ' : `$${Math.round(n).toLocaleString('en-US')}`;
+
+/** Everything wrong with one day, in words a person can act on.
+ *  Pure - it reads the pivot both briefData and dataHealth already hold, so
+ *  running it costs no queries. */
+function dayIssues(piv, metaBy, date, sp) {
+  const issues = [];
+  const sales = twDay(piv, date, TW_SALES);
+  const m = metaBy[date];
+  if (sp.tw_blended == null && sales == null) {
+    issues.push({ code: 'missing_day', severity: 'broken', label: 'Triple Whale has no data for these days',
+      what: 'Triple Whale has no data at all for this day',
+      fix: 'Re-sync Triple Whale. If it stays empty, check the shop is still connected in Triple Whale.' });
+    return issues;                               // everything else is downstream of this
+  }
+  if (sp.source === 'rebuilt') {
+    /* A WARNING, NOT A BLOCK (2026-10-17). spendFor() has already put Meta's
+       own figure back into the total, and channel returns divide by Meta's own
+       spend too, so the brief's numbers are RIGHT; only Triple Whale's copy is
+       short. Blocking here held five correct briefs on 2026-10-17 behind "Do
+       not send - the numbers are wrong" when TW's Meta feed stalled mid-day on
+       the 16th for every brand on the shared connection. Still said on the card
+       and on Data Health, so the TW connection gets fixed. */
+    issues.push({ code: 'meta_missing', severity: 'warn', label: 'Triple Whale is behind on Meta spend',
+      what: `Triple Whale has ${fmtUsd(sp.tw_meta ?? 0)} of Meta spend, Meta itself reports ${fmtUsd(sp.meta_api)}, so the brief uses Meta's figure`,
+      fix: 'The brief is right as it stands. To fix Triple Whale itself, reconnect Meta in Triple Whale → Settings → Integrations.' });
+  }
+  for (const [metric, label] of Object.entries(TW_PLATFORM_SPEND)) {
+    if (metric === 'fb_ads_spend') continue;     // the witness above is stronger
+    const base = platformBaseline(piv, metric, date);
+    if (base == null || base < DROPOUT_FLOOR) continue;
+    const v = piv[metric]?.[date] ?? null;
+    if (v == null || v < base * DROPOUT_RATIO) {
+      /* A WARNING, NOT A BLOCK. Cole, 2026-09-10: "assume no TikTok spend if
+         it says none." Meta is skipped above because it HAS a second witness,
+         so a wrong Meta figure is provably wrong and still stops a send. Every
+         platform in this loop has no witness at all: a zero here is indis-
+         tinguishable from a paused campaign, and the check is inference off a
+         14-day median, not evidence. Blocking a client brief on inference cost
+         a real morning (Grunk, September 9: $62 of TikTok against $341 of
+         spend held the whole brief). Believe the zero, say so on the card and
+         on Data Health, and let the send go. */
+      issues.push({ code: 'platform_dropout', severity: 'warn', label: `${label} spend has stopped arriving`,
+        what: `${label} spend reads ${v == null ? 'nothing' : fmtUsd(v)} against a 14-day typical of ${fmtUsd(base)}`,
+        fix: `Treated as a real zero, so this does not hold the brief. If ${label} should have been running, check its connection in Triple Whale → Settings → Integrations. Either way this clears itself in two weeks.` });
+    }
+  }
+  if (sales == null) {
+    issues.push({ code: 'no_sales', severity: 'broken', label: 'store revenue is missing',
+      what: 'no store revenue recorded for this day',
+      fix: 'Re-sync Triple Whale; if it stays empty, the Shopify connection inside Triple Whale needs attention.' });
+  } else if (sales === 0 && m?.purchases > 0) {
+    issues.push({ code: 'zero_sales', severity: 'warn', label: 'store revenue reads zero on a day with orders',
+      what: `Triple Whale shows no revenue while Meta recorded ${m.purchases} purchase(s)`,
+      fix: 'Usually a lagging Shopify sync - re-sync and check again before sending.' });
+  }
+  return issues;
+}
+
+/** One brand's data health over a window. Three queries, no network. */
+async function dataHealth(env, acct, { days = 14, upTo = null } = {}) {
+  const end = upTo || addDays(localDate(acct.tz), -1);
+  const start = addDays(end, -(days - 1));
+  const from = addDays(start, -14);              // continuity needs its baseline
+  const { results: twRows } = await env.DB.prepare(
+    `SELECT date, metric, value FROM tw_daily WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`,
+  ).bind(acct.act_id, from, end).all();
+  const piv = {};
+  for (const r of twRows) (piv[r.metric] ??= {})[r.date] = r.value;
+  const { results: mRows } = await env.DB.prepare(
+    `SELECT date, SUM(spend) AS spend, SUM(purchases) AS purchases FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date <= ?3 GROUP BY date`,
+  ).bind(acct.act_id, from, end).all();
+  const metaBy = Object.fromEntries(mRows.map(r => [r.date, r]));
+  const lastSync = (await env.DB.prepare(
+    `SELECT MAX(synced_at) AS t FROM tw_daily WHERE act_id = ?1`,
+  ).bind(acct.act_id).first())?.t ?? null;
+  /* Unsent drafts in the window, so a draft written from numbers that have
+     since been repaired can still be rebuilt.
+     THE CASE THIS EXISTS FOR: on 2026-09-05 Triple Whale was fixed and every
+     brand went green - which took the Rebuild button away while six drafts
+     still carried the wrong spend. Health describes the DATA; a draft is a
+     copy of the data taken at a moment, and the two heal separately. */
+  const { results: draftRows } = await env.DB.prepare(
+    `SELECT date, status, posted_at FROM briefs
+      WHERE act_id = ?1 AND date >= ?2 AND date <= ?3 AND status != 'sent'
+      ORDER BY date`,
+  ).bind(acct.act_id, start, end).all().catch(() => ({ results: [] }));
+
+  const out = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) {
+    const sp = spendFor(piv, d, metaBy[d]?.spend ?? null);
+    out.push({ date: d, ...sp, sales: twDay(piv, d, TW_SALES), issues: dayIssues(piv, metaBy, d, sp) });
+  }
+  // Account-level: is the data even fresh? A brand nobody has synced for two
+  // days looks perfectly healthy day by day, because every day it holds is old.
+  const issues = [];
+  const staleH = lastSync ? (Date.now() - Date.parse(`${lastSync.replace(' ', 'T')}Z`)) / 36e5 : null;
+  if (!acct.tw_shop) {
+    issues.push({ code: 'not_connected', severity: 'warn',
+      what: 'this brand has no Triple Whale shop set, so every blended figure is built from platform data alone',
+      fix: 'Add the Triple Whale shop in Settings.' });
+  } else if (staleH == null) {
+    issues.push({ code: 'never_synced', severity: 'broken',
+      what: 'Triple Whale has never synced for this brand', fix: 'Press Re-sync Triple Whale.' });
+  } else if (staleH > 30) {
+    issues.push({ code: 'stale', severity: 'warn',
+      what: `Triple Whale data was last refreshed ${Math.round(staleH)} hours ago`,
+      fix: 'Press Re-sync Triple Whale.' });
+  }
+  const badDays = out.filter(x => x.issues.some(i => i.severity === 'broken'));
+  const warnDays = out.filter(x => x.issues.some(i => i.severity === 'warn'));
+  const verdict = badDays.length || issues.some(i => i.severity === 'broken') ? 'broken'
+    : warnDays.length || issues.length ? 'warn' : 'ok';
+  /* The headline is the whole point of this endpoint: it must say what is wrong
+     and what to do without the reader opening anything or asking anyone. */
+  let headline = 'Triple Whale agrees with every platform it reports.';
+  if (badDays.length) {
+    /* Group by LABEL, never by the sentence: the sentence carries that day's
+       figures, so two days of one broken connection read as two problems. */
+    const labels = [...new Set(badDays.flatMap(x => x.issues.filter(i => i.severity === 'broken').map(i => i.label || i.code)))];
+    const named = labels.length <= 2 ? labels.join(', and ') : `${labels.slice(0, 2).join(', ')} and ${labels.length - 2} more`;
+    const when = badDays.length === 1 ? `on ${prettyDate(badDays[0].date)}`
+      : `on ${badDays.length} of the last ${days} days (${prettyDate(badDays[0].date)} → ${prettyDate(badDays[badDays.length - 1].date)})`;
+    headline = `${named[0].toUpperCase()}${named.slice(1)} - ${when}.`;
+  } else if (issues.length) headline = issues[0].what;
+  return {
+    account: { act_id: acct.act_id, name: acct.name, currency: acct.currency },
+    from: start, to: end, last_sync: lastSync, stale_hours: staleH,
+    verdict, headline, issues, days: out,
+    bad_dates: badDays.map(x => x.date),
+    /* `written_before_last_sync` is the honest signal, not proof: Triple Whale
+       re-syncs hourly, so it flags a draft older than the data rather than a
+       draft that is actually wrong. The page says which it is. */
+    drafts: draftRows.map(r => ({
+      date: r.date, status: r.status, posted_at: r.posted_at,
+      written_before_last_sync: !!(lastSync && r.posted_at && Date.parse(`${lastSync.replace(' ', 'T')}Z`) > Date.parse(r.posted_at)),
+    })),
+  };
+}
+
+/** Month goals for an account: month override merged over "default". Null if none set. */
+/* What an unplanned month inherits (2026-10-05): the most recent month BEFORE it that has
+   its own plan. `default` is overwritten by every save, so saving November made October
+   inherit November's goal; it is now only the fallback when no dated month exists at all.
+   The margin override (cm_pct) still carries forward from wherever it was last set. */
+function inheritedGoals(g, ym) {
+  const months = Object.keys(g).filter(k => /^\d{4}-\d{2}$/.test(k)).sort();
+  const prior = months.filter(k => k < ym).pop();
+  if (prior) return g[prior] || {};
+  const d = g.default || {};
+  if (months.some(k => k > ym)) return d.cm_pct != null ? { cm_pct: d.cm_pct } : {};
+  return d;
+}
+function goalsFor(acct, ym) {
+  const g = safeJson(acct.goals_json, {});
+  const m = { ...inheritedGoals(g, ym), ...(g[ym] || {}) };
+  return m.sales != null || m.spend != null ? m : null;
+}
+
+function twDay(piv, date, ids) { for (const id of ids) { const v = piv[id]?.[date]; if (v != null) return v; } return null; }
+
+/** Forecast vs actual for every day of `upTo`'s month (forecast-only rows after upTo). */
+async function briefData(env, acct, upTo) {
+  const ym = monthOf(upTo);
+  const dim = daysInMonth(upTo);
+  const monthStart = `${ym}-01`;
+  const histFrom = addDays(monthStart, -35);
+  const { results: twRows } = await env.DB.prepare(
+    `SELECT date, metric, value FROM tw_daily WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`,
+  ).bind(acct.act_id, histFrom, upTo).all();
+  const piv = {};
+  for (const r of twRows) (piv[r.metric] ??= {})[r.date] = r.value;
+  const { results: metaRows } = await env.DB.prepare(
+    `SELECT date, SUM(spend) AS spend, SUM(purchases) AS purchases, SUM(revenue) AS revenue FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date <= ?3 GROUP BY date`,
+  ).bind(acct.act_id, histFrom, upTo).all();
+  const meta = Object.fromEntries(metaRows.map(r => [r.date, r]));
+  /* ATTRIBUTION IS TRIPLE WHALE'S, ALWAYS (Cole, 2026-09-18). Per-channel
+     purchases and ROAS used to be each platform's own count: Meta API for Meta,
+     Google Ads' self-reported conversions for Google. Google's count ran ~40%
+     under Triple Whale's pixel (Sep 10-16: 107 vs 178 orders across six brands)
+     and most of it had not landed by the 7am brief. Spend stays the platform's,
+     because Triple Whale does not measure delivery. */
+  const { results: attrRows } = await env.DB.prepare(
+    `SELECT date, platform, SUM(revenue) AS rev, SUM(orders) AS ord FROM tw_ad_attr
+      WHERE act_id = ?1 AND model = ?2 AND date >= ?3 AND date <= ?4 AND platform IN ('meta','google')
+      GROUP BY date, platform`,
+  ).bind(acct.act_id, BRIEF_ATTR_MODEL, histFrom, upTo).all().catch(() => ({ results: [] }));
+  const twAttr = {};
+  for (const r of attrRows) (twAttr[r.date] ??= {})[r.platform] = { rev: r.rev || 0, ord: r.ord || 0 };
+  const goals = goalsFor(acct, ym);
+  // `default` is an inheritance convenience, not a plan. A month nobody planned still
+  // gets numbers, and reporting them as "the plan" is how a goal silently carries
+  // from one month to the next. Say which it is, and name where it came from.
+  const gjson = safeJson(acct.goals_json, {});
+  const planned = !!gjson[ym];
+  let inheritedFrom = null;
+  if (!planned && goals) {
+    const months = Object.keys(gjson).filter(k => /^\d{4}-\d{2}$/.test(k)).sort();
+    inheritedFrom = months.filter(k => gjson[k] && gjson[k].sales === goals.sales).pop() || null;
+  }
+  const shipTotal = m => Object.values(piv[m] || {}).reduce((x, y) => x + (y || 0), 0);
+  // Diagnostic only now. Shipping revenue is inside netSales and cannot be removed,
+  // so a client who bills shipping without recording a fulfilment cost simply has
+  // overstated profit - we flag it rather than pretending to net it off.
+  const shipMode = shipTotal('totalShippingPrice') > 0 && shipTotal('totalShippingCosts') <= 0 ? 'uncosted' : 'costed';
+
+  // The trailing 28 days still feed the new/returning share and the margin, but the
+  // day-of-week CURVE is deliberately not used to split the goal - see below.
+  const dow = d => new Date(d + 'T12:00:00Z').getUTCDay();
+  let newRevSum = 0, retRevSum = 0, salesSum = 0, marginNum = 0, marginDen = 0;
+  const dayMargins = [];                     // per-day pre-ad-spend margin, for the COGS sanity check
+  for (let i = 1; i <= 28; i++) {
+    const d = addDays(monthStart, -i);
+    const s = twDay(piv, d, TW_SALES) ?? meta[d]?.revenue ?? null;
+    if (s == null) continue;
+    salesSum += s;
+    newRevSum += piv.newCustomerSales?.[d] ?? 0;
+    retRevSum += piv.rcRevenue?.[d] ?? 0;
+    const gp = piv.grossProfit?.[d] ?? (piv.totalProductCosts?.[d] != null ? s - piv.totalProductCosts[d] - (piv.totalPaymentGatewayCosts?.[d] ?? 0) : null);
+    if (gp != null && s > 0) { marginNum += gp; marginDen += s; dayMargins.push(gp / s); }
+  }
+  const newShare = newRevSum + retRevSum > 0 ? newRevSum / (newRevSum + retRevSum) : null;
+  const margin28 = marginDen > 0 ? marginNum / marginDen : null;   // trailing pre-ad-spend margin
+  const cogsQuality = judgeCogs(dayMargins, margin28);
+
+  const cmPct = goals?.cm_pct ?? null;
+  const fcMargin = cmPct ?? margin28;            // forecast-side margin: explicit % beats trailing actuals
+  const days = [];
+  for (let d = 1; d <= dim; d++) {
+    const date = `${ym}-${String(d).padStart(2, '0')}`;
+    const f = {};
+    if (goals?.sales != null) f.sales = goals.sales / dim;
+    if (goals?.spend != null) f.spend = goals.spend / dim;
+    if (f.sales != null && f.spend != null && fcMargin != null) f.cm = f.sales * fcMargin - f.spend;
+    f.amer = goals?.amer ?? (newShare != null && f.sales != null && f.spend ? newShare * f.sales / f.spend : null);
+    f.mer = f.sales != null && f.spend ? f.sales / f.spend : null;   // implied by the sales + spend goals
+    if (date > upTo) { days.push({ date, f, a: null }); continue; }
+    const netSalesDay = twDay(piv, date, TW_SALES);
+    // netSalesDay is Shopify TOTAL SALES (shipping and tax already inside it).
+    // CTC's reported line is "Net Sales + Shipping" = total sales minus tax, so we
+    // subtract tax rather than adding shipping. Tax defaults to 0 when the metric
+    // has not been backfilled yet, which degrades to total sales - never to the
+    // old double-counted figure.
+    const tax = piv.totalNetTaxes?.[date] ?? 0;
+    const shipRev = piv.totalShippingPrice?.[date] ?? 0;   // reported only; already in netSalesDay
+    const shipCost = piv.totalShippingCosts?.[date] ?? 0;
+    const handling = piv.totalHandlingFees?.[date] ?? 0;
+    const sales = netSalesDay == null ? null : netSalesDay - tax;
+    const mrow = meta[date];
+    const gSpend = piv.ga_adCost?.[date] ?? null;
+    const blended = piv.blendedAds?.[date] ?? null;
+    // TW reports new/returning on the Order-Revenue basis (incl. tax) while our headline
+    // Net Sales excludes it, so the raw split doesn't add up to the headline. Keep the
+    // measured NEW-CUSTOMER SHARE and rebase it onto Net Sales so the report reconciles.
+    const rawNew = piv.newCustomerSales?.[date] ?? null;
+    const rawRet = piv.rcRevenue?.[date] ?? null;
+    const rawSplit = (rawNew ?? 0) + (rawRet ?? 0);
+    const newShareDay = rawSplit > 0 && rawNew != null ? rawNew / rawSplit : null;
+    const sp = spendFor(piv, date, mrow?.spend ?? null);
+    /* A day with NO Triple Whale attribution rows at all has not synced yet -
+       that is missing, not zero. A day that has rows but none for a platform
+       is a real zero for that platform. */
+    const tw = twAttr[date] || null;
+    const twCh = (p, spend) => {
+      if (!tw || !(spend > 0)) return { roas: null, purchases: null };
+      const c = tw[p] || { rev: 0, ord: 0 };
+      return { roas: c.rev / spend, purchases: Math.round(c.ord * 10) / 10 };
+    };
+    const twMeta = twCh('meta', mrow?.spend ?? piv.fb_ads_spend?.[date]);
+    const twGoogle = twCh('google', gSpend);
+    const a = {
+      sales,
+      new_share: newShareDay,
+      new_rev: newShareDay != null && sales != null ? sales * newShareDay : rawNew,
+      ret_rev: newShareDay != null && sales != null ? sales * (1 - newShareDay) : rawRet,
+      /* NOT `blended ?? meta+google` any more. That trusted any blended figure
+         Triple Whale returned, and on 2026-09-02 it returned a Google-only
+         total for five brands - non-null, internally consistent, and wrong by
+         70%. spendFor() checks TW's Meta row against Meta's own API and
+         rebuilds the total when they disagree. See the data-health block. */
+      spend: sp.spend,
+      spend_source: sp.source,
+      tw_blended: sp.tw_blended,
+      meta_spend: mrow?.spend ?? null,
+      google_spend: gSpend,
+      // Triple Whale pixel attribution (BRIEF_ATTR_MODEL). The ORDER COUNT rides
+      // beside each ROAS because it decides whether the ratio means anything:
+      // under two orders the ROAS is one order's value over a day of spend.
+      attr_source: tw ? 'triple_whale' : null,
+      meta_roas: twMeta.roas,
+      meta_purchases: twMeta.purchases,
+      google_roas: twGoogle.roas,
+      google_purchases: twGoogle.purchases,
+      // The platforms' own figures, kept for reference only. Never rendered or
+      // given to the narrative. ga_ROAS is Google Ads' self-report, not TW's.
+      meta_roas_platform: mrow && mrow.spend ? mrow.revenue / mrow.spend : null,
+      google_roas_platform: piv.ga_ROAS?.[date] ?? null,
+      blended_roas: piv.totalRoas?.[date] ?? null,
+      gross_profit: piv.grossProfit?.[date] ?? null,
+      // Paid orders (paidOrdersOnly at sync). The client thread's Orders line reads these; they were never set here.
+      orders: piv.totalOrders?.[date] ?? null,
+      new_orders: piv.newCustomersOrders?.[date] ?? null,
+      total_sales: netSalesDay, tax, net_sales: sales == null ? null : sales - shipRev,
+      ship_rev: shipRev, ship_cost: shipCost, handling,
+      cogs: piv.totalProductCosts?.[date] ?? null,
+      fees: piv.totalPaymentGatewayCosts?.[date] ?? null,
+    };
+    a.amer = a.new_rev != null && a.spend ? a.new_rev / a.spend : null;
+    a.mer = sales != null && a.spend ? sales / a.spend : null;
+    // CM = revenue - every variable cost (product, fulfilment, handling, fees, ads).
+    // Fixed costs are excluded by definition. Margin override wins when set.
+    const variable = a.cogs != null ? a.cogs + shipCost + handling + (a.fees ?? 0) : null;
+    a.cm = cmPct != null && sales != null && a.spend != null ? sales * cmPct - a.spend
+      : variable != null && sales != null && a.spend != null ? sales - variable - a.spend : null;
+    a.cm_basis = cmPct != null ? 'margin' : variable != null ? 'cogs' : null;
+    /* Free: dayIssues reads the pivot this function already holds, so every
+       brief knows whether its own numbers can be trusted without a query. */
+    a.issues = dayIssues(piv, meta, date, sp);
+    days.push({ date, f, a });
+  }
+
+  const done = days.filter(x => x.date <= upTo && x.a);
+  const sum = (list, get) => { let s = 0, any = false; for (const x of list) { const v = get(x); if (v != null) { s += v; any = true; } } return any ? s : null; };
+  const mtd = {
+    sales: sum(done, x => x.a.sales), sales_f: sum(done, x => x.f.sales ?? null),
+    spend: sum(done, x => x.a.spend), spend_f: sum(done, x => x.f.spend ?? null),
+    cm: sum(done, x => x.a.cm), cm_f: sum(done, x => x.f.cm ?? null),
+  };
+  /* The catch-up: what it takes FROM HERE, not just how far behind we are.
+   *
+   * Every other figure in the brief describes the past. This one is the only
+   * forward ask on the page, and it is the sentence a media buyer can act on the
+   * same morning. Returning revenue arrives on its own, so the shortfall has to be
+   * bought with new customers - priced at the rate this month's ads have actually
+   * bought them at. Month-to-date basis on purpose: it is the window both sides of
+   * a client call can see for themselves.
+   */
+  let toHit = null;
+  {
+    const elapsed = done.length;
+    const remain = dim - elapsed;
+    const goalSales = goals?.sales ?? null;
+    if (goalSales != null && remain > 0 && elapsed > 0 && mtd.sales != null) {
+      const retMtd = sum(done, x => x.a.ret_rev);
+      const newMtd = sum(done, x => x.a.new_rev);
+      const retPerDay = retMtd != null ? retMtd / elapsed : null;
+      const mAmer = newMtd != null && mtd.spend > 0 ? newMtd / mtd.spend : null;
+      const spendPerDay = mtd.spend != null ? mtd.spend / elapsed : null;
+      const shortfall = goalSales - mtd.sales;
+      const perDay = shortfall / remain;
+      const newPerDay = perDay - (retPerDay || 0);
+      const spendNeeded = mAmer && newPerDay > 0 ? newPerDay / mAmer : null;
+      toHit = {
+        days_elapsed: elapsed, days_in_month: dim, days_remaining: remain,
+        goal_sales: goalSales, mtd_sales: mtd.sales,
+        revenue_per_day: perDay, new_per_day: newPerDay,
+        spend_per_day: spendNeeded, spend_now_per_day: spendPerDay,
+        spend_ramp: spendNeeded != null && spendPerDay > 0 ? spendNeeded / spendPerDay : null,
+        amer: mAmer, returning_per_day: retPerDay,
+        already_there: shortfall <= 0,
+        covered_by_returning: newPerDay <= 0,
+      };
+    }
+  }
+  const lastSync = (await env.DB.prepare(`SELECT MAX(synced_at) AS t FROM tw_daily WHERE act_id = ?1`).bind(acct.act_id).first())?.t ?? null;
+  return {
+    account: { act_id: acct.act_id, name: acct.name, currency: acct.currency, tz: acct.tz },
+    month: ym, up_to: upTo, goals, goals_planned: planned, goals_inherited_from: inheritedFrom,
+    cm_pct: cmPct, margin_28d: margin28,
+    cogs_quality: cmPct != null ? { verdict: 'override', reason: `using your ${Math.round(cmPct * 100)}% margin override` } : cogsQuality,
+    weights: 'even across the month',
+    new_share_28d: newShare, days, mtd, to_hit: toHit, tw_last_sync: lastSync, shipping_mode: shipMode,
+    brief_enabled: !!acct.brief_enabled,
+    /* Which days of THIS month cannot be trusted. The Brief page banners it,
+       and sendBrief refuses to put a flagged day in front of a client. */
+    health: {
+      verdict: done.some(x => x.a.issues?.some(i => i.severity === 'broken')) ? 'broken'
+        : done.some(x => x.a.issues?.length) ? 'warn' : 'ok',
+      bad_dates: done.filter(x => x.a.issues?.some(i => i.severity === 'broken')).map(x => x.date),
+      by_date: Object.fromEntries(done.filter(x => x.a.issues?.length).map(x => [x.date, x.a.issues])),
+    },
+  };
+}
+
+/** The deterministic numbers block of the Slack brief (CTC's Forecasted/Actual shape). */
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+/** "August 20" - CTC head each day with a real date, not an ISO stamp. */
+function prettyDate(ymd) {
+  return `${MONTH_NAMES[+ymd.slice(5, 7) - 1]} ${+ymd.slice(8, 10)}`;
+}
+const shortDate = ymd => `${+ymd.slice(5, 7)}/${+ymd.slice(8, 10)}`;
+
+/** The Slack message. Modelled on CTC's own daily update: a friendly opener, one
+ *  block per day covered, then the narrative. Deliberately NOT a metrics dump - 
+ *  the revenue split, channel reads and month-to-date all live in the Notes, where
+ *  Claude writes them as sentences, because that is what makes it read like a
+ *  person rather than a cron job. */
+const MONTH_OF = ym => `${MONTH_NAMES[+ym.slice(5, 7) - 1]} ${ym.slice(0, 4)}`;
+
+function buildBriefText(data, dates, narrative) {
+  const cur = data.account.currency;
+  const list = Array.isArray(dates) ? dates : [dates];
+  // Whole currency units: CTC quote £464, not £464.23.
+  const fm = n => n == null ? ' - ' : new Intl.NumberFormat('en-US',
+    { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 0 }).format(n);
+  const fx = n => n == null ? ' - ' : `${n.toFixed(2)}x`;
+  const cmOk = data.cogs_quality?.verdict !== 'broken' && data.cogs_quality?.verdict !== 'none';
+
+  const span = list.length === 1 ? prettyDate(list[0])
+    : list.map(shortDate).slice(0, -1).join(', ') + ' and ' + shortDate(list[list.length - 1]);
+  const L = [`Hey Team :wave: Here's the Daily Update covering ${span} →`];
+
+  for (const d of list) {
+    const day = data.days.find(x => x.date === d);
+    if (!day?.a) continue;
+    const f = day.f || {}, a = day.a;
+    L.push('', `*${prettyDate(d)}*`);
+    /* ONE LINE PER METRIC, not two. This used to print a `Forecasted X:` line and
+       a bold `Actual X:` line for every metric - ten lines for a single day, and
+       twenty on a catch-up brief covering two, before the reader reached a word
+       of narrative. Cole, 2026-09-07: the numbers block, not the writing, was
+       what made the brief feel like too much.
+       Two things change here beyond the length:
+ - the GAP is stated. Forecast $1,393 against actual $612 left the reader
+           to work out -56% themselves, which is the one figure they actually
+           want, so it was the one figure the block never showed.
+ - bold lands on the ACTUAL alone. Everything bold is what happened;
+           everything in the bracket is context. That is what makes a five-line
+           block scannable in a way ten alternating lines never were.
+       Parentheses rather than pipe separators, on Cole's call - `|` reads as a
+       data delimiter, and it is exactly the ad-naming convention the creative
+       split just moved away from.
+       Order is revenue first, margin last: the client reads top-down and the top
+       line should be the business, not the accounting. */
+    const rowFor = (label, aV, fV, fmtV) => {
+      if (aV == null && fV == null) return;
+      let tail = '';
+      if (aV != null && fV) {
+        // Round BEFORE signing, or a hair-under-parity value renders "-0%".
+        const r = Math.round((aV / fV - 1) * 100);
+        tail = ` (${r > 0 ? '+' : ''}${r}% vs ${fmtV(fV)} plan)`;
+      } else if (fV != null) {
+        tail = ` (${fmtV(fV)} planned)`;
+      }
+      // A COLON, not a hyphen. The em-dash sweep turned every dash into " - ",
+      // which is right for a break in a sentence and wrong for a label in front
+      // of its value: "Net Sales + Shipping - $612" reads as a subtraction.
+      L.push(`${label}: *${fmtV(aV)}*${tail}`);
+    };
+    rowFor(a.ship_rev ? 'Net Sales + Shipping' : 'Net Sales', a.sales, f.sales, fm);
+    rowFor('Ad Spend', a.spend, f.spend, fm);
+    rowFor('MER', a.mer, f.mer, fx);
+    rowFor('aMER', a.amer, f.amer, fx);
+    if (cmOk) rowFor('Contribution Margin', a.cm, f.cm, fm);
+  }
+
+  /* NO "WEEK IN REVIEW" BLOCK. It used to print here on the Monday brief, and
+     it was a straight duplicate: the weekly REPORT drafts on the same Monday
+     cron over the exact same Mon–Sun window and goes to the same client
+     channel, so the client received the week twice in one morning - once as
+     three lines of Slack and once as the actual deliverable.
+     Cole, 2026-09-07: "a weekly report already gets sent as a separate thing, so
+     I don't think the week in review should be put in there... it should just go
+     into the notes, the so what and the what's next."
+     `data.week` is still computed and still handed to Claude - the weekly shape
+     is exactly what makes Monday's What it means worth reading - it just reaches the
+     page as a sentence inside the narrative instead of as a second scoreboard.
+     See the `data.week` paragraph in writeBriefNarrative for the instruction. */
+  /* The one forward-looking line in the brief: what it takes from here.
+     Everything above describes the past; this is the sentence somebody can act on
+     this morning. Tone escalates with the RAMP rather than the gap, because the
+     ramp is what is actually being asked of the budget - and above 1.5x the honest
+     read is that the target needs revisiting, since spending at that rate late in a
+     month buys colder traffic than the aMER the figure assumes. */
+  const th = data.to_hit;
+  if (th && !th.already_there && th.days_remaining > 0) {
+    const day = `the remaining ${th.days_remaining} day${th.days_remaining === 1 ? '' : 's'}`;
+    if (th.covered_by_returning) {
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${day} - returning customers alone are running at ${fm(th.returning_per_day)}/day, so no extra spend is needed.`);
+    } else if (th.spend_per_day != null) {
+      const ramp = th.spend_ramp;
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${day} - ${fm(th.new_per_day)}/day of that from new customers, which is *${fm(th.spend_per_day)}/day of spend* at the ${fx(th.amer)} aMER this month has run${ramp ? ` (${fx(ramp)} the ${fm(th.spend_now_per_day)}/day running now)` : ''}.`);
+      if (ramp && ramp > 1.5) L.push(`_A step-up that size buys colder traffic than ${fx(th.amer)} assumes - worth agreeing a revised number rather than spending into it._`);
+    } else {
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${day}.`);
+    }
+  } else if (th && th.already_there) {
+    L.push('', `*The month's target is already banked* with ${th.days_remaining} day${th.days_remaining === 1 ? '' : 's'} still to run.`);
+  }
+  // An inherited target is not a plan anyone agreed to. Say so rather than letting
+  // last month's number pass as this month's.
+  if (data.goals && data.goals_planned === false) {
+    L.push('', data.goals_inherited_from
+      ? `_Note: no target has been set for ${MONTH_OF(data.month)} yet, so these are measured against ${MONTH_OF(data.goals_inherited_from)}'s plan._`
+      : `_Note: no target has been set for ${MONTH_OF(data.month)} yet, so these are measured against the last plan on file._`);
+  }
+  return L.join('\n') + (narrative ? `\n\n${narrative}` : '');
+}
+
+/** Aggregate the 7 days ending at `date` (crosses month boundaries when needed). */
+async function weeklyBlock(env, acct, data, date) {
+  const dates = [];
+  for (let i = 6; i >= 0; i--) dates.push(addDays(date, -i));
+  const byDate = {};
+  for (const x of data.days) byDate[x.date] = x;
+  for (const mo of [...new Set(dates.filter(dd => !byDate[dd]).map(monthOf))]) {
+    const end = dates.filter(dd => monthOf(dd) === mo).pop();
+    for (const x of (await briefData(env, acct, end)).days) if (!byDate[x.date]) byDate[x.date] = x;
+  }
+  const rows = dates.map(dd => byDate[dd]).filter(Boolean);
+  const sum = get => { let s = 0, any = false; for (const r of rows) { const v = get(r); if (v != null) { s += v; any = true; } } return any ? s : null; };
+  const a = { sales: sum(r => r.a?.sales), spend: sum(r => r.a?.spend), cm: sum(r => r.a?.cm), new_rev: sum(r => r.a?.new_rev) };
+  a.amer = a.new_rev != null && a.spend ? a.new_rev / a.spend : null;
+  a.mer = a.sales != null && a.spend ? a.sales / a.spend : null;
+  const withSales = rows.filter(r => r.a?.sales != null);
+  const best = withSales.slice().sort((x, y) => y.a.sales - x.a.sales)[0];
+  const worst = withSales.slice().sort((x, y) => x.a.sales - y.a.sales)[0];
+  return {
+    from: dates[0], to: dates[6],
+    f: { sales: sum(r => r.f.sales ?? null), spend: sum(r => r.f.spend ?? null), cm: sum(r => r.f.cm ?? null) },
+    a,
+    best: best ? { date: best.date, sales: best.a.sales } : null,
+    worst: worst ? { date: worst.date, sales: worst.a.sales } : null,
+  };
+}
+
+/* PLAIN VOICE (Cole, 2026-09-18): "every brief in What it means is the same
+   thing over and over... I don't even know what half this stuff means." The
+   old instruction literally asked for "a demand problem, a platform problem, or
+   our own levers" every day, so every brief opened that way, in media-buyer
+   jargon. These rules ban the stock framing and the jargon, and the brief
+   narrative is now handed its own last three briefs so it can avoid them. */
+const PLAIN_VOICE = `PLAIN ENGLISH, LIKE A PERSON. The reader runs a business, not an ad account. Short sentences. Say "we" and "you". Explain the way you would out loud.
+NEVER USE THESE WORDS OR PHRASES: "lever" or "levers", "throttle", "demand problem", "weak demand", "less about demand", "platform problem", "learning", "relearning", "reset learning", "top of funnel", "acquisition", "delivery", "volume", "arithmetic", "structural", "efficiency", "efficient", "prospecting", "cold traffic", "blended", "directional", "digesting", "the account responded". Say the plain thing instead: "finding new customers", "how much each ad dollar brought back", "people who had never bought before".
+WHEN AN IDEA NEEDS A TECHNICAL WORD, EXPLAIN IT. Not "the relaunch reset learning" but "when ads get switched off and back on, Meta spends a few days working out who to show them to again, so results bounce around". Not "we are underspending" on its own, but what that means for sales.
+NO STOCK OPENINGS. Never start a section or a sentence with "This is not", "This reads as", "This looks like" or "It is not a". Vary how you begin from one brief to the next.
+DO NOT REPEAT RECENT BRIEFS. When earlier briefs for this client are provided, do not reuse their sentences, their openings or their framing. If the situation has not changed, say that in one short sentence and use the rest on what is new, what we learned, or what we are watching for.`;
+
+const BRIEF_SYSTEM = `You are a senior media buyer at Mobius Digital writing the narrative section of a client's daily performance brief. A numbers block (forecast vs actual for yesterday) is prepended by the system - do NOT repeat it as a list.
+Write exactly three sections, in this order, Slack-style plain text. The section titles are exactly these words on their own line, with NO arrow, colon or question mark after them:
+What we saw
+• 3-5 bullets: what happened, stated plainly. Streaks across recent days, the new-vs-returning split, the per-channel read, where the month stands. Conclusion first in every bullet.
+What it means
+2-4 sentences, written the way you would explain it to the owner across a table. Pick the ONE thing about yesterday that matters most for their money and explain why, with the context someone outside advertising needs: what caused it, and what usually happens next. It explains, it does not report: if a sentence here could have been a bullet above, it is in the wrong place. Tie it to something we changed (the change log) only when that is genuinely the cause. If the story is the same as the last few briefs, do NOT retell it: say what moved, what we learned, or what we are watching for next.
+What we're doing
+• 2-4 bullets: what we will actually do, each with a trigger or a day where possible ("if Meta is still under 1.8 on Wednesday, we cut the three weakest new ads").
+
+WRITING RULES - these are what make it readable, and they matter as much as the facts:
+NEVER repeat a figure from the numbers block above. Revenue, spend, MER, aMER and CM are already on the page WITH their percentage gap against plan. Restating them is the single fastest way to make this look cluttered. Your bullets cover what the block CANNOT: the new-vs-returning split, the channel reads, streaks, and month-to-date.
+TWO NUMBERS PER BULLET, MAXIMUM. A bullet carrying seven figures is a table crammed into a sentence and the point disappears. If it needs a third number, it is two bullets, or the third number is not worth saying.
+"What it means" carries NO new figures at all. It is the consequence in plain words.
+NO ABBREVIATIONS OR SHORTHAND ANYWHERE. Write "month to date", not MTD. Write "Wednesday", not 48h or 72h. Write "about 20", not ~20. Write "September 8", not 09-08. This rule is about WORDS, not symbols: always write money with its currency symbol as "$36", never "36 dollars", and percentages as "64%".
+NEVER print a raw ad or campaign name. Say "the new creative" or "the relaunched ads".
+NO EM DASHES, EVER. Use a comma, a colon or a full stop. This is a standing rule across everything Mobius writes.
+${PLAIN_VOICE}
+Every sentence should survive being read once, at speed, by a client who does not work in ads.
+Rules: use ONLY the numbers provided - never invent or extrapolate figures. Money in the account's own currency, rounded to WHOLE units - write $612, never $611.51. Write dates the way a person says them: "September 6", "the 8th". Meta and Google ROAS and order counts are Triple Whale's pixel attribution, and recent days keep settling for a few days as journeys resolve - hedge a read on the last day or two. NEVER report a ROAS the block marks n/a - say the orders have not landed yet and quote the spend instead. MER = ALL store revenue (every channel, not ad-attributed) ÷ ALL ad spend across every platform. aMER is the acquisition version: new-customer revenue ÷ that same total ad spend. Both are blended on BOTH sides - never describe either as a platform or attributed number, and never confuse them with a channel ROAS (which IS attributed, by Triple Whale). Keep the whole narrative under 200 words. Short bullets that are real sentences, never paragraphs disguised as bullets. Slack bold is *single asterisks*; never use ** double asterisks or markdown headers. No greeting, no sign-off, no preamble.`;
+
+/* A REWRITE CAN BE STEERED. "Write it again" on its own produces a different
+   brief, not a better one -- the model has no idea what was wrong with the last
+   one. `steer` is the sentence the human would have said out loud ("lead with
+   the Google spend", "less hedging on Meta"), and it is optional everywhere:
+   both Locus and the Slack Rewrite button open a box you may leave empty.
+   It goes in LAST so it outranks the standing instructions, and it is fenced as
+   team direction rather than as data -- it must be able to change emphasis and
+   tone, never to invent a number. */
+const steerBlock = steer => steer && String(steer).trim()
+  ? `\n\nDIRECTION FROM THE TEAM FOR THIS REWRITE -- follow it, and let it override the general guidance above wherever the two disagree:\n<<<${String(steer).trim().slice(0, 1200)}>>>\nIt may change emphasis, ordering, length or tone. It may NOT introduce a number that is not in the data above; if it asks for something the data cannot support, say plainly that the data does not show it.`
+  : '';
+
+/* STANDING DIRECTION: how Cole wants every brief or every report written,
+   kept in settings (`briefStyle` / `reportStyle` for every brand, with
+   `:<act_id>` for one brand) and edited by talking to the Strategist. It sits
+   above a one-off steer, below nothing: it can change emphasis, order, length,
+   tone and what gets left out, and it can never add a number. */
+async function styleBlock(env, kind, actId) {
+  const all = await getSetting(env, `${kind}Style`).catch(() => null);
+  const one = actId ? await getSetting(env, `${kind}Style:${actId}`).catch(() => null) : null;
+  const parts = [all && `For every brand: ${all}`, one && `For this brand: ${one}`].filter(Boolean);
+  return parts.length
+    ? `\n\nSTANDING DIRECTION FROM THE TEAM (applies to every ${kind === 'brief' ? 'Daily Brief' : 'report'}, and overrides the general guidance above wherever the two disagree):\n<<<${parts.join('\n').slice(0, 3000)}>>>\nIt may change emphasis, ordering, length, tone and what is left out. It may NOT introduce a number that is not in the data above.`
+    : '';
+}
+
+/* THE LOOP (2026-10-21): the team's ticked tasks (p_action, from Tasks, the leaks, the calls on Today and the Monday runner)
+   go into the brief next to the Change Log, so "what we're doing" says what was actually done. Empty when the table is
+   missing or nothing was ticked. */
+async function doneTaskLines(env, actId, sinceYmd) {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT text, done_at, done_by, source FROM p_action WHERE act_id = ?1 AND status = 'done' AND done_at >= ?2 ORDER BY done_at DESC LIMIT 20`,
+    ).bind(actId, sinceYmd).all();
+    return (results || []).map(r => `- ${String(r.done_at).slice(0, 16).replace('T', ' ')} [team task done${r.source === 'today' ? ', from the calls' : r.source === 'monday' || r.source === 'meeting' ? ', from the call' : ''}] ${r.text}${r.done_by ? ` {by: ${r.done_by}}` : ''}`);
+  } catch { return []; }
+}
+
+async function writeBriefNarrative(env, acct, data, date, steer) {
+  const f2 = n => n == null ? ' - ' : String(Math.round(n * 100) / 100);
+  const lines = data.days.filter(x => x.date <= date).slice(-14).map(x =>
+    `${x.date}: forecast sales ${f2(x.f.sales)} spend ${f2(x.f.spend)} CM ${f2(x.f.cm)} aMER ${f2(x.f.amer)} | actual sales ${f2(x.a?.sales)} new ${f2(x.a?.new_rev)} returning ${f2(x.a?.ret_rev)} spend ${f2(x.a?.spend)} (Meta ${f2(x.a?.meta_spend)}, Google ${f2(x.a?.google_spend)}) CM ${f2(x.a?.cm)} MER ${f2(x.a?.mer)} aMER ${f2(x.a?.amer)} ${['Meta', 'Google'].map(P => { const r = x.a?.[`${P.toLowerCase()}_roas`], n = x.a?.[`${P.toLowerCase()}_purchases`]; return `${P}ROAS ${!x.a?.attr_source ? 'n/a - Triple Whale attribution not synced for this day' : r == null ? 'n/a - no spend' : n < 2 ? `n/a - Triple Whale attributed only ${n} order(s), too few to form a rate` : `${f2(r)} (Triple Whale, off ${n} orders)`}`; }).join(' ')} BlendedROAS ${f2(x.a?.blended_roas)} (Triple Whale)`);
+  const { results: evs } = await env.DB.prepare(
+    `SELECT event_time, category, summary, reason, note FROM activities
+     WHERE act_id IN ${metaOf(1)} AND event_time >= ?2 AND confirmed != -1 ORDER BY event_time DESC LIMIT 40`,
+  ).bind(acct.act_id, addDays(date, -7)).all();
+  const evLines = evs.map(e => `- ${String(e.event_time).slice(0, 16).replace('T', ' ')} [${e.category}] ${e.summary}${e.reason ? ` {reason: ${e.reason}}` : ''}${e.note ? ` {note: ${e.note}}` : ''}`);
+  evLines.push(...await doneTaskLines(env, acct.act_id, addDays(date, -7)));
+  // Its own last three briefs, so it can see what it already said and not
+  // say it again (see PLAIN_VOICE).
+  const { results: recent } = await env.DB.prepare(
+    `SELECT date, text FROM briefs WHERE act_id = ?1 AND date < ?2 AND text IS NOT NULL ORDER BY date DESC LIMIT 3`,
+  ).bind(acct.act_id, date).all().catch(() => ({ results: [] }));
+  const recentBlock = recent.map(r => {
+    const i = r.text.indexOf('What we saw');
+    return i < 0 ? null : `--- brief for ${r.date} ---\n${r.text.slice(i, i + 1800)}`;
+  }).filter(Boolean);
+  return claude(env, {
+    system: BRIEF_SYSTEM,
+    maxTokens: 6000,   // opus-5 spends thinking tokens inside max_tokens; leave real headroom for the text
+    user: `Client: ${data.account.name} (currency ${data.account.currency}). The brief covers ${(data.covering || [date]).join(' and ')}.\n` +
+      // `target_roas` is DELIBERATELY not passed. It is a Meta-attributed ROAS
+      // guardrail for the media buyer, living in Account Health, and it is set
+      // to 2.5 on every brand - the same figure as the BLENDED MER goal. Meta
+      // ROAS is structurally below blended MER (measured 2026-08-27 over 30d:
+      // Meta 1.57-1.99 against blended 2.05-2.52 across all six brands), so
+      // feeding it here made Claude report Meta as permanently failing a target
+      // that was never Meta's, in a document the client reads. Party Patch was
+      // the clearest case: blended 2.52 - goal met - while its Meta ROAS of
+      // 1.64 was written up as a miss.
+      `Goals this month: ${JSON.stringify(data.goals)}. Forecast weighting: ${data.weights}.\n` +
+      `Meta and Google ROAS below are Triple Whale's pixel attribution (last platform click), not the platforms' own dashboards. Blended ROAS is Triple Whale's store-level figure, the same idea as MER (it counts sales tax, so it runs a shade above our MER). If you quote a channel ROAS, call it Triple Whale's. There is no ROAS target: the only agreed goals are the blended ones above (net sales, spend, MER, aMER). Never judge a platform's ROAS against the MER goal - blended MER counts every channel's revenue against total spend and is always the higher number, so doing that reports a healthy account as failing. Use channel ROAS only to say which channel moved, never to declare a target missed.\n` +
+      (data.goals && data.goals_planned === false
+        ? `IMPORTANT: no target was actually set for ${MONTH_OF(data.month)} - the figures above are carried over from ${data.goals_inherited_from ? MONTH_OF(data.goals_inherited_from) : 'the last plan on file'}. Do NOT call them this month's goal or say the client is ahead of/behind "plan" as though it were agreed. Refer to them as last month's pace, and put setting this month's target in What we're doing.\n`
+        : '') +
+      `Contribution margin basis: ${data.cm_pct != null ? `net sales × ${Math.round(data.cm_pct * 100)}% margin − ad spend` : 'Triple Whale cost data: revenue minus product costs, fulfilment, handling, payment fees and ad spend (every variable cost; fixed costs are excluded by definition)'}.\n\n` +
+      (data.cogs_quality && (data.cogs_quality.verdict === 'broken' || data.cogs_quality.verdict === 'none')
+        ? `IMPORTANT: this client's cost data is unreliable (${data.cogs_quality.reason}). Contribution margin has been REMOVED from the numbers block - do NOT mention contribution margin, CM, profit or margin anywhere in your narrative. Build the story from net sales, spend, aMER and the channel reads instead.
+
+`
+        : data.cogs_quality?.verdict === 'noisy'
+        ? `Note: this client's cost data is somewhat noisy (${data.cogs_quality.reason}) - treat contribution margin as directional, not exact.
+
+`
+        : '') +
+      `Last ${lines.length} days (forecast | actual):\n${lines.join('\n')}\n\nMonth-to-date: ${JSON.stringify(data.mtd)}\n\n` +
+    (data.to_hit ? `Catch-up already stated in the numbers block above (do NOT restate the figures, but you may build on what they imply): ${JSON.stringify(data.to_hit)}\n\n` : '') +
+      (data.week ? `THE WEEK THAT JUST CLOSED (${data.week.from} → ${data.week.to}): ${JSON.stringify(data.week)}\n`
+        + `There is NO week-in-review block in the numbers section - the weekly report is a separate deliverable and this brief must not duplicate it as a second scoreboard. So the week reaches the reader ONLY through your narrative. Give it ONE bullet in What we saw with the figures that matter (net sales against plan, spend, aMER, best and slowest day), weigh the weekly shape rather than just yesterday in What it means, and let it inform What we're doing. Do not list the week metric by metric.\n\n` : '') +
+      `Changes we made in the last 7 days (from the Change Log):\n${evLines.length ? evLines.join('\n') : '- (none logged)'}` +
+      (recentBlock.length ? `\n\nWHAT WE ALREADY TOLD THIS CLIENT in the last few briefs. Do not reuse these sentences, openings or framing, and do not retell the same story. Build on it: what changed since, what we learned, what we are watching for.\n${recentBlock.join('\n\n')}` : '') +
+      (await styleBlock(env, 'brief', acct.act_id)) +
+      steerBlock(steer),
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Daily Brief v2 (2026-10-04)                                        */
+/* ------------------------------------------------------------------ */
+/* Built from a side-by-side with CTC's daily updates. What we kept from v1:
+   one line per metric with the gap stated, plain English, no jargon. What v2
+   takes from CTC and then goes past it:
+ - a one-line HEADLINE verdict above the numbers, so a client who reads one
+     line still knows how the day went (CTC has none);
+ - a deterministic MONTH SO FAR block, because "a shade under last month's
+     pace" is not a number and the month is what the client is judged on;
+ - What we saw is a FIXED set of bullets with bold lead-ins in a fixed order,
+     so the client learns where to look and can skim the lead-ins alone;
+ - exact figures, never "about" or "roughly", when we have the exact figure;
+ - What we're doing comes ONLY from what the buyer wrote and the Change Log.
+     v1 let the model invent actions with days on them, and all three briefs on
+     2026-10-03 promised the same "agree your October target with you".
+   The "To finish on plan" line now waits until day 7: on day 3 it told one
+   client to more than double spend, and it printed "$9/day of spend (0.02x)"
+   when repeat buyers alone nearly covered the target. */
+
+/** The buyer's note for this brief: anything written in the 2 days before it builds. */
+async function briefNoteFor(env, actId, date) {
+  const n = safeJson(await getSetting(env, `briefNote:${actId}`).catch(() => null), null);
+  if (!n?.text || !n.at) return null;
+  const age = (Date.parse(date + 'T12:00:00Z') + 36 * 3600e3) - Date.parse(n.at);
+  return age >= 0 && age <= 72 * 3600e3 ? n.text : null;
+}
+
+const V2_TITLES = ['What we saw', "What we're doing", 'What it means'];
+
+function buildBriefTextV2(data, dates, narrative) {
+  const cur = data.account.currency;
+  const list = Array.isArray(dates) ? dates : [dates];
+  const fm = n => n == null ? ' - ' : new Intl.NumberFormat('en-US',
+    { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 0 }).format(n);
+  const fx = n => n == null ? ' - ' : `${n.toFixed(2)}x`;
+  const cmOk = data.cogs_quality?.verdict !== 'broken' && data.cogs_quality?.verdict !== 'none';
+
+  // The model's first line is the headline; everything after it is the narrative.
+  let headline = null, body = narrative || '';
+  const m = body.match(/^\s*Headline:\s*(.+)\n?/i);
+  if (m) { headline = m[1].replace(/^\*+|\*+$/g, '').trim().replace(/\.$/, ''); body = body.slice(m[0].length).trim(); }
+  // Section titles bold, so the three parts are findable at a glance.
+  body = body.split('\n').map(l => V2_TITLES.includes(l.replace(/\*/g, '').trim()) ? `*${l.replace(/\*/g, '').trim()}*` : l).join('\n');
+
+  const span = list.length === 1 ? prettyDate(list[0])
+    : list.map(prettyDate).slice(0, -1).join(', ') + ' and ' + prettyDate(list[list.length - 1]);
+  const L = [`Hey Team :wave: Here's the Daily Update for ${span} →`];
+  if (headline) L.push(`*${headline}*`);
+  if (data.calendar_today && data.calendar_today.length) L.push(`*Today:* ${data.calendar_today.join(' and ')} ${data.calendar_today.length > 1 ? 'go' : 'goes'} live.`);
+
+  const rowFor = (label, aV, fV, fmtV) => {
+    if (aV == null && fV == null) return;
+    let tail = '';
+    if (aV != null && fV && (aV < 0 || fV < 0) && fmtV === fm) {
+      // A percentage across zero ("-207%") means nothing to a reader. Say the gap in money.
+      const g = aV - fV;
+      tail = ` (${fm(Math.abs(g))} ${g < 0 ? 'under' : 'over'} the ${fmtV(fV)} plan)`;
+    } else if (aV != null && fV) {
+      const r = Math.round((aV / fV - 1) * 100);
+      tail = ` (${r > 0 ? '+' : ''}${r}% vs ${fmtV(fV)} plan)`;
+    } else if (fV != null) tail = ` (${fmtV(fV)} planned)`;
+    L.push(`${label}: *${fmtV(aV)}*${tail}`);
+  };
+
+  for (const d of list) {
+    const day = data.days.find(x => x.date === d);
+    if (!day?.a) continue;
+    const f = day.f || {}, a = day.a;
+    L.push('', `*${prettyDate(d)}*`);
+    rowFor(a.ship_rev ? 'Net Sales + Shipping' : 'Net Sales', a.sales, f.sales, fm);
+    rowFor('Ad Spend', a.spend, f.spend, fm);
+    rowFor('MER', a.mer, f.mer, fx);
+    rowFor('aMER', a.amer, f.amer, fx);
+    if (cmOk) rowFor('Contribution Margin', a.cm, f.cm, fm);
+  }
+
+  // MONTH SO FAR: the same rows, summed. Deterministic, never left to the model.
+  const mt = data.mtd || {};
+  const elapsed = data.days.filter(x => x.date <= data.up_to && x.a).length;
+  const dim = data.days.length;
+  if (mt.sales != null && elapsed > 1) {
+    L.push('', `*${MONTH_NAMES[+data.month.slice(5, 7) - 1]} so far* (day ${elapsed} of ${dim})`);
+    rowFor('Net Sales', mt.sales, mt.sales_f, fm);
+    rowFor('Ad Spend', mt.spend, mt.spend_f, fm);
+    if (cmOk) rowFor('Contribution Margin', mt.cm, mt.cm_f, fm);
+  }
+
+  const th = data.to_hit;
+  if (th && th.days_elapsed >= 7 && th.days_remaining > 0) {
+    const days = `the last ${th.days_remaining} day${th.days_remaining === 1 ? '' : 's'}`;
+    const mostlyRepeat = th.covered_by_returning || (th.revenue_per_day > 0 && th.new_per_day / th.revenue_per_day < 0.15);
+    if (th.already_there) {
+      L.push('', `*To finish on plan:* the month's target is already banked.`);
+    } else if (mostlyRepeat) {
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${days}. Repeat customers are bringing in ${fm(th.returning_per_day)}/day on their own, so today's spend covers it.`);
+    } else if (th.spend_per_day != null && th.spend_ramp != null && th.spend_ramp <= 1.05) {
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${days}, which today's ${fm(th.spend_now_per_day)}/day of spend covers if results hold.`);
+    } else if (th.spend_per_day != null) {
+      L.push('', `*To finish on plan:* ${fm(th.revenue_per_day)}/day over ${days}, which takes about *${fm(th.spend_per_day)}/day of spend* (${fm(th.spend_now_per_day)}/day now).`);
+      if (th.spend_ramp > 1.5) L.push(`_That is a big step up, and bigger budgets usually bring back less per dollar. Worth agreeing a revised number rather than spending into it._`);
+    }
+  }
+
+  let out = L.join('\n') + (body ? `\n\n${body}` : '');
+  if (data.goals && data.goals_planned === false) {
+    out += `\n\n_No ${MONTH_OF(data.month).split(' ')[0]} target is set yet, so "plan" here is ${data.goals_inherited_from ? MONTH_OF(data.goals_inherited_from).split(' ')[0] : "last month"}'s pace._`;
+  }
+  return out;
+}
+
+const BRIEF_SYSTEM_V2 = `You are a senior media buyer at Mobius Digital writing a client's daily performance brief for Slack. The system prints the numbers block (each metric with its gap to plan) and a month-so-far block. You write the headline and the three sections below. The reader owns the business, skims on a phone, and should get the day from the headline and the bold lead-ins alone.
+
+OUTPUT EXACTLY THIS SHAPE:
+Headline: <one sentence, at most 14 words: how the day went and the main reason. At most one figure. No bold, no emoji.>
+What we saw
+• *Profit:* <one sentence>
+• *Trend:* <one sentence>
+• *New vs repeat:* <one sentence>
+• *Channels:* <one sentence>
+What it means
+<2 or 3 sentences>
+What we're doing
+• <bullet>
+
+THE FOUR BULLETS, always in this order, always with these exact bold lead-ins:
+- Profit: what the day left after ads and costs, and why. If contribution margin is unavailable (you will be told), use the lead-in *Sales:* instead and talk about sales.
+- Trend: how yesterday compares with the days just before it (a streak, a turn, the best or worst day since a date).
+- New vs repeat: money from people who had never bought before against money from returning customers, and what changed.
+- Channels: Meta and Google in ONE sentence, each as Triple Whale's return on its spend, e.g. "Meta brought back 1.52 per dollar on $668, Google 7.83 on $158." If a channel's read is n/a, say its orders have not landed yet and give its spend.
+On the Monday brief (you will be given THE WEEK THAT JUST CLOSED) add a fifth bullet, *Last week:*, with net sales against plan and the best day.
+Each bullet: ONE sentence, at most 25 words, at most two figures, and the conclusion before the evidence. Use the exact figure from the data, never "about", "roughly", "around", "nearly" or "a shade". Never repeat a figure already in the numbers or month-so-far blocks.
+
+WHAT IT MEANS: 2 or 3 sentences, no figures at all. The one thing about yesterday that matters most for their money, why it happened, and what usually comes next. If it is the same story as recent briefs, say in one sentence that it has not changed and spend the rest on what is new.
+
+WHAT WE'RE DOING: built ONLY from (a) THE BUYER'S NOTE and (b) the Change Log, both given to you. Never invent an action, a plan, a date or a promise that is not in one of them.
+- Turn each real action into a short bullet in plain words, past tense for what was done ("We switched the three restarted ads back on with tighter daily caps.").
+- If the buyer's note states a plan, keep it as written in meaning, tidied, never extended.
+- Leave out housekeeping: renames, drafts, test campaigns or test ads, deleting old test items, system events. They are not client news.
+- If there is no note and no real change, write exactly the bullet "• No changes to the ads yesterday." with nothing added to it, and, only if the data clearly supports it, one bullet starting "We're watching" that names what we will look at next, with no promise or deadline.
+- Never promise to agree, set or discuss a target. Targets are handled outside this message.
+
+WRITING RULES:
+NO ABBREVIATIONS: write "month to date", "Wednesday", "September 8". Money always as "$36" with the account's currency symbol, whole units. Percentages as "64%". Channel returns as a plain number like 1.52 (that is dollars back per dollar spent).
+NEVER print a raw ad or campaign name. NO EM DASHES, EVER. Slack bold is *single asterisks*; never ** or markdown headers. No greeting, no sign-off.
+${PLAIN_VOICE}
+Use ONLY the numbers provided. Meta and Google returns are Triple Whale's pixel attribution and the last day or two keep settling, so if a read is weak on very few orders, say so in a few words. MER and aMER are store-wide (all sales or new-customer sales over all ad spend), never call them a platform number. There is no channel ROAS target; never call a channel's return a missed goal. Keep everything under 170 words.`;
+
+async function writeBriefNarrativeV2(env, acct, data, date, steer) {
+  const f2 = n => n == null ? ' - ' : String(Math.round(n * 100) / 100);
+  const lines = data.days.filter(x => x.date <= date).slice(-14).map(x =>
+    `${x.date}: forecast sales ${f2(x.f.sales)} spend ${f2(x.f.spend)} CM ${f2(x.f.cm)} | actual sales ${f2(x.a?.sales)} new ${f2(x.a?.new_rev)} returning ${f2(x.a?.ret_rev)} spend ${f2(x.a?.spend)} (Meta ${f2(x.a?.meta_spend)}, Google ${f2(x.a?.google_spend)}) CM ${f2(x.a?.cm)} MER ${f2(x.a?.mer)} aMER ${f2(x.a?.amer)} ${['Meta', 'Google'].map(P => { const r = x.a?.[`${P.toLowerCase()}_roas`], n = x.a?.[`${P.toLowerCase()}_purchases`]; return `${P}Return ${!x.a?.attr_source ? 'n/a (not synced)' : r == null ? 'n/a (no spend)' : n < 2 ? `n/a (only ${n} order)` : `${f2(r)} off ${n} orders`}`; }).join(' ')}`);
+  const { results: evs } = await env.DB.prepare(
+    `SELECT event_time, category, summary, reason, note FROM activities
+     WHERE act_id IN ${metaOf(1)} AND event_time >= ?2 AND confirmed != -1 ORDER BY event_time DESC LIMIT 40`,
+  ).bind(acct.act_id, addDays(date, -2)).all();
+  const evLines = evs.map(e => `- ${String(e.event_time).slice(0, 16).replace('T', ' ')} [${e.category}] ${e.summary}${e.reason ? ` {reason: ${e.reason}}` : ''}${e.note ? ` {note: ${e.note}}` : ''}`);
+  evLines.push(...await doneTaskLines(env, acct.act_id, addDays(date, -2)));
+  const { results: recent } = await env.DB.prepare(
+    `SELECT date, text FROM briefs WHERE act_id = ?1 AND date < ?2 AND text IS NOT NULL ORDER BY date DESC LIMIT 3`,
+  ).bind(acct.act_id, date).all().catch(() => ({ results: [] }));
+  const recentBlock = recent.map(r => {
+    const i = r.text.indexOf('What we saw');
+    return i < 0 ? null : `--- brief for ${r.date} ---\n${r.text.slice(i, i + 1500)}`;
+  }).filter(Boolean);
+  const cmBad = data.cogs_quality && (data.cogs_quality.verdict === 'broken' || data.cogs_quality.verdict === 'none');
+  return claude(env, {
+    system: BRIEF_SYSTEM_V2,
+    maxTokens: 6000,
+    user: `Client: ${data.account.name} (currency ${data.account.currency}). The brief covers ${(data.covering || [date]).join(' and ')}; if more than one day, cover them together and name the day when it matters.\n` +
+      `Goals this month: ${JSON.stringify(data.goals)}.${data.goals && data.goals_planned === false ? ' (Carried over from last month; call it last month\'s pace, never "plan".)' : ''}\n` +
+      (cmBad ? `CONTRIBUTION MARGIN IS UNAVAILABLE for this client (cost data unreliable). Never mention margin or profit; use the *Sales:* lead-in.\n` : '') +
+      `\nLast ${lines.length} days (forecast | actual):\n${lines.join('\n')}\n\nMonth to date: ${JSON.stringify(data.mtd)}\n\n` +
+      (data.week ? `THE WEEK THAT JUST CLOSED (${data.week.from} to ${data.week.to}): ${JSON.stringify(data.week)}\n\n` : '') +
+      (data.meta_day && (data.meta_day.verdict === 'bad' || data.meta_day.verdict === 'vbad') ? `META THAT DAY: it was a ${data.meta_day.verdict === 'vbad' ? 'very bad' : 'bad'} day on Meta for advertisers in general (${data.meta_day.signs.join('; ')}). Say so in one plain sentence in What it means, so the client knows part of the day was the platform, not their brand. Never name other brands or where this comes from.
+
+` : '') +
+      `THE BUYER'S NOTE (what the media buyer actually did or plans, in their words):\n${data.buyer_note ? `<<<${data.buyer_note}>>>` : '(none)'}\n\n` +
+      `Changes we made in the last 2 days (from the Change Log):\n${evLines.length ? evLines.join('\n') : '- (none logged)'}` +
+      (recentBlock.length ? `\n\nWHAT WE ALREADY TOLD THIS CLIENT recently. Do not reuse these sentences or retell the same story:\n${recentBlock.join('\n\n')}` : '') +
+      (await styleBlock(env, 'brief', acct.act_id)) +
+      steerBlock(steer),
+  });
+}
+
+/** Build the full brief for one account+day. Returns {data, text} or {data, error}.
+ *  When `date` is a Sunday the Monday-morning send adds a week-in-review block. */
+/** Which days should this brief cover? Normally just yesterday - but if a send was
+ *  missed, pick up the days since the last one, the way CTC's own update covered
+ *  "8/18 and 8/19". Capped at 4 days and never crosses out of the month. */
+/* INTERNAL-ONLY BRANDS ARE HANDLED THE MOMENT THEY ARE WRITTEN.
+   A brand with no client channel (Lucky Golf, The Golf Sock) has nowhere to
+   send anything, so a "draft" for it can never be finished: it sat in the
+   channel with a Send button that could only fail, showed up under "waiting on
+   you", and the catch-up carried every unsent day into the next brief until
+   someone pressed Don't-send by hand. Cole, 2026-09-10: "if they don't have an
+   external chat then there doesn't need to be any buttons for sending to a
+   client and they should be marked as auto handled all the time, that way
+   there's not stacking days on top of each other."
+   So: status `handled` instead of `draft`, written by the same code paths.
+   Handled counts as dealt with everywhere `sent` does; it is still editable and
+   rewritable, because the team still reads it. The rule is a property of the
+   channel config, not of a brand name - set a client channel and the brand
+   becomes reviewable like every other. (This reverses the 2026-08-27 stance
+   that no brand gets special treatment; the special treatment turned out to be
+   the buttons that could not work.) */
+const internalOnly = acct => !acct?.brief_channel;
+const draftStatus = acct => internalOnly(acct) ? 'handled' : 'draft';
+
+async function coverageDates(env, acct, date, data) {
+  /* 'skipped' counts as DEALT WITH, exactly like 'sent'.
+     Cole, 2026-09-01: Bonk Golf had stacked up days because catching up only
+     ever looked for a SENT brief, so a day nobody wanted to send was carried
+     forward for ever and every new draft opened "covering 8/28, 8/29 and 8/30".
+     The catch-up is worth keeping - it is what covers a morning he forgets - 
+     but it needs a way to say "not this one, start fresh", and that is what
+     skipping is. The days are not lost: the numbers stay on the Profit and
+     Brief pages, they just stop queueing for a client message. */
+  const last = await env.DB.prepare(
+    `SELECT MAX(date) AS d FROM briefs WHERE act_id = ?1 AND status IN ('sent','skipped','handled') AND date < ?2`,
+  ).bind(acct.act_id, date).first().catch(() => null);
+  const monthStart = `${monthOf(date)}-01`;
+  let from = last?.d ? addDays(last.d, 1) : date;
+  if (from < monthStart) from = monthStart;
+  if (from < addDays(date, -3)) from = addDays(date, -3);
+  const out = [];
+  for (let d = from; d <= date; d = addDays(d, 1)) {
+    if (data.days.find(x => x.date === d)?.a?.sales != null) out.push(d);
+  }
+  return out.length ? out : [date];
+}
+
+/** The Day check verdict for one date, for the Daily Brief: { verdict, hits, signs: [plain words] } or null.
+ *  Only yesterday (Central) is judged live; cached in settings `metaday:<date>` for three hours so ten briefs share it. */
+async function metaDayFor(env, date) {
+  if (date !== addDays(centralDate(), -1)) return null;
+  const key = `metaday:${date}`, c = safeJson(await getSetting(env, key).catch(() => null), null);
+  if (c && Date.now() - Date.parse(c.at) < 3 * 3600e3) return c.v;
+  await chatterFor(env, date).catch(() => null);
+  const L = (await metaDay(env, { days: 1 })).latest; if (!L) return null;
+  const s = L.signs, signs = [];
+  if (s.ours?.high) signs.push('advertisers paid more per sale than usual');
+  if (s.breezeway && s.breezeway !== 'NORMAL') signs.push('other advertisers had a bad Meta day');
+  if (s.outage?.length) signs.push(`Meta reported a problem (${s.outage.slice(0, 2).join('; ')})`);
+  if (s.chatter?.issues) signs.push('advertisers reported problems online');
+  const v = { verdict: L.verdict, hits: L.hits, signs };
+  await putSetting(env, key, JSON.stringify({ at: new Date().toISOString(), v })).catch(() => {});
+  return v;
+}
+
+async function makeBrief(env, acct, date, { steer, format } = {}) {
+  /* FORMAT SWITCH (2026-10-04). v2 is the skimmable rebuild (headline, month so
+     far, fixed lead-in bullets, actions only from what the buyer actually did).
+     It ships dark: the `briefFormat` setting decides, and until it says 'v2'
+     every real brief stays on v1. /api/brief-preview can ask for either. */
+  const fmt = format || (await getSetting(env, 'briefFormat').catch(() => null)) || 'v1';
+  /* Channel ROAS and orders are Triple Whale attribution, and the nightly
+     attribution sync runs at 03:30 UTC - still the evening before in the
+     brands' own zones - so it never holds the brief's day. Pull the last three
+     days first, here, so the cron AND every Rewrite (Locus or Slack) get it. */
+  if (acct.tw_shop && env.TW_API_KEY && date >= addDays(localDate(acct.tz), -7)) {
+    await syncTwAttribution(env, acct, 0, { from: addDays(date, -2), to: date }).catch(() => {});
+  }
+  const data = await briefData(env, acct, date);
+  const day = data.days.find(x => x.date === date);
+  if (!data.goals) return { data, error: 'no goals set for this month - set them on the Daily Brief page' };
+  if (!day?.a || day.a.sales == null) return { data, error: `no Triple Whale sales data for ${date} yet - try “Refresh Triple Whale data”` };
+  const dates = await coverageDates(env, acct, date, data);
+  if (new Date(date + 'T12:00:00Z').getUTCDay() === 0) {
+    data.week = await weeklyBlock(env, acct, data, date).catch(() => null);
+  }
+  data.covering = dates;
+  let narrative = null, narrative_error = null;
+  if (fmt === 'v2') data.buyer_note = await briefNoteFor(env, acct.act_id, date);
+  /* WAS IT A BAD DAY ON META? (2026-10-09, Cole: "a bad day should just go into the daily report"). The Day check verdict
+     for the brief's day rides into the brief; no separate Slack post any more. Cached per date in settings. */
+  if (fmt === 'v2') data.meta_day = await metaDayFor(env, date).catch(() => null);
+  /* The calendar (2026-10-09): what goes live on the day the brief is read, one line under the headline. */
+  if (fmt === 'v2') { const nextDay = addDays(date, 1); data.calendar_today = (((await calendarLiveOn(env, nextDay).catch(() => ({})))[acct.act_id]) || []).filter(e => e.start === nextDay && ['drop', 'sale'].includes(e.kind)).map(e => e.name); }
+  try { narrative = fmt === 'v2' ? await writeBriefNarrativeV2(env, acct, data, date, steer) : await writeBriefNarrative(env, acct, data, date, steer); } catch (e) { narrative_error = e.message; }
+  /* Only the days this brief actually reports on can block it. A bad day
+     earlier in the month is the Data Health tab's problem, not this send's. */
+  const health = briefHealth(data, dates);
+  const text = fmt === 'v2' ? buildBriefTextV2(data, dates, narrative) : buildBriefText(data, dates, narrative);
+  return { data, dates, text, narrative_error, health, steer: steer || null, format: fmt };
+}
+
+/** The health of the days a brief covers: what stops it going to a client. */
+function briefHealth(data, dates) {
+  const list = Array.isArray(dates) ? dates : [dates];
+  const flagged = list.map(d => ({ date: d, issues: (data.health?.by_date?.[d] || []) }))
+    .filter(x => x.issues.length);
+  const broken = flagged.filter(x => x.issues.some(i => i.severity === 'broken'));
+  return {
+    verdict: broken.length ? 'broken' : flagged.length ? 'warn' : 'ok',
+    dates: broken.map(x => x.date),
+    flagged,
+    /* One sentence, written once, reused by the Slack notice, the send refusal
+       and the banner on the Brief page - so all three say the same thing. */
+    summary: broken.length
+      ? `${broken.map(x => prettyDate(x.date)).join(' and ')}: ${broken[0].issues.find(i => i.severity === 'broken').what}`
+      : null,
+  };
+}
+
+/** Generate + post one brief to the brand's Slack channel; log it in `briefs`. */
+/** Write a briefs row. `data` is optional so an edit or a send of stored text
+ *  cannot wipe the numbers captured when the brief was first built. */
+async function upsertBrief(env, actId, date, status, channel, text, data, extra = {}) {
+  /* `health` rides inside data_json so the Slack card can keep showing the
+     "do not send, the numbers are wrong" banner after an edit, without paying
+     for a second briefData() every time the card is redrawn. It only travels
+     with a rebuild, which is the only moment the verdict can change. */
+  const dataJson = data === undefined ? null
+    : JSON.stringify({ mtd: data?.mtd ?? null, day: data?.days?.find(x => x.date === date) ?? null,
+                       health: extra.health ?? null });
+  await env.DB.prepare(
+    `INSERT INTO briefs (act_id, date, posted_at, channel, status, text, data_json, steer) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+     ON CONFLICT(act_id, date) DO UPDATE SET posted_at = excluded.posted_at, channel = excluded.channel,
+       status = excluded.status, text = excluded.text,
+       data_json = COALESCE(excluded.data_json, briefs.data_json),
+       steer = CASE WHEN ?9 = 1 THEN excluded.steer ELSE briefs.steer END`,
+  ).bind(actId, date, new Date().toISOString(), channel ?? null, status, text ?? null, dataJson,
+         extra.steer ?? null, 'steer' in extra ? 1 : 0).run();
+}
+
+/** Build the brief and park it as a DRAFT for review, notifying the internal
+ *  channel - the client is not messaged.
+ *
+ *  Cole was already doing this by hand: letting the brief post to an internal
+ *  channel, then copy-pasting it to the client so he could reword the narrative
+ *  first. Copy-paste loses Slack's formatting, and nothing recorded what was
+ *  actually sent. Same shape as the weekly/monthly reports: draft internally,
+ *  edit the wording, then one button sends the real thing. */
+async function draftBrief(env, acct, date, { skipIfExists = false, steer } = {}) {
+  if (skipIfExists) {
+    const prior = await env.DB.prepare(
+      `SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`,
+    ).bind(acct.act_id, date).first().catch(() => null);
+    // 'skipped' belongs here too - a day deliberately not sent must not be
+    // rebuilt and re-announced by the next scheduled tick.
+    if (prior && ['draft', 'sent', 'skipped', 'handled'].includes(prior.status)) {
+      return { name: acct.name, already: prior.status, date };
+    }
+  }
+  /* A REDRAFT UPDATES THE CARD IT ALREADY HAS. It must not post a second one.
+     This was a real bug, not just a preference: Locus's "Rewrite with AI"
+     calls /api/brief-draft, so every rewrite from the app dropped ANOTHER copy
+     of the brief into the internal channel, each one carrying its own live
+     Send-to-client button, while Slack's own Rewrite button (which goes through
+     the modal path) correctly edited in place. Two surfaces, two behaviours,
+     and the app's was the one that notified the whole channel again.
+     Cole, 2026-09-07, wanting today's five drafts moved onto the new format:
+     "I don't want the notifications going through, I would rather them just be
+     updated and then I go through and I check." A chat.update raises no
+     notification, which is exactly the property he is asking for.
+     So: look for the card this day already has BEFORE deciding to post. */
+  const prior = await env.DB.prepare(
+    `SELECT slack_ts, slack_channel FROM briefs WHERE act_id = ?1 AND date = ?2`,
+  ).bind(acct.act_id, date).first().catch(() => null);
+
+  const r = await makeBrief(env, acct, date, { steer });
+  if (r.error) { await upsertBrief(env, acct.act_id, date, 'skipped', null, r.error, r.data); return { name: acct.name, skipped: r.error }; }
+  // 'handled' for a brand with no client channel - see draftStatus.
+  await upsertBrief(env, acct.act_id, date, draftStatus(acct), null, r.text, r.data, { health: r.health ?? null, steer: steer ?? null });
+
+  if (prior?.slack_ts && prior?.slack_channel) {
+    // slackSyncBrief re-renders the card from the row we just wrote, so the
+    // text, the health banner and the buttons all move together.
+    await slackSyncBrief(env, acct, date).catch(() => {});
+    if (r.narrative_error) await alertClaudeFailure(env, `Daily Brief narrative for ${acct.name}`, r.narrative_error);
+    return { name: acct.name, ok: true, updated: true, date,
+      channel: prior.slack_channel, narrative_error: r.narrative_error ?? null };
+  }
+
+  // Internal only, and deliberately never brief_channel - that is the client's.
+  /* ONE AGENCY CHANNEL FOR EVERY DRAFT (Cole, 2026-10-12: "the internal chats are just getting cluttered,
+     it's hard to find previous conversations with the team"). settings.dailyBriefsChannel, when set, takes
+     every brand's draft card, buttons and all, so the brand channels go back to being conversation. Unset,
+     or a post there failing (the bot not in it yet), falls back to the brand's own internal channel. */
+  const agencyCh = await getSetting(env, 'dailyBriefsChannel').catch(() => null);
+  const ch = agencyCh || acct.slack_channel;
+  if (ch) {
+    // The whole brief goes IN the message (Cole, 2026-08-28). It was a link for a
+    // while, on the reasoning that review means opening it properly - but that was
+    // decided while four bots were posting into these channels and length was the
+    // enemy. He has since removed the others, so this is now one message per brand
+    // per day, and the brief IS the thing the team needs to read. Making them open
+    // a tab for it meant only whoever clicked ever saw it.
+    // The link stays underneath, for ACTING on it rather than reading it. `&date=`
+    // matters: this notice names one day, and without it the tab opens whatever
+    // "yesterday" happens to be when the link is finally clicked.
+    /* THE CARD IS THE WHOLE WORKFLOW NOW. It used to be the brief plus a link
+       to Locus, which meant every decision -- send it, reword it, write it
+       again, don't send it -- cost a tab switch. The buttons underneath do all
+       four, and Locus keeps every one of them for when he wants the charts. */
+    // Internal-only brands (Lucky) get the same post shape (2026-10-22: #59 fixed redraws, this first post still drew the old brief).
+    const preview = { daily: await clientDailyFor(env, acct, date, null, r.data), thread: clientDailyThreadFor(acct, date, r.data) };
+    // Kept so "Edit the post" opens with this text; only redraws used to save it, so a fresh card opened an empty box.
+    await putSetting(env, `clientBuilt:${acct.act_id}:${date}`, preview.daily).catch(() => {});
+    const card = briefCard(acct, date, {
+      status: draftStatus(acct), text: r.text, steer: steer ?? null,
+      data_json: JSON.stringify({ health: r.health ?? null }),
+    }, undefined, preview);
+    let to = ch, firstErr = null;
+    let posted = await slackPost(env, ch, card.text, card.blocks,
+      { username: 'Locus', icon: ':memo:' }).catch(e => { firstErr = e.message; return null; });
+    if (!posted?.ts && agencyCh && acct.slack_channel && acct.slack_channel !== agencyCh) {
+      /* Write down WHY the agency channel refused, so the fallback is never silent again (2026-10-13: every draft
+         since 10-12 landed in the brand channels because the bot was never in #daily-briefs, and nothing said so). */
+      await putSetting(env, 'dailyBriefsError', JSON.stringify({ at: new Date().toISOString(), brand: acct.name, error: firstErr || 'no ts' })).catch(() => {});
+      to = acct.slack_channel;
+      posted = await slackPost(env, to, card.text, card.blocks,
+        { username: 'Locus', icon: ':memo:' }).catch(() => null);
+    }
+    if (posted?.ts) {
+      await env.DB.prepare(
+        `UPDATE briefs SET slack_ts = ?3, slack_channel = ?4 WHERE act_id = ?1 AND date = ?2`,
+      ).bind(acct.act_id, date, posted.ts, posted.channel || to).run().catch(() => {});
+    }
+  }
+  if (r.narrative_error) await alertClaudeFailure(env, `Daily Brief narrative for ${acct.name}`, r.narrative_error);
+  return { name: acct.name, ok: true, drafted: true, date, channel: ch ?? null, narrative_error: r.narrative_error ?? null };
+}
+
+/** Post the brief to the CLIENT's channel.
+ *  `useStored` sends the reviewed text exactly as it stands, edits included - 
+ *  regenerating at send time would silently discard the wording that was
+ *  approved, which is the whole point of the review step. */
+async function sendBrief(env, acct, date, { skipIfSent = false, useStored = false, ignoreHealth = false } = {}) {
+  // The trigger fires hourly, so a brand already posted for this date must never
+  // be posted again. Only a genuine 'sent' blocks a retry - a skipped or errored
+  // day should still get another chance.
+  const prior = await env.DB.prepare(
+    `SELECT status, text FROM briefs WHERE act_id = ?1 AND date = ?2`,
+  ).bind(acct.act_id, date).first().catch(() => null);
+  if (skipIfSent && prior?.status === 'sent') return { name: acct.name, already_sent: true, date };
+  // A skipped day is a decision, not a gap to fill. Only an explicit send from
+  // the UI (skipIfSent false) may override it.
+  if (skipIfSent && prior?.status === 'skipped') return { name: acct.name, skipped_by_hand: true, date };
+
+  /* THE GATE. A day whose data contradicts the platforms does not reach a
+     client, whichever route asked for the send - the cron, the button, or a
+     retry. Checked even on the useStored path, because the stored text was
+     built from the same bad numbers. Two D1 reads; a send is a rare click.
+     `ignoreHealth` exists for the one case where a human has looked at the
+     numbers and decided they are right anyway. */
+  let hd = null;
+  if (!ignoreHealth) {
+    hd = await briefData(env, acct, date).catch(() => null);
+    const hh = hd && briefHealth(hd, await coverageDates(env, acct, date, hd).catch(() => [date]));
+    if (hh?.verdict === 'broken') {
+      return { name: acct.name, blocked: true, date,
+        error: `Not sent - the data for ${hh.dates.map(prettyDate).join(' and ')} is wrong. ${hh.summary}. Fix it on the Data Health tab, then rebuild this brief.` };
+    }
+  }
+
+  let text = null, r = null;
+  // 'error' is no longer written (see the catch below), but rows from before
+  // that change still exist and their text is worth sending, not regenerating.
+  if (useStored && prior?.text && prior.status !== 'skipped') text = prior.text;
+  if (!text) {
+    r = await makeBrief(env, acct, date);
+    if (r.error) { await upsertBrief(env, acct.act_id, date, 'skipped', null, r.error, r.data); return { name: acct.name, skipped: r.error }; }
+    text = r.text;
+  }
+  // The client channel, with no fallback to the internal one - see sendReport.
+  // No channel is a refusal, not a state change: this used to overwrite the
+  // row as 'skipped' with the error in place of the brief's text, which for an
+  // internal-only brand would destroy a handled brief the team had just read.
+  const channel = acct.brief_channel;
+  if (!channel) return { name: acct.name, error: 'no client channel set for this brand - it is handled internally; pick one in Settings if it should be sent', draft_intact: true };
+  /* THE CLIENT DAILY IS SIX LINES, THE BRIEF IS ITS THREAD (the reporting audit, 2026-10-19; one short post since
+     2026-10-17). The client channel gets dailyPost (clientpost.js): the day, Sales / Ads / MER with one verdict word,
+     the brief's headline, the month in one line, and Next only when a person wrote one. The whole brief goes as ONE
+     reply under it, so the detail is a tap away. ONE DAY PER POST: a brief that covers missed days (coverageDates)
+     still posts one six-line message per day, oldest first, and a day more than two days old is not posted at all.
+     The stored row keeps the full text either way. */
+  const full = r?.data || hd || await briefData(env, acct, date).catch(() => null);
+  const dates = full ? await coverageDates(env, acct, date, full).catch(() => [date]) : [date];
+  const missed = dates.filter(d => d < date && d >= addDays(date, -2));
+  const out = (await clientDraftOf(env, acct.act_id, date)) || await clientDailyFor(env, acct, date, text, full);
+  try {
+    for (const d of missed) {
+      const prow = await env.DB.prepare(`SELECT text, status FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, d).first().catch(() => null);
+      if (prow && ['sent', 'skipped', 'handled'].includes(prow.status)) continue;
+      const mp = await clientDailyFor(env, acct, d, prow?.text || null, full, { next: false });
+      // Goes to the client, so it comes from Cole - not a bot wearing a name.
+      const mtop = await slackPost(env, channel, mp, null, { asUser: true });
+      await keepClientPost(env, acct.act_id, d, mtop?.channel || channel, mtop?.ts, mp);
+      await upsertBrief(env, acct.act_id, d, 'sent', channel, prow?.text || mp, full);
+    }
+    const top = await slackPost(env, channel, out, null, { asUser: true });
+    await keepClientPost(env, acct.act_id, date, top?.channel || channel, top?.ts, out);
+    const rest = clientDailyThreadFor(acct, date, full);
+    /* The reply failing must not unsend the headline the client already has: the send is recorded either way,
+       and the internal channel hears about the missing thread. */
+    if (rest && top?.ts) {
+      await slackPost(env, channel, rest, null, { asUser: true, thread_ts: top.ts }).catch(e =>
+        internalChannel(acct) && slackPost(env, acct.slack_channel,
+          `:warning: *${acct.name}*: the client daily went out but its full brief did not post in the thread (${e.message}).`).catch(() => {}));
+    }
+    await upsertBrief(env, acct.act_id, date, 'sent', channel, text, r?.data);
+    // The review card in the internal channel still shows a live Send button
+    // for a brief the client now has. Redraw it before anyone presses it again.
+    await slackSyncBrief(env, acct, date).catch(() => {});
+    // The morning card's numbers line says "client daily sent 7:40" once it goes after the card did.
+    await cardBriefState(env, cardDeps(), acct).catch(() => {});
+    // The brief still went out with its numbers, which is right - but a missing
+    // narrative is invisible to everyone unless it is said out loud. Usually
+    // means the Anthropic key is out of credit.
+    if (r?.narrative_error) await alertClaudeFailure(env, `Daily Brief narrative for ${acct.name}`, r.narrative_error);
+    return { name: acct.name, ok: true, channel, date, narrative_error: r?.narrative_error ?? null };
+  } catch (e) {
+    /* A FAILED SEND LEAVES A SENDABLE DRAFT. This used to write status 'error'
+       with the error message glued onto the front of the text, which did three
+       damaging things at once: the Reports/Brief UI only shows Edit and Send on
+       a 'draft', so the buttons vanished and the brief dropped to the read-only
+       history at the bottom of the page; the wording Cole had just spent time
+       editing was overwritten; and sendBrief itself then refused to reuse the
+       text, so the only way forward regenerated it from scratch.
+       Cole hit all three on Dartee, 2026-08-31, because SLACK_USER_TOKEN was
+       not set. The send failing is normal - an unset token, a channel he is not
+       in, Slack being down. It is not a reason to destroy the draft.
+       The row stays exactly as it was; the error goes to the caller (the UI
+       shows it) and to the internal channel via alertBriefFailure. */
+    return { name: acct.name, error: e.message, draft_intact: true };
+  }
+}
+
+/* INTERNAL-ONLY BRANDS POST TO THEIR OWN CHANNEL (Cole, 2026-10-25: Lucky has no client channel, and the team still
+   wants the daily, the weekly and the monthly in #lucky-ads; before this there was no way to send them anywhere). A
+   button on the Brief and Reports pages and on the Slack card, never automatic. It goes to the brand's internal
+   `slack_channel` as the Locus bot: the daily in the client shape with the stored brief as its thread reply, a report
+   as clientReportText. The row's status does not change (still 'handled'); the last post is kept in settings
+   `teamPost:<brief|weekly|monthly>:<act>:<date>` so the page can say when it went. */
+async function postBriefToTeam(env, acct, date) {
+  if (acct.brief_channel) return { error: 'this brand has a client channel - use Send to client' };
+  const channel = acct.slack_channel;
+  if (!channel) return { error: 'no internal channel set for this brand - pick one in Settings' };
+  const row = await env.DB.prepare(`SELECT text, status FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, date).first().catch(() => null);
+  if (!row?.text || row.status === 'skipped') return { error: 'no brief is written for that day yet - write it first' };
+  const data = await briefData(env, acct, date).catch(() => null);
+  const top = await clientDailyFor(env, acct, date, row.text, data);
+  const p = await slackPost(env, channel, top, null, { username: 'Locus' });
+  if (p?.ts) await slackPost(env, channel, row.text, null, { username: 'Locus', thread_ts: p.ts }).catch(() => {});
+  const rec = { channel: p?.channel || channel, ts: p?.ts || null, at: new Date().toISOString() };
+  await putSetting(env, `teamPost:brief:${acct.act_id}:${date}`, JSON.stringify(rec));
+  return { ok: true, ...rec, date };
+}
+async function postReportToTeam(env, acct, period, start) {
+  if (acct.brief_channel) throw new Error('this brand has a client channel - use Send to client');
+  const channel = acct.slack_channel;
+  if (!channel) throw new Error('no internal channel set for this brand - pick one in Settings');
+  const row = await env.DB.prepare(`SELECT * FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`).bind(acct.act_id, period, start).first();
+  if (!row) throw new Error('no report generated for that period yet');
+  const data = safeJson(row.data_json, null);
+  if (!data) throw new Error('this report has no data - regenerate it first');
+  const p = await slackPost(env, channel, await clientReportText(env, acct, row, data), null, { username: 'Locus' });
+  const rec = { channel: p?.channel || channel, ts: p?.ts || null, at: new Date().toISOString() };
+  await putSetting(env, `teamPost:${period}:${acct.act_id}:${start}`, JSON.stringify(rec));
+  return { ok: true, ...rec };
+}
+
+/** The thread reply under the client daily (clientpost.js dailyThread): more numbers for the same day, nothing a model
+ *  wrote. Orders and new vs returning, each ad channel that spent (Meta, Google) with the sales Triple Whale tracked to
+ *  it, contribution margin only when judgeCogs trusts the cost data. Empty when the day has no numbers. */
+function clientDailyThreadFor(acct, date, data) {
+  const day = (data?.days || []).find(x => x.date === date);
+  const a = day?.a;
+  if (!a || a.sales == null) return '';
+  const q = data?.cogs_quality?.verdict;
+  return dailyThread({
+    date, currency: acct.currency, cm_ok: !!q && q !== 'broken' && q !== 'none',
+    day: { sales: a.sales, orders: a.orders ?? null, new_orders: a.new_orders ?? null, new_rev: a.new_rev ?? null, ret_rev: a.ret_rev ?? null, cm: a.cm ?? null,
+      attr: !!a.attr_source,
+      channels: [{ name: 'Meta', spend: a.meta_spend, roas: a.meta_roas, purchases: a.meta_purchases }, { name: 'Google', spend: a.google_spend, roas: a.google_roas, purchases: a.google_purchases }] },
+  });
+}
+
+/** The client daily for one date (clientpost.js dailyPost) from the brief data: numbers only, no headline.
+ *  `next` = the human Next line: for phase 1 the buyer's note box (settings briefNote:<act>, kept 2 days). */
+async function clientDailyFor(env, acct, date, text, data, { next = true } = {}) {
+  const days = (data?.days || []).filter(x => x.a?.sales != null && x.date <= date);
+  const day = days.find(x => x.date === date) || null;
+  const mtd = days.reduce((n, x) => n + (x.a.sales || 0), 0);
+  const nextLine = next ? await briefNoteFor(env, acct.act_id, date).catch(() => null) : null;
+  return dailyPost({
+    brand: acct.name, date, currency: acct.currency,
+    day: { sales: day?.a?.sales ?? null, spend: day?.a?.spend ?? null, mer: day?.a?.mer ?? null, amer: day?.a?.amer ?? null, plan: day?.f?.sales ?? null },
+    /* "of $27K planned" = the plan TO DATE (the forecast days so far), not the whole month's goal. */
+    month: { ym: monthOf(date), sales: days.length ? mtd : (data?.mtd?.sales ?? null),
+      plan: days.some(x => x.f?.sales != null) ? days.reduce((n, x) => n + (x.f?.sales || 0), 0) : (data?.mtd?.sales_f ?? null),
+      spend: days.length ? days.reduce((n, x) => n + (x.a.spend || 0), 0) : (data?.mtd?.spend ?? null),
+      day_of_month: +date.slice(8, 10), days_in_month: daysInMonth(date) },
+    others: days.filter(x => x.date !== date).map(x => x.a.sales), next: nextLine,
+  });
+}
+
+/** The weekly / monthly client post (clientpost.js weeklyPost) for a report row: the frozen totals against the prior
+ *  period, one sentence written by a rule from those numbers, This week = the Monday call's lines (meetings.js confirm)
+ *  + the calendar's confirmed dates in the next 7 days, We need from you = the call's asks + the calendar's asks + open
+ *  Requests asks (each with when it was asked and when it is needed), then the archive link. The draft card shows the
+ *  same text. No model writes any of it. */
+async function clientReportText(env, acct, row, data) {
+  const period = row.period, start = row.period_start;
+  const url = `${DASHBOARD_URL}?reports=${await reportToken(env, acct.act_id)}`;
+  const cal = period === 'weekly' ? await clientCalendarFor(env, acct.act_id, localDate(BRIEF_TZ), { days: 6 }).catch(() => null) : null;
+  const asks = (await env.DB.prepare(`SELECT title, body, created_at FROM p_request WHERE act_id = ?1 AND kind = 'ask' AND status = 'open' ORDER BY created_at`)
+    .bind(acct.act_id).all().catch(() => ({ results: [] }))).results || [];
+  const askOf = a => ({ text: a.title, asked: String(a.created_at || '').slice(0, 10) || null, due: (String(a.body || '').match(/Needed by (\d{4}-\d{2}-\d{2})/) || [])[1] || null });
+  return weeklyPost({
+    brand: acct.name, period, start, end: row.period_end, currency: data?.account?.currency || acct.currency, totals: data?.totals, previous: data?.previous,
+    sentence: weekSentence(data?.totals, data?.previous, period === 'monthly' ? 'month' : 'week'),
+    this_week: [...(Array.isArray(data?.this_week) ? data.this_week : []), ...(cal?.going_live || [])],
+    from_you: [...(Array.isArray(data?.need_from_you) ? data.need_from_you : []), ...(cal?.need || []), ...asks.map(askOf)],
+    url,
+  });
+}
+
+/** A brief that fails silently is worse than no brief - nobody notices for weeks.
+ *  Posts to the brand's INTERNAL alerts channel, never the client's brief channel,
+ *  and stays quiet when yesterday already reported the same fault so an ongoing
+ *  problem is one message rather than a daily drip. */
+async function alertBriefFailure(env, acct, date, result) {
+  if (result?.already_sent) return;
+  const problem = result?.error || result?.skipped;
+  if (!problem) return;
+  const channel = acct.slack_channel;          // internal, deliberately not brief_channel
+  if (!channel) return;
+  const prev = await env.DB.prepare(
+    `SELECT status, text FROM briefs WHERE act_id = ?1 AND date = ?2`,
+  ).bind(acct.act_id, addDays(date, -1)).first().catch(() => null);
+  const same = prev && (prev.status === 'error' || prev.status === 'skipped') &&
+    String(prev.text || '').slice(0, 40) === String(problem).slice(0, 40);
+  if (same) return;
+  await slackPost(env, channel,
+    `:warning: *Daily Brief did not go out for ${acct.name}* (${date})\n${problem}\n_Internal alert - the client was not messaged. Fix it in Locus._`);
+}
+
+const BRIEF_TZ = 'America/Chicago';           // Cole's timezone; the send hour is set in it
+const DEFAULT_BRIEF_HOUR = DEFAULT_MORNING_HOUR;   // 5am Central since 2026-10-13 (morningcard.js morningHour)
+/* Reports start this many hours after the brief hour. They share a budget with
+   the briefs, and a report is the biggest single unit of work in this worker - 
+   given the same tick it would be the thing deferred six times over while six
+   briefs went first. Its own tick, its own allowance. */
+const REPORT_HOUR_OFFSET = 0;   // 2026-10-12: Cole wants the weekly and monthly on the same 6am tick as the brief, before the 8am Monday call
+
+/* ------------------------------------------------------------------ */
+/*  A scheduled job that fails must SAY SO                             */
+/* ------------------------------------------------------------------ */
+/* Every failure in this worker has been silent. `lastRun` recorded ok:true
+   while six reports posted to nobody; the nightly recorded six subrequest
+   errors and no human saw them for four days. A record nobody reads is not
+   monitoring.
+ *
+ * So: any tick that errored or had to defer work posts ONE line to the internal
+ * channel. Deliberately one message for the whole tick rather than one per
+ * brand, and deliberately quiet about a clean deferral that resolved itself - 
+ * see `sameAsLast`, which keeps an ongoing fault to a single message instead of
+ * a drip every hour. */
+async function alertScheduleTrouble(env, label, payload) {
+  const flat = JSON.stringify(payload || {});
+  const errors = (flat.match(/"error":/g) || []).length;
+  const deferred = (flat.match(/"deferred":/g) || []).length;
+  /* DEFERRAL IS NOT A FAULT - it is how this worker is supposed to behave now,
+     and on the free plan it happens on most ticks by design. Alerting on it
+     would put a Slack message in front of Cole every hour for normal
+     operation, which is how alerting becomes wallpaper and a real failure gets
+     scrolled past. Only errors speak. Deferrals ride along as context when
+     something else has already earned the message, and are always visible in
+     Settings. */
+  if (!errors) { await putSetting(env, 'lastTrouble', '').catch(() => {}); return; }
+  const ch = await getSetting(env, 'slackChannel');
+  if (!ch || !env.SLACK_BOT_TOKEN) return;
+  // One message per distinct fault, not one per hour it persists.
+  const sig = `${label}|${errors}`;
+  if ((await getSetting(env, 'lastTrouble')) === sig) return;
+  await putSetting(env, 'lastTrouble', sig).catch(() => {});
+  await slackPost(env, ch,
+    `:construction: *${label}* finished with *${errors}* error${errors > 1 ? 's' : ''}` +
+    `${deferred ? ` (and ${deferred} item${deferred > 1 ? 's' : ''} deferred to the next run, which is normal)` : ''}.\n` +
+    `Used ${subUsed()} of ${SUB_LIMIT} subrequests. _Locus → Settings → “Are the automatic jobs actually running?” has the detail._`,
+  ).catch(() => {});
+}
+
+/** The hour (0-23, Central) every morning post goes out: the client daily, the weekly and monthly drafts and the
+ *  morning card. 2026-10-13: ONE setting, settings.morningHour (default 5, "there before I grab my coffee"); the old
+ *  briefHour is still read as a fallback so a deploy before the setting exists changes nothing. */
+async function briefHour(env) {
+  return morningHour(env);
+}
+/** Current hour in Central, so the send lands at the same WALL-CLOCK time all year
+ *  rather than shifting by one at each daylight-saving boundary. */
+function centralHour(d = new Date()) {
+  return +new Intl.DateTimeFormat('en-US', { timeZone: BRIEF_TZ, hour: 'numeric', hour12: false }).format(d) % 24;
+}
+
+/** The report that covers yesterday on this Central day, if one is on for the brand: 'monthly' on the 1st, 'weekly'
+ *  on a Monday, else null (the same days reportsPass drafts them). */
+function reportCovers(a, today) {
+  const cfg = safeJson(a.report_config_json, {}) || {};
+  if (today.slice(8) === '01' && cfg.monthly !== false) return 'monthly';
+  if (new Date(today + 'T12:00:00Z').getUTCDay() === 1 && cfg.weekly !== false) return 'weekly';
+  return null;
+}
+
+/** Morning cron: refresh TW data, then post yesterday's brief for every enabled brand. */
+async function dailyBriefs(env) {
+  const accounts = (await listAccounts(env, true)).filter(a => a.brief_enabled);
+  const results = [];
+  let didWork = false;
+  // ONE clock governs the brief: Central, the same timezone the send hour is set in.
+  //
+  // This used to be `localDate(a.tz)` - each brand's own yesterday - which was harmless
+  // while the trigger fired exactly once a day, because by 7am Central every US zone
+  // agrees on what yesterday was. Once the trigger became hourly (so a missed send can
+  // recover) that stopped being true: at midnight EASTERN the three Eastern brands
+  // rolled into a new day, found no brief for it, and posted - 11pm Central, to client
+  // channels. The Pacific brands rolled over later and posted at 7am.
+  //
+  // Deriving the date from Central instead means the run at 23:00 Central still asks
+  // for the 23rd (already sent, skipped) and only the 07:00 run asks for the 24th.
+  const briefDate = addDays(localDate(BRIEF_TZ), -1);
+  for (const a of accounts) {
+    const date = briefDate;
+    // Cheap check FIRST. Now that this runs every hour after the send time rather
+    // than once, a brand already posted must cost a single SELECT - not a 45-day
+    // Triple Whale sync. sendBrief checks again; this only avoids the work.
+    const prior = await env.DB.prepare(
+      `SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`,
+    ).bind(a.act_id, date).first().catch(() => null);
+    if (prior?.status === 'sent') { results.push({ name: a.name, already_sent: true, date }); continue; }
+    /* SKIPPED IS HANDLED. "Don't send this one" means don't send it - and it
+       must also mean don't rebuild it, or the hourly trigger simply drafts the
+       day again and posts it to the internal channel every hour. That is
+       exactly what happened on 2026-09-01: 21 days were marked skipped in one
+       go and the next tick re-posted a draft for all six brands, because the
+       only statuses treated as finished were 'sent' and 'draft'. */
+    if (prior?.status === 'skipped') { results.push({ name: a.name, skipped_by_hand: true, date }); continue; }
+    // Handled = written for an internal-only brand. Done, same as sent.
+    if (prior?.status === 'handled') { results.push({ name: a.name, handled: true, date }); continue; }
+    // A brand awaiting review already has its draft. Without this the hourly
+    // trigger would re-sync 45 days of Triple Whale and rebuild the same draft
+    // every hour until someone pressed send.
+    if ((a.review_first || internalOnly(a)) && prior?.status === 'draft') { results.push({ name: a.name, awaiting_review: true, date }); continue; }
+
+    /* NO DAILY ON A REPORT DAY (Cole, 2026-10-13). On Monday the weekly report covers yesterday, on the 1st the monthly
+       does, so the client gets one message that morning instead of two, and #daily-briefs gets one draft per brand.
+       The day's numbers are still stored (status 'skipped', the reason as its text) so the morning card shows them;
+       nothing is written by the model, drafted or posted. Only when that report is on for the brand. */
+    const cover = reportCovers(a, localDate(BRIEF_TZ));
+    if (cover) {
+      if (!subCanAfford(40)) { results.push({ name: a.name, date, deferred: 'out of subrequest budget - next tick picks this up' }); continue; }
+      try {
+        const have = await env.DB.prepare(`SELECT synced_at FROM tw_daily WHERE act_id = ?1 AND date = ?2 AND metric = 'totalSales' LIMIT 1`).bind(a.act_id, date).first().catch(() => null);
+        const s = have?.synced_at ? String(have.synced_at) : '';
+        const fresh = !!s && localDate(a.tz || BRIEF_TZ, new Date(s.replace(' ', 'T') + (/Z$|[+-]\d\d:?\d\d$/.test(s) ? '' : 'Z'))) > date;
+        if (!fresh) await syncTwDaily(env, a, have ? 3 : 45).catch(() => {});
+        const data = await briefData(env, a, date);
+        await upsertBrief(env, a.act_id, date, 'skipped', null, `No daily today: the ${cover} report covers ${prettyDate(date)}.`, data);
+        results.push({ name: a.name, date, covered_by: cover }); didWork = true;
+      } catch (e) { results.push({ name: a.name, date, error: e.message }); }
+      continue;
+    }
+
+    // Stop BEFORE starting a brand we cannot finish. Half a brief is worse than
+    // none: the old behaviour ran until Cloudflare killed it, which could land
+    // between the Slack post and the row that records it - a client message with
+    // no record that it was sent, and a retry next hour that sends it twice.
+    if (!subCanAfford(costOf('brief', COST_BRIEF_BRAND))) {
+      results.push({ name: a.name, date, deferred: 'out of subrequest budget - next tick picks this up' });
+      continue;
+    }
+
+    didWork = true;
+    let r;
+    try {
+      r = await measured('brief', async () => {
+        /* Only sync Triple Whale if this brand is actually missing the day.
+           A blind 45-day pull per brand was the single biggest cost in this
+           loop, and it is now usually redundant: syncPass refreshes TW on the
+           hourly tick, so by brief time the data is normally already here. One
+           cheap SELECT replaces a network call plus a batch write. */
+        /* 5AM IS EARLY FOR A PACIFIC BRAND (2026-10-13). Its yesterday ended at 2am Central, so a row synced on an
+           hourly tick before that is a day still running. Present is not enough: the row must have been written
+           after the brand's OWN midnight (the same test moved.js uses), else pull it again before writing. */
+        const have = await env.DB.prepare(
+          `SELECT synced_at FROM tw_daily WHERE act_id = ?1 AND date = ?2 AND metric = 'totalSales' LIMIT 1`,
+        ).bind(a.act_id, date).first().catch(() => null);
+        const s = have?.synced_at ? String(have.synced_at) : '';
+        const fresh = !!s && localDate(a.tz || BRIEF_TZ, new Date(s.replace(' ', 'T') + (/Z$|[+-]\d\d:?\d\d$/.test(s) ? '' : 'Z'))) > date;
+        if (!fresh) await syncTwDaily(env, a, have ? 3 : 45).catch(() => {});
+        // Two modes per brand. Review-first parks a draft internally and waits for
+        // a human; auto sends straight to the client. A daily deliverable can be
+        // either, and forcing every brand through a morning approval is exactly
+        // the button-pushing this tool exists to avoid.
+        // An internal-only brand always takes the draft path: draftBrief writes
+        // it as 'handled' and posts the card, and there is no send to attempt.
+        if (a.review_first || internalOnly(a)) return await draftBrief(env, a, date, { skipIfExists: true });
+        const sent = await sendBrief(env, a, date, { skipIfSent: true });
+        /* An auto-send brand whose data is broken still gets a morning message - 
+           internally, as a draft, saying why it was held. Silence is the worst
+           outcome available: the client gets nothing and nobody knows. */
+        if (sent.blocked) return { ...(await draftBrief(env, a, date, { skipIfExists: false })), held: sent.error };
+        return sent;
+      });
+    } catch (e) { r = { name: a.name, error: e.message }; }
+    results.push(r);
+    // Never let a broken alert stop the remaining brands from getting their brief.
+    await alertBriefFailure(env, a, date, r).catch(() => {});
+  }
+  // Only record a run that actually did something, so `lastBriefRun` stays a useful
+  // record of the last real send rather than being overwritten hourly by no-ops.
+  if (didWork) {
+    await putSetting(env, 'lastBriefRun', JSON.stringify({ at: new Date().toISOString(), results })).catch(() => {});
+  }
+  return results;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Is a brand's Meta data current enough to judge?                    */
+/* ------------------------------------------------------------------ */
+/* The delivery check reads spend out of D1, not out of Meta. That is right - 
+ * it must be cheap enough to run every hour - but it means a sync that did not
+ * happen is indistinguishable from an account that did not spend, and the old
+ * code resolved that ambiguity the worst possible way: `dayRow?.spend ?? 0`.
+ *
+ * On 2026-08-31 Dartee Golf had spent $892.87 and the missing row said $0, so a
+ * client-facing brand got a 🚨 in Slack about billing, campaign status and
+ * policy. Nothing was wrong with the account. The sync had run out of
+ * subrequests eight hours earlier and never written the row.
+ *
+ * A missing row is now a MISSING ROW. It is worth knowing about - it just is
+ * not a spend story, and it must never be told as one. */
+async function insightsFreshness(env, a, day) {
+  const row = await env.DB.prepare(
+    `SELECT date FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date <= ?2 ORDER BY date DESC LIMIT 1`,
+  ).bind(a.act_id, day).first().catch(() => null);
+  return { latest: row?.date || null, current: row?.date === day };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Intraday pacing (Chat 4) - today's hourly curve vs the L7 shape    */
+/* ------------------------------------------------------------------ */
+
+/** Pull today + last 7 days of hourly spend live from Meta, cache in hourly_insights,
+ *  and build today's cumulative curve vs the average last-7-days curve. */
+/* ------------------------------------------------------------------ */
+/*  Weekly / Monthly client reports.                                   */
+/*  Frozen snapshots: drafted by the cron (Monday = last Mon–Sun, the  */
+/*  1st = last month), reviewed internally, sent to the client with a  */
+/*  button. The interface is Mobius Profit's Reports tab (these routes */
+/*  are proxied there); the client reads a tokenized archive link      */
+/*  served by the profit worker. Engine lives HERE for the same reason */
+/*  the Daily Brief's does: this worker holds the TW/Anthropic/Slack   */
+/*  secrets and the crons (the account is at the 5-trigger limit).     */
+/* ------------------------------------------------------------------ */
+
+/** One day of store-level economics - the same CTC math as briefData and
+ *  Profit's dayEconomics: revenue = Shopify TOTAL SALES minus sales tax
+ *  (shipping already inside it, never added); CM subtracts every variable
+ *  cost; the new/returning split keeps TW's measured SHARE rebased onto the
+ *  headline revenue. Keep the three implementations in step. */
+function econDay(piv, metaBy, date, cmPct) {
+  const totalSales = twDay(piv, date, TW_SALES);
+  if (totalSales == null) return null;
+  const tax = piv.totalNetTaxes?.[date] ?? 0;
+  const sales = totalSales - tax;
+  const shipCost = piv.totalShippingCosts?.[date] ?? 0;
+  const handling = piv.totalHandlingFees?.[date] ?? 0;
+  const cogs = piv.totalProductCosts?.[date] ?? null;
+  const fees = piv.totalPaymentGatewayCosts?.[date] ?? null;
+  const mrow = metaBy[date];
+  const gSpend = piv.ga_adCost?.[date] ?? null;
+  // Same guard as the Daily Brief: a blended total that contradicts Meta's own
+  // API is rebuilt rather than believed. The weekly report sums these days, so
+  // an unchecked one understates a whole week's spend.
+  const sp = spendFor(piv, date, mrow?.spend ?? null);
+  const spend = sp.spend;
+  const rawNew = piv.newCustomerSales?.[date] ?? null;
+  const rawRet = piv.rcRevenue?.[date] ?? null;
+  const split = (rawNew ?? 0) + (rawRet ?? 0);
+  const newShare = split > 0 && rawNew != null ? rawNew / split : null;
+  const newRev = newShare != null ? sales * newShare : rawNew;
+  const variable = cogs != null ? cogs + shipCost + handling + (fees ?? 0) : null;
+  const gp = cmPct != null ? sales * cmPct : variable != null ? sales - variable : null;
+  return {
+    date, sales, spend,
+    orders: piv.totalOrders?.[date] ?? null,
+    new_rev: newRev,
+    ret_rev: newShare != null ? sales * (1 - newShare) : rawRet,
+    new_orders: piv.newCustomersOrders?.[date] ?? null,
+    meta_spend: mrow?.spend ?? null, google_spend: gSpend, spend_source: sp.source,
+    gp, margin: sales > 0 && gp != null ? gp / sales : null,
+    cm: gp != null && spend != null ? gp - spend : null,
+  };
+}
+
+/** Aggregate a run of econDay rows. Ratios are ratio-of-sums, never averages. */
+function periodTotals(rows) {
+  const sum = get => { let s = 0, any = false; for (const r of rows) { const v = get(r); if (v != null) { s += v; any = true; } } return any ? s : null; };
+  const sales = sum(r => r.sales), spend = sum(r => r.spend);
+  const orders = sum(r => r.orders), newRev = sum(r => r.new_rev), newOrders = sum(r => r.new_orders);
+  const gp = sum(r => r.gp);
+  return {
+    days: rows.length, sales, spend, orders,
+    new_rev: newRev, ret_rev: sum(r => r.ret_rev), new_orders: newOrders,
+    meta_spend: sum(r => r.meta_spend), google_spend: sum(r => r.google_spend),
+    mer: spend ? sales / spend : null,
+    amer: newRev != null && spend ? newRev / spend : null,
+    aov: orders ? sales / orders : null,
+    ncpa: spend != null && newOrders ? spend / newOrders : null,
+    new_share: sales > 0 && newRev != null ? newRev / sales : null,
+    gp, cm: gp != null && spend != null ? gp - spend : null,
+    margin: sales > 0 && gp != null ? gp / sales : null,
+  };
+}
+
+/** Store-level numbers for one brand over a date range, the way a strategist reads them: revenue,
+ *  orders, average order, new vs returning (customers and money), cost to acquire a new customer,
+ *  email's share. One source for the Strategist's `store` view and the screens; built on the same
+ *  econDay rows as the reports, so it can never disagree with them. `from`..`to` inclusive. */
+async function storePeriod(env, acct, from, to) {
+  const { results: twRows } = await env.DB.prepare(`SELECT date, metric, value FROM tw_daily WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`).bind(acct.act_id, from, to).all();
+  const piv = {};
+  for (const r of twRows || []) (piv[r.metric] ??= {})[r.date] = r.value;
+  const { results: metaRows } = await env.DB.prepare(`SELECT date, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(clicks) AS clicks, SUM(link_clicks) AS link_clicks, SUM(purchases) AS purchases, SUM(revenue) AS revenue FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date <= ?3 GROUP BY date`).bind(acct.act_id, from, to).all();
+  const metaBy = Object.fromEntries((metaRows || []).map(r => [r.date, r]));
+  const cmPct = goalsFor(acct, monthOf(to))?.cm_pct ?? null;
+  const rows = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) { const r = econDay(piv, metaBy, d, cmPct); if (r) rows.push(r); }
+  const t = periodTotals(rows);
+  const sumM = k => { let s = 0, any = false; for (const d in (piv[k] || {})) if (d >= from && d <= to && piv[k][d] != null) { s += piv[k][d]; any = true; } return any ? s : null; };
+  const email = sumM('klaviyoPlacedOrderSales');
+  const retOrders = t.orders != null && t.new_orders != null ? t.orders - t.new_orders : null;
+  return {
+    from, to, days: rows.length, currency: acct.currency,
+    revenue: t.sales, ad_spend: t.spend, meta_spend: t.meta_spend, google_spend: t.google_spend,
+    mer: t.mer, amer: t.amer, contribution_margin: t.cm, gross_margin_pct: t.margin,
+    orders: t.orders, aov: t.aov,
+    new_customers: t.new_orders, new_customer_revenue: t.new_rev, new_customer_aov: t.new_orders ? (t.new_rev ?? 0) / t.new_orders : null,
+    returning_orders: retOrders, returning_revenue: t.ret_rev, returning_aov: retOrders ? (t.ret_rev ?? 0) / retOrders : null,
+    new_customer_share_of_revenue: t.new_share,
+    cac: t.ncpa,
+    first_order_margin: t.new_orders && t.margin != null ? ((t.new_rev ?? 0) / t.new_orders) * t.margin : null,
+    email_revenue: email, email_share_of_revenue: email != null && t.sales > 0 ? email / t.sales : null,
+    how_to_read: 'All Triple Whale store-level (blended), revenue = Shopify total sales less tax. aov = revenue / orders. new_customers = first-time orders (TW newCustomersOrders); cac = ad_spend / new_customers (the same number Reports call New-customer CPA and Customers calls Cost to acquire). first_order_margin = new_customer_aov x gross margin: the money the first order leaves to pay back the cac. email_revenue is Klaviyo-attributed and overlaps new and returning, never added to them. A null means Triple Whale has not synced that metric for the range.',
+  };
+}
+
+/** Per-platform sections, this period vs the prior one. A channel only appears
+ *  when it has data in either window (and is not on the client's hide list) - 
+ *  a section full of zeros is worse than no section. Meta reads daily_insights
+ *  (the Meta API is authoritative and carries delivery metrics TW does not
+ *  sync); everything else reads tw_daily. Platform revenue here is ATTRIBUTED
+ *  (the platform's own claim) and the UI labels it that way - the blended
+ *  scorecard is the honest headline. */
+/* Channel figures come from a PERIOD Triple Whale call (`tw` / `twPrev`), not
+ * from summing the daily rows. Two reasons, both learned the hard way:
+ * - TW exposes Impressions, Clicks and its PEER BENCHMARKS only as period
+ *     totals; they have no daily series at all, so no amount of summing
+ *     tw_daily produces them.
+ * - CPM and CTR are RATIOS. Summing seven daily CPMs is meaningless and
+ *     averaging them weights a $10 day like a $1,000 one. Asking TW for the
+ *     window it actually is gets the arithmetic right at the source.
+ * The daily rows remain the fallback when the period call fails or a shop has
+ * no Triple Whale connection. */
+/** Triple Whale reports 0 for peer benchmarks on a shop that has not opted into
+ *  its benchmark network - not null, zero. Rendering that gives a client a
+ *  "peer CPM $0.00", which is worse than showing nothing, so 0 means absent. */
+const peerVal = v => (typeof v === 'number' && v > 0) ? v : null;
+
+function channelSections(piv, metaBy, ranges, hide, tw, twPrev) {
+  // Benchmark metrics are RATES, so they average across the window; the sum of
+  // seven daily CPMs is not a CPM.
+  const avg = (id, ds) => {
+    let n = 0, t = 0;
+    for (const d of ds) { const v = piv[id]?.[d]; if (v != null) { t += v; n++; } }
+    return n ? t / n : null;
+  };
+  const S = (id, ds) => { let s = 0, any = false; for (const d of ds) { const v = piv[id]?.[d]; if (v != null) { s += v; any = true; } } return any ? s : null; };
+  const compute = {
+    // TRIPLE WHALE, not the Meta API. Every result and attribution figure in the
+    // report comes from one source, so nothing can disagree with the blended
+    // headline; Meta is used only where TW structurally cannot help, which is
+    // ad-level creative. TW carries Facebook CTR, CPM, Impressions and Clicks
+    // too - the metric filter was simply dropping them, which is what made this
+    // look like a gap in TW. Meta API spend stays as a fallback for a day TW has
+    // not synced yet, so a new account still shows something.
+    // Triple Whale, so every result in this report has one source. Meta is used
+    // only where TW structurally cannot help, which is ad-level creative.
+    meta: (ds, m) => {
+      const spend = m ? m.fb_ads_spend : null;
+      if (!(spend > 0)) {
+        // No TW figure for this window - fall back to Meta-reported spend so a
+        // brand mid-backfill still shows something, clearly flagged.
+        const daily = S('fb_ads_spend', ds);
+        if (daily > 0) return { spend: daily, awaiting_tw: true };
+        let ms = 0, any = false;
+        for (const d of ds) { const r = metaBy[d]; if (!r) continue; any = true; ms += r.spend || 0; }
+        return any && ms > 0 ? { spend: ms, awaiting_tw: true } : null;
+      }
+      const roas = m.fb_ads_purchase_roas ?? null;
+      const pur = m.facebookPurchases ?? m.facebookMetaPurchases ?? null;
+      const imp = m.facebookImpressions ?? null;
+      const clicks = m.facebookClicks ?? m.facebookOutboundClicks ?? null;
+      return {
+        spend, roas, source: 'Meta-reported',
+        revenue: roas != null ? spend * roas : null,
+        purchases: pur, cpa: m.facebookCpa ?? (pur ? spend / pur : null),
+        cpm: m.averageFacebookCpm ?? (imp ? spend / imp * 1000 : null),
+        ctr: m.facebookCtr != null ? m.facebookCtr / 100 : (imp && clicks != null ? clicks / imp : null),
+        impressions: imp, clicks,
+        peer_cpm: peerVal(m.totalBenchmarksCPM),
+        peer_ctr: peerVal(m.totalBenchmarksCTR) != null ? m.totalBenchmarksCTR / 100 : null,
+        peer_roas: peerVal(m.benchmarksFacebookRoas),
+      };
+    },
+    google: (ds, m) => {
+      const spend = m ? m.ga_adCost : S('ga_adCost', ds);
+      if (!(spend > 0)) return null;
+      const roas = m ? m.ga_ROAS : null;
+      const imp = m ? m.totalGoogleAdsImpressions : S('totalGoogleAdsImpressions', ds);
+      const clicks = m ? m.totalGoogleAdsClicks : S('totalGoogleAdsClicks', ds);
+      // googleAllCpa is real dollars-per-conversion; googleCpa is NOT (~0.18,
+      // some other ratio) and dividing spend by it fabricated conversions.
+      const cpa = m ? m.googleAllCpa : null;
+      const purchases = cpa ? Math.round(spend / cpa) : null;
+      // A ratio built on nearly no conversions is not a result. Below two, the
+      // ROAS is one order's value over the window's whole spend, so it is carried
+      // as low_signal and the renderers show the conversion count instead.
+      const lowSignal = purchases != null && purchases < 2;
+      return {
+        spend, roas: roas ?? null, low_signal: lowSignal || undefined,
+        source: 'Google-reported',
+        revenue: roas != null ? spend * roas : null,
+        purchases,
+        cpa: cpa ?? null,
+        cpm: (m && m.totalGoogleAdsCpm != null) ? m.totalGoogleAdsCpm : (imp ? spend / imp * 1000 : null),
+        ctr: (m && m.totalGoogleAdsCtr != null) ? m.totalGoogleAdsCtr / 100 : (imp && clicks ? clicks / imp : null),
+        impressions: imp ?? null, clicks: clicks ?? null,
+        peer_cpm: m ? peerVal(m.totalBenchmarksCPMGoogle) : null,
+        peer_ctr: m && peerVal(m.totalBenchmarksCTRGoogle) != null ? m.totalBenchmarksCTRGoogle / 100 : null,
+      };
+    },
+    // TikTok / Pinterest: the TW ids we expect if those channels ever connect.
+    // No data in the window = no section, so a wrong guess costs nothing.
+    tiktok: ds => adPlatform(ds, ['tiktokAdsSpend', 'tiktokSpend', 'tk_adCost'], ['tiktokAdsRoas', 'tiktokRoas', 'tk_ROAS']),
+    pinterest: ds => adPlatform(ds, ['pinterestAdsSpend', 'pinterestSpend', 'pi_adCost'], ['pinterestAdsRoas', 'pinterestRoas', 'pi_ROAS']),
+    amazon: ds => {
+      const sales = S('totalAmazonSales', ds);
+      const orders = S('totalAmazonOrders', ds);
+      // A connected-but-dormant Amazon account returns rows of zeros - a section
+      // of zeros in a client report is noise, so it needs actual activity to show.
+      if (!(sales > 0) && !(orders > 0)) return null;
+      let through = null;
+      for (const d of ds) if (piv.totalAmazonSales?.[d] != null) through = d;
+      return { sales, net_sales: S('amazonNetSales', ds), orders,
+        refunds: S('totalAmazonRefunds', ds), data_through: through };
+    },
+    email: ds => {
+      const rev = S('klaviyoPlacedOrderSales', ds);
+      if (rev == null || rev <= 0) return null;
+      return { revenue: rev,
+        campaigns: S('totalKlaviyoPlacedOrderTotalPriceCampaigns', ds),
+        flows: S('totalKlaviyoPlacedOrderTotalPriceFlows', ds) };
+    },
+  };
+  function adPlatform(ds, spendIds, roasIds) {
+    let spend = 0, rev = 0, any = false;
+    for (const d of ds) {
+      let sp = null;
+      for (const id of spendIds) { const v = piv[id]?.[d]; if (v != null) { sp = v; break; } }
+      if (sp == null) continue;
+      any = true; spend += sp;
+      for (const id of roasIds) { const v = piv[id]?.[d]; if (v != null) { rev += v * sp; break; } }
+    }
+    return any && spend > 0 ? { spend, revenue: rev || null, roas: rev ? rev / spend : null } : null;
+  }
+  const LABELS = { meta: 'Meta', google: 'Google', tiktok: 'TikTok', amazon: 'Amazon', pinterest: 'Pinterest', email: 'Email (Klaviyo)' };
+  const out = [];
+  for (const id of Object.keys(LABELS)) {
+    if (hide.includes(id)) continue;
+    const cur = compute[id](ranges.cur, tw), prev = compute[id](ranges.prev, twPrev);
+    if (cur || prev) out.push({ id, label: LABELS[id], cur, prev });
+  }
+  return out;
+}
+
+/* ATTRIBUTION IS TRIPLE WHALE'S, ALWAYS (Cole, 2026-09-18). channelSections
+   builds Meta and Google from the platforms' own attributed figures; this
+   replaces revenue, ROAS, purchases and CPA with Triple Whale's pixel
+   (BRIEF_ATTR_MODEL) so the report, its narrative and the Slack card all read
+   one source. Spend, CPM, CTR, impressions and clicks stay the platform's.
+   The platform figures are kept as `platform_*` for reference only. A window
+   with no attribution rows at all has not synced: the section says so rather
+   than quietly falling back to the platform number. */
+async function twAttributeChannels(env, acct, channels, [s, e], [ps, pe]) {
+  const q = (from, to) => env.DB.prepare(
+    `SELECT platform, SUM(revenue) AS rev, SUM(orders) AS ord, COUNT(*) AS n FROM tw_ad_attr
+      WHERE act_id = ?1 AND model = ?2 AND date >= ?3 AND date <= ?4 AND platform IS NOT NULL
+      GROUP BY platform`,
+  ).bind(acct.act_id, BRIEF_ATTR_MODEL, from, to).all().then(r => r.results).catch(() => null);
+  const [cur, prev] = [await q(s, e), await q(ps, pe)];
+  const apply = (sec, rows) => {
+    if (!sec || !(sec.spend > 0)) return;
+    const had = { roas: sec.roas, revenue: sec.revenue, purchases: sec.purchases, cpa: sec.cpa };
+    for (const [k, v] of Object.entries(had)) if (v != null) sec[`platform_${k}`] = v;
+    if (!rows || !rows.length) {
+      Object.assign(sec, { roas: null, revenue: null, purchases: null, cpa: null, low_signal: undefined,
+        source: 'Triple Whale', awaiting_attr: true });
+      return;
+    }
+    const c = rows.find(r => r.platform === sec._p) || { rev: 0, ord: 0 };
+    const ord = Math.round((c.ord || 0) * 10) / 10;
+    Object.assign(sec, {
+      revenue: c.rev || 0, roas: (c.rev || 0) / sec.spend, purchases: ord,
+      cpa: ord > 0 ? sec.spend / ord : null,
+      low_signal: ord < 2 || undefined, source: 'Triple Whale',
+    });
+  };
+  for (const ch of channels) {
+    if (ch.id !== 'meta' && ch.id !== 'google') continue;
+    for (const sec of [ch.cur, ch.prev]) if (sec) sec._p = ch.id;
+    apply(ch.cur, cur); apply(ch.prev, prev);
+    for (const sec of [ch.cur, ch.prev]) if (sec) delete sec._p;
+  }
+}
+
+/** Tell someone when Claude stops answering.
+ *
+ *  Anthropic exposes SPEND, not remaining balance - no API can watch a credit
+ *  balance drain - so the practical warning is the failure itself. Every
+ *  narrative call already degrades gracefully (the brief and the report still
+ *  ship their numbers), which is correct behaviour and also exactly why it would
+ *  otherwise go unnoticed for weeks: a client would just quietly receive a
+ *  thinner brief.
+ *
+ *  Deduped GLOBALLY on a 12h window, not per brand: an exhausted key fails all
+ *  six brands within the same minute, and six identical Slack messages is how an
+ *  alert gets muted. Posts INTERNAL-only, never to a client channel.
+ */
+async function alertClaudeFailure(env, context, message) {
+  const channel = await getSetting(env, 'reportChannel') || await getSetting(env, 'slackChannel');
+  if (!channel) return;
+  const last = safeJson(await getSetting(env, 'lastClaudeAlert'), null);
+  if (last?.at && Date.now() - last.at < 12 * 3600e3) return;
+  // Marked before posting so a failing post cannot turn into a message storm.
+  await putSetting(env, 'lastClaudeAlert', JSON.stringify({ at: Date.now(), context, message })).catch(() => {});
+  const msg = String(message || '');
+  const likelyCredit = /credit|balance|quota|insufficient|billing|payment|402/i.test(msg);
+  await slackPost(env, channel,
+    `:warning: *Claude could not write the ${context}* - the numbers went out, the written summary did not.\n` +
+    '```' + msg.slice(0, 300) + '```\n' +
+    (likelyCredit
+      ? '*This looks like an API credit problem.* Top up at <https://platform.claude.com/settings/billing|Console → Billing>, and turn on auto-reload so it cannot happen again.'
+      : 'Check <https://platform.claude.com/settings/billing|Console → Billing> for credit, and the API key on the account-health worker.') +
+    '\n_One alert per 12 hours, however many brands are affected._',
+    null, { username: 'Locus', icon: ':warning:' }).catch(() => {});
+}
+
+/** A sync that keeps failing must SAY SO. `syncAdDaily` writes its error to
+ *  accounts.last_error and returns quietly, which is right for one bad night - 
+ *  but when Meta removed `video_3_sec_watched_actions` the whole ad-level pull
+ *  broke for every brand and ran silently for two nights, because nothing reads
+ *  last_error unless a human opens Settings. A field being retired is exactly
+ *  the kind of break that never fixes itself.
+ *
+ *  Deduped globally on 12 hours like the Claude alert: one bad field fails all
+ *  six brands within a minute, and six identical messages is how an alert gets
+ *  muted. */
+/** Brands kept live on purpose as TEST accounts (The Golf Sock): their syncs
+ *  and delivery checks still run, but they never page Slack. Cole asked for the
+ *  Golf Sock alerts to stop on 2026-10-09. Override with the `mutedBrands`
+ *  setting (a JSON array of brand ids). Takes a brand id or a Meta act id. */
+async function alertsMuted(env, id) {
+  const muted = safeJson(await getSetting(env, 'mutedBrands'), null) || ['brand_the_golf_sock'];
+  if (!id) return false;
+  if (muted.includes(id)) return true;
+  const row = await env.DB.prepare(`SELECT brand_id FROM connections WHERE kind = 'meta' AND external_id = ?1`).bind(id).first().catch(() => null);
+  return !!(row && muted.includes(row.brand_id));
+}
+
+async function alertSyncFailure(env, acct, message) {
+  if (await alertsMuted(env, acct.act_id)) return;
+  const channel = await getSetting(env, 'reportChannel') || await getSetting(env, 'slackChannel');
+  if (!channel) return;
+  const last = safeJson(await getSetting(env, 'lastSyncAlert'), null);
+  if (last?.at && Date.now() - last.at < 12 * 3600e3) return;
+  await putSetting(env, 'lastSyncAlert', JSON.stringify({ at: Date.now(), act: acct.act_id, message })).catch(() => {});
+  const msg = String(message || '');
+  const badField = /is not valid for fields param/i.test(msg);
+  await slackPost(env, channel,
+    `:rotating_light: *Meta ad-level sync is failing* - first seen on ${acct.name}.\n` +
+    '```' + msg.slice(0, 300) + '```\n' +
+    (badField
+      ? '*Meta has retired a field we ask for.* Creative stats (hook, hold, retention) will be stale or empty until the field list in `syncAdSlice` is updated.'
+      : 'Ad-level spend, creative cards and the report ad table will be stale until this clears.') +
+    '\n_One alert per 12 hours, however many brands are affected._',
+    null, { username: 'Locus', icon: ':rotating_light:' }).catch(() => {});
+}
+
+/** Public, login-free preview links for the ads a report lists.
+ *
+ *  `preview_shareable_link` is Meta's own field for exactly this: a URL that
+ *  someone WITHOUT access to the ad account can open to see the creative. That
+ *  matters because these links go into a client-facing report - an Ads Manager
+ *  deep link would just bounce the client to a permission error.
+ *
+ *  Fetched only for the ~10 ads actually listed, in one batched call, and stored
+ *  INSIDE the frozen report so an archived report keeps the links it shipped
+ *  with. Best effort throughout: a deleted ad, an expired token or a partial
+ *  failure must never stop a report from generating, so this degrades to plain
+ *  unlinked names rather than throwing.
+ */
+/* DO NOT use `preview_shareable_link` here. Meta documents it as shareable with
+ * people who lack ad-account access, but tested 2026-08-27 it 302s to
+ * business.facebook.com/business/loginpage - useless in a client report, and it
+ * fails in a way that looks fine until a client clicks it.
+ *
+ * The `/previews` edge returns an <iframe src="...preview_iframe.php?d=..&t=..">
+ * whose URL renders the creative with NO login, which is what an embeddable
+ * preview has to do by definition. We extract that src and link to it directly. */
+const PREVIEW_FORMATS = ['MOBILE_FEED_STANDARD', 'DESKTOP_FEED_STANDARD', 'INSTAGRAM_STANDARD'];
+
+function previewSrcFrom(node) {
+  const body = node?.previews?.data?.[0]?.body ?? node?.data?.[0]?.body;
+  if (typeof body !== 'string') return null;
+  const m = body.match(/src="([^"]+)"/);
+  if (!m) return null;
+  // The body is HTML, so the query string arrives entity-encoded.
+  const url = m[1].replace(/&amp;/g, '&');
+  if (!/^https:\/\//.test(url)) return null;
+  // Meta hands these back on business.facebook.com. Both hosts serve the preview
+  // without a login (verified 2026-08-27), but the business subdomain is the one
+  // that runs business-login flows for anyone carrying Business Manager cookies,
+  // and this link goes to clients. www is the neutral host.
+  return url.replace('://business.facebook.com/', '://www.facebook.com/');
+}
+
+async function adPreviewLinks(env, adIds) {
+  if (!env.META_TOKEN || !adIds.length) return {};
+  const out = {};
+  const ids = adIds.slice(0, 12);
+  /* One ad at a time: the `?ids=` batch this used to try first is dead in Graph v26+
+     (see "?ids= IS DEAD" in CLAUDE.md), so it failed every time and cost a wasted call. */
+  for (const fmt of PREVIEW_FORMATS) {
+    const missing = ids.filter(id => !out[id]);
+    if (!missing.length) break;
+    for (const id of missing) {
+      try {
+        const r = await meta(env, `${id}/previews`, { ad_format: fmt });
+        const src = previewSrcFrom(r);
+        if (src) out[id] = src;
+      } catch { /* not previewable in this format - the next one may work */ }
+    }
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Real video playback                                                 */
+/*                                                                      */
+/*  Meta withholds a video's `source` mp4 from the USER token even with */
+/*  pages_read_engagement - it needs a PAGE-scoped token. Those come    */
+/*  from me/accounts and, for a system user, do not expire, so they are  */
+/*  cached; a page missing from the cache (a newly assigned brand)       */
+/*  triggers one refresh before giving up.                              */
+/*                                                                      */
+/*  The mp4 URL itself is short-lived and signed, which is exactly why   */
+/*  it is resolved at PLAY time and never frozen into a report. The      */
+/*  cover frame is baked in and always survives; playback is the part    */
+/*  allowed to expire.                                                   */
+/* ------------------------------------------------------------------ */
+
+async function pageTokens(env, { refresh = false } = {}) {
+  if (!refresh) {
+    const cached = safeJson(await getSetting(env, 'pageTokens'), null);
+    if (cached?.map) return cached.map;
+  }
+  const r = await meta(env, 'me/accounts', { fields: 'id,access_token', limit: 100 });
+  const map = {};
+  for (const p of r?.data || []) if (p.access_token) map[String(p.id)] = p.access_token;
+  await putSetting(env, 'pageTokens', JSON.stringify({ map, at: new Date().toISOString() }));
+  return map;
+}
+
+/** A fresh, playable mp4 URL for one ad, or null when it genuinely cannot be
+ *  played - a creative on a page we were never granted, or an ad with no video.
+ *  Never throws: the card falls back to its cover image. */
+async function adVideoSource(env, adId, hint = {}) {
+  if (!env.META_TOKEN) return null;
+  let videoId = hint.video_id || null, pageId = hint.page_id || null;
+  if (!videoId || !pageId) {
+    try {
+      const r = await meta(env, `${adId}/adcreatives`, { fields: 'video_id,object_story_spec,asset_feed_spec', limit: 1 });
+      const c = r?.data?.[0] || {};
+      videoId ||= c.video_id || c.object_story_spec?.video_data?.video_id || c.asset_feed_spec?.videos?.[0]?.video_id || null;
+      pageId ||= c.object_story_spec?.page_id || null;
+    } catch { return null; }
+  }
+  if (!videoId) return { src: null, reason: 'This ad has no single video to play (a carousel or a dynamic creative).' };
+  if (!pageId) return { src: null, reason: 'Meta does not say which page this creative belongs to, so it cannot be opened.' };
+
+  const ask = async tok => {
+    const u = new URL(`${GRAPH}/${videoId}`);
+    u.searchParams.set('fields', 'source');
+    u.searchParams.set('access_token', tok);
+    const res = await xfetch(u);
+    const b = await res.json().catch(() => ({}));
+    return { src: b?.source || null, err: b?.error?.message || (res.ok ? null : `Meta returned ${res.status}`) };
+  };
+
+  /* PAGE TOKENS GO STALE, AND NOTHING NOTICED. The cached map was only ever
+     refetched when a page was MISSING from it - a token that was present but no
+     longer accepted (the user token behind it regenerated, the page reassigned)
+     failed here forever, and the card said "no playable video", which is not
+     what had happened at all. Measured 2026-09-03: all six pages had tokens,
+     all cached 2026-08-30, and playback was failing anyway.
+     So: try the cache, and on ANY empty answer refresh once and try again.
+     A genuinely unplayable ad costs one extra call; a stale token now heals. */
+  let tokens = await pageTokens(env).catch(() => ({}));
+  let tok = tokens[String(pageId)];
+  let out = tok ? await ask(tok).catch(e => ({ src: null, err: e.message })) : { src: null, err: 'no page token' };
+  if (!out.src) {
+    tokens = await pageTokens(env, { refresh: true }).catch(() => ({}));
+    const fresh = tokens[String(pageId)];
+    if (fresh && fresh !== tok) out = await ask(fresh).catch(e => ({ src: null, err: e.message }));
+    else if (!tok) out = { src: null, err: 'no page token' };
+  }
+  if (out.src) return { src: out.src, page_id: String(pageId) };
+  /* NAME THE PARTNERSHIP CASE. "We have not been granted access" is true of a
+     page we simply have not been given, and ALSO of every branded-content /
+     partnership ad - where the creative sits on the CREATOR's page and never
+     will be ours. The second is not a permissions problem to chase, it is how
+     partnership ads work, and reading the generic message sent Cole looking for
+     an access fix that does not exist. `ours` is the set of pages we actually
+     hold tokens for, so anything outside it is somebody else's page. */
+  const ours = Object.keys(tokens || {});
+  const partnership = ours.length > 0 && !ours.includes(String(pageId));
+  return { src: null, page_id: String(pageId), partnership,
+    reason: out.err === 'no page token'
+      ? (partnership ? PARTNERSHIP_REASON
+        : 'This creative lives on a page we have not been granted access to.')
+      : `Meta would not return the video file - ${out.err || 'no reason given'}.` };
+}
+
+/** Is this ad actually listed in one of that client's SENT reports?
+ *  This is what stops the endpoint being an open proxy for arbitrary Meta
+ *  videos: an unauthenticated caller can only ever play an ad that already
+ *  appears in a report their own archive link covers. Returns the stored row
+ *  so its video_id can be reused instead of asking Meta again. */
+async function adInSentReport(env, token, adId) {
+  const tokens = safeJson(await getSetting(env, 'reportTokens'), {});
+  const actId = await resolveBrandId(env, tokens?.[token]?.act_id);
+  if (!actId || !adId) return null;
+  const { results } = await env.DB.prepare(
+    `SELECT data_json FROM reports WHERE act_id = ?1 AND status = 'sent'`,
+  ).bind(actId).all();
+  for (const r of results) {
+    const row = (safeJson(r.data_json, {})?.ads?.top || []).find(a => String(a.ad_id) === String(adId));
+    if (row) return row;
+  }
+  return null;
+}
+
+/** Creative thumbnails for the ads a report lists, BAKED INTO the report.
+ *
+ *  Meta's image URLs are signed and expire, so linking to them would leave a
+ *  three-month-old report full of broken images - and a frozen report that
+ *  rots is not frozen. Each thumbnail is fetched once at generation time and
+ *  stored as a data URI inside the report itself, which is then self-contained
+ *  forever with no external dependency.
+ *
+ *  Video ads work the same way: Meta keeps a cover frame for every video
+ *  creative, so the grid is uniform and only the play badge differs. The name
+ *  still links to the full preview, which actually plays the video.
+ *
+ *  Best effort throughout - an ad with no usable thumbnail simply shows its
+ *  name and numbers rather than a broken image.
+ */
+/* Creative assets are CACHED, and this is why filtering used to crawl.
+   Every sort or filter change re-picks the top N, and each new ad meant a
+   creative fetch plus a video lookup against Meta - up to sixteen sequential
+   round trips for one click on a dropdown. An ad's creative does not change,
+   so it is fetched once and kept.
+   Cached in `ad_creative` keyed by ad_id, refreshed after 14 days so a swapped
+   asset eventually corrects itself. Only rows under 90KB are stored: a full
+   resolution static can be far larger and D1 is not an image host. */
+const AD_CREATIVE_TTL_DAYS = 14;
+/* How long a cached preview URL is trusted. Meta's preview tokens expire on a
+   long horizon, so a week is comfortably inside it while still self-healing if
+   one ever dies early. */
+const AD_PREVIEW_TTL_DAYS = 7;
+/* Said in one place, by both the short-circuit and the live resolution, so the
+   card cannot explain itself two different ways depending on the cache. */
+const PARTNERSHIP_REASON = 'This is a partnership ad - the video file lives on the creator’s page, not ours, so Meta will not hand it over. Showing Meta’s own preview instead.';
+/* What the LIVE creative browser may spend on one image, and across a batch.
+   Deliberately not the report's numbers: a report inlines every image into a
+   single D1 row and must stay small, whereas this is a JSON response that is
+   thrown away after paint. `budget` is effectively uncapped - it exists so a
+   pathological account cannot build an unbounded response, not to ration. */
+const LIVE_THUMBS = { maxBytes: 280_000, budget: 24_000_000, allowUrl: true };
+
+/* `maxBytes` / `budget` are the REPORT's constraints, and they were being
+   applied to the live creative browser too, which does not share them.
+   A report inlines every image into ONE D1 row, so it must stay under ~1.1MB
+   in total and reject any single image over 190KB. The Creative tab just
+   streams JSON to a browser and has no such ceiling - but it inherited both,
+   and because the video cover deliberately picks the LARGEST frame Meta offers
+   (and statics are asked for at 1080), most images were fetched, found to be
+   over 190KB, and thrown away. Measured 2026-09-03: 13 of 20 cached creatives
+   had `thumb: null`, and the card falls back to a glyph placeholder - which is
+   what "the creative won't load" was. */
+async function adThumbnails(env, adIds, { maxBytes = 190_000, budget = 1_100_000, allowUrl = false } = {}) {
+  const out = {};
+  if (!env.META_TOKEN || !adIds.length) return out;
+  const want = [...new Set(adIds)];
+  let missing = want;
+  try {
+    const q = want.map((_, i) => `?${i + 1}`).join(',');
+    const { results } = await env.DB.prepare(
+      `SELECT ad_id, json, fetched_at FROM ad_creative WHERE ad_id IN (${q})`).bind(...want).all();
+    const cutoff = new Date(Date.now() - AD_CREATIVE_TTL_DAYS * 86400e3).toISOString().slice(0, 19).replace('T', ' ');
+    const fresh = new Set(), dayAgo = new Date(Date.now() - 86400e3).toISOString().slice(0, 19).replace('T', ' ');
+    for (const r of results || []) {
+      if (String(r.fetched_at) < cutoff) continue;          // stale: refetch
+      const v = safeJson(r.json, null);
+      // A row saved WITHOUT a cover is retried after a day, not trusted for 14.
+      if (v && (!v.thumb || v.thumb_link) && String(r.fetched_at) < dayAgo) continue;
+      // 2026-10-09: covers moved to R2 (creative.js). An old base64 or Meta-link row is redone once.
+      if (v && env.MEDIA && v.thumb && !/^https:\/\/mobius/.test(v.thumb)) continue;
+      if (v && env.MEDIA && v.thumb && !v.asset_key) continue;
+      // 2026-10-13: a row saved before `link` existed is redone ONLY when one ad is asked for (the ad sheet opening),
+      // never on a gallery batch, so the landing page line fills in one creative at a time at no cost to the cards.
+      if (v && v.link === undefined && want.length === 1) continue;
+      if (v) { out[r.ad_id] = v; fresh.add(r.ad_id); }
+    }
+    missing = want.filter(id => !fresh.has(id));
+  } catch { missing = want; }                                // cache miss must never break the cards
+  if (!missing.length) return out;
+  adIds = missing;
+  // Whatever we resolve here is written back to `ads.media_type` at the end, so
+  // the creative browser can filter by type without a Meta call per ad. It
+  // fills in as ads are looked at, and the video/static fallback below covers
+  // anything not yet seen.
+
+  // Ad-level facts for the detail view, in ONE batched call rather than per ad.
+  /* `?ids=a,b,c` IS DEPRECATED IN GRAPH v26+ and now just errors, so this call
+     had been failing silently for every card: the detail popout lost status,
+     created date, campaign and adset, and the empty catch meant nothing ever
+     said so. Found 2026-09-08 while building the media_type backfill, which
+     failed the same way and did report it.
+     The account's ads edge with an `ad.id IN` filter is the supported shape and
+     is still ONE call. */
+  let metaById = {};
+  try {
+    const want = adIds.slice(0, 10);
+    /* The edge is per ACCOUNT and this function is only given ad ids, so the
+       account comes from the row we already store. One query, and it keeps the
+       three call sites unchanged. */
+    const actId = (await env.DB.prepare(`SELECT act_id FROM ads WHERE ad_id = ?1`).bind(want[0]).first())?.act_id;
+    if (actId) {
+      const r = await meta(env, `${actId}/ads`, {
+        fields: 'id,created_time,effective_status,campaign{name},adset{name}',
+        filtering: [{ field: 'ad.id', operator: 'IN', value: want }],
+        limit: want.length,
+      });
+      for (const a of (r?.data || [])) metaById[a.id] = a;
+    }
+  } catch { /* the cards still work without status and dates */ }
+  // Cards render ~255x319 CSS px, so a 2x screen wants ~640px on the long edge.
+  // The SMALLEST frame that still covers that wins, and every other size is
+  // kept as a fallback - picking the biggest and hard-rejecting it over the
+  // ceiling is what left most cards with no image at all.
+  const LONG_EDGE = 640;
+  for (const id of adIds.slice(0, 10)) {
+    try {
+      const r = await meta(env, `${id}/adcreatives`, {
+        fields: 'id,thumbnail_url,image_url,image_hash,object_type,video_id,object_story_spec,asset_feed_spec,body,title',
+        thumbnail_width: 1080, thumbnail_height: 1080, limit: 1,
+      });
+      const c = r?.data?.[0];
+      const m = metaById[id] || {};
+      // The words in the ad. Page-post ads keep them in object_story_spec (link_data
+      // for a static, video_data for a video); Advantage+ ads keep several of each
+      // in asset_feed_spec, where the first is the primary variant.
+      const ld = c?.object_story_spec?.link_data, vd = c?.object_story_spec?.video_data;
+      const afs = c?.asset_feed_spec || {};
+      const copy = {
+        body: vd?.message || ld?.message || afs.bodies?.[0]?.text || c?.body || null,
+        headline: vd?.title || ld?.name || afs.titles?.[0]?.text || c?.title || null,
+        description: ld?.description || afs.descriptions?.[0]?.text || null,
+        cta: vd?.call_to_action?.type || ld?.call_to_action?.type || afs.call_to_action_types?.[0] || null,
+        // Where the ad sends people (2026-10-13, the Landing page line in the ad sheet): link_data.link on a static,
+        // the call to action's link on a video, link_urls on an Advantage+ creative. null when Meta has none.
+        link: ld?.link || vd?.call_to_action?.value?.link || afs.link_urls?.[0]?.website_url || c?.object_story_spec?.template_data?.link || null,
+        status: m.effective_status || null,
+        created: m.created_time ? String(m.created_time).slice(0, 10) : null,
+        campaign: m.campaign?.name || null,
+        adset: m.adset?.name || null,
+      };
+      Object.assign(out[id] ??= {}, copy);
+      // Video hides in several places depending on how the ad was built: a
+      // top-level video_id, inside object_story_spec.video_data for a page-post
+      // ad, or in asset_feed_spec.videos for a dynamic/Advantage+ creative.
+      // Checking only the first two reported every UGC video ad as an image.
+      const isVideo = !!(c?.video_id || c?.object_type === 'VIDEO'
+        || c?.object_story_spec?.video_data
+        || (Array.isArray(c?.asset_feed_spec?.videos) && c.asset_feed_spec.videos.length));
+      /* MEDIA TYPE, and only the three that are real: video, carousel, image.
+         Cole: "the type should only be All, Video, Static, Carousel" - the
+         format tags read from ad NAMES (UGC, Still) were being offered as
+         filters beside them and duplicated the same split, since UGC is video
+         and Still is static.
+         A carousel is a creative with child attachments, or an Advantage+ one
+         Meta has flagged as such. Checked BEFORE video, because a carousel of
+         videos is a carousel first - that is how it behaves in the feed. */
+      const kids = c?.object_story_spec?.link_data?.child_attachments;
+      const isCarousel = (Array.isArray(kids) && kids.length > 1)
+        || c?.object_type === 'CAROUSEL'
+        || !!c?.asset_feed_spec?.additional_data?.multi_share_end_card;
+      out[id].media_type = isCarousel ? 'carousel' : isVideo ? 'video' : 'image';
+      /* `video` is what puts a PLAY BADGE on the card, so it must mean "this
+         ad can actually be played", not "there is video somewhere in it". A
+         carousel of videos has no single video to play - `adVideoSource` finds
+         no video_id and the click died on "no playable video". Set AFTER the
+         carousel test for that reason; setting it beside `isVideo` above is
+         what put an unusable badge on every carousel. */
+      out[id].video = out[id].media_type === 'video';
+      // A video creative's own thumbnail_url is the PAGE AVATAR (see the note
+      // below), so the cover frame has to come from the video object itself.
+      // `picture` is a real frame and is readable with the user token now that
+      // it carries pages_read_engagement; `source` still needs a page-scoped
+      // token, which is playback's problem, not the cover's.
+      const vidId = c?.video_id || c?.object_story_spec?.video_data?.video_id
+        || c?.asset_feed_spec?.videos?.[0]?.video_id || null;
+      out[id].video_id = vidId;
+      out[id].asset_key = assetKeyOf(c);
+      out[id].page_id = c?.object_story_spec?.page_id || null;
+      let coverUrls = [];
+      if (isVideo && vidId) {
+        try {
+          const v = await meta(env, vidId, { fields: 'picture,length,thumbnails{uri,width,height,is_preferred}' });
+          out[id].duration = v?.length ?? null;
+          /* `picture` is a small fixed-size still - it was the low-quality cover.
+             `thumbnails` carries several frames at real resolution.
+             ONE candidate used to come out of here: the biggest. If that one
+             frame came back over the byte ceiling the ad ended up with no cover
+             at all, even though Meta had offered four smaller copies of the very
+             same frame. So ALL of them are kept, ordered by what we actually
+             want: the smallest that still covers a 2x card first, then the
+             larger ones, then the small ones, then `picture` as the floor. */
+          const edge = t => Math.max(t.width || 0, t.height || 0);
+          const pref = (a, b) => (b.is_preferred === true) - (a.is_preferred === true);
+          const thumbs = (v?.thumbnails?.data || []).filter(t => t.uri);
+          const enough = thumbs.filter(t => edge(t) >= LONG_EDGE).sort((a, b) => edge(a) - edge(b) || pref(a, b));
+          const small = thumbs.filter(t => edge(t) < LONG_EDGE).sort((a, b) => edge(b) - edge(a) || pref(a, b));
+          coverUrls = [...enough, ...small].map(t => t.uri);
+          if (v?.picture) coverUrls.push(v.picture);
+        } catch { /* a creative on a page we do not own stays coverless */ }
+      }
+      /* RESOLVED 2026-08-30 by granting the system user page access. Kept because
+       * it explains the shape of the code above and what still cannot work.
+       * WHY VIDEO ADS SHOWED A POOR COVER IMAGE (measured 2026-08-30, Lucky Golf).
+       * NOT because they are page posts - the STATICS are page posts too, from
+       * the SAME page (2043316342580398), and they return a perfectly good
+       * image_url. The difference is that a VIDEO object requires page-level
+       * permission while an image URL is served straight off the CDN.
+       * Our token is the "Mobius Tools" user carrying ads_read +
+       * business_management + public_profile; `me/accounts` is empty and BOTH
+       * pages seen here read back as "does not exist, cannot be loaded due to
+       * missing permission". So the video creative comes back as object_type
+       * PRIVACY_CHECK_FAIL with no image_url, `/{video_id}` is unreadable, and
+       * Meta substitutes the PAGE AVATAR as thumbnail_url - which is why three
+       * of Lucky's four video ads shared one identical clover logo.
+       * Two different pages appear across these ads (2043316342580398 and
+       * 100526684753365), so some creatives may be partner/creator-sourced;
+       * a page we are never granted stays unreadable.
+       * Proof the mechanism is permission and not the field: the ad account's
+       * OWN 669 videos DO return a real `source` mp4.
+       * THE FIX, applied: the six brand pages were assigned to the Mobius Tools
+       * system user and its token regenerated with pages_read_engagement +
+       * pages_show_list. Verified after: object_type is VIDEO instead of
+       * PRIVACY_CHECK_FAIL, `picture` returns a real cover frame, and all six
+       * pages resolve by name. Ads insights still read exactly as before.
+       * STILL IMPOSSIBLE, by design not by bug: page 100526684753365 carries one
+       * of Lucky's video ads and is NOT one of our six - a creator/partner page.
+       * Anything on a page we are not granted stays coverless and unplayable, so
+       * this whole block must keep degrading quietly rather than throwing.
+       * PLAYBACK: `source` is still withheld from the USER token; it needs a
+       * PAGE-scoped token from me/accounts. Verified working. */
+      // `image_url` is the ORIGINAL static creative - real resolution, real aspect
+      // ratio, no square crop - so it is tried first and `thumbnail_url` is the
+      // fallback. Video ads have no image_url at all (see the note below).
+      const sources = [...coverUrls, c?.image_url, c?.thumbnail_url].filter(Boolean);
+      let picked = null;
+      const why = [];
+      for (const src of sources) {
+        try {
+          const img = await xfetch(src);
+          if (!img.ok) { why.push(`HTTP ${img.status}`); continue; }
+          const buf = await img.arrayBuffer();
+          /* R2 (2026-10-09): the cover is shrunk and stored once, the card gets a cacheable URL.
+             Any size is fine here because the Images binding shrinks it. */
+          if (env.MEDIA && buf.byteLength < 12_000_000) {
+            const u = await putCover(env, id, buf, img.headers.get('content-type')).catch(() => null);
+            if (u) { picked = { url: u }; break; }
+          }
+          if (buf.byteLength > maxBytes || buf.byteLength * 1.34 > budget) { why.push(`${Math.round(buf.byteLength / 1000)}KB`); continue; }   // too big: fall through to a smaller source
+          // Chunked: spreading a 250k array into String.fromCharCode blows the stack.
+          const bytes = new Uint8Array(buf);
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          picked = { b64: btoa(bin), type: img.headers.get('content-type') || 'image/jpeg' };
+          break;
+        } catch (e) { why.push(String(e.message || e).slice(0, 60)); }
+      }
+      /* LIVE ONLY: a static whose only image is a big original (a 1.1MB PNG on VetriPaws, 2026-10-09)
+         used to get no cover at all. The live screen can show Meta's own link; it is signed and
+         expires, so a row holding a link is refetched after a day. Reports never take this path. */
+      if (!picked && allowUrl) { const big = sources.find(u => /^https:/.test(u)); if (big) { out[id].thumb = big; out[id].thumb_link = true; continue; } }
+      if (!picked) { out[id].thumb = null; out[id].thumb_why = sources.length ? why.join(', ') : `no image on the creative (${c?.object_type || 'no type'})`; continue; }
+      if (picked.url) { out[id].thumb = picked.url; continue; }
+      budget -= picked.b64.length;
+      // Assign the field, never the object - the ad's copy and metadata are
+      // already on it, and replacing it here silently dropped all of them.
+      out[id].thumb = `data:${picked.type};base64,${picked.b64}`;
+    } catch { /* no creative for this ad; the card still renders its numbers */ }
+  }
+  /* Persist what we learned. Costs one batch, saves a Meta call per ad on every
+     future filter, and means an ad only has to be LOOKED at once for its type
+     to be known. Best-effort - a failure here must never break the cards. */
+  try {
+    await ensureCreative(env).catch(() => {});
+    const st = Object.entries(out).filter(([, v]) => v.media_type)
+      .map(([id, v]) => env.DB.prepare(`UPDATE ads SET media_type = ?2, asset_key = COALESCE(?3, asset_key) WHERE ad_id = ?1`).bind(id, v.media_type, v.asset_key || null));
+    if (st.length) await env.DB.batch(st);
+  } catch { /* the cards do not depend on this */ }
+  /* PRUNE (2026-10-09): rows past 30 days were never deleted, only overwritten when the ad was
+     looked at again, so ads nobody opens any more sat in D1 for good (393 rows, 55MB of a 265MB
+     database). A live call clears them; one query. */
+  if (allowUrl) await env.DB.prepare(`DELETE FROM ad_creative WHERE fetched_at < datetime('now','-30 days')`).run().catch(() => {});
+  // Cache what we just fetched, one row at a time so a single oversized
+  // creative cannot fail the whole batch and lose the others.
+  for (const id of missing) {
+    const v = out[id]; if (!v) continue;
+    try {
+      const j = JSON.stringify(v);
+      /* Was 90,000, which no image that passed the 190KB fetch ceiling could
+         ever satisfy - base64 is 1.34x, so a 190KB image is a 254KB string and
+         every one of them was silently dropped from the cache and refetched
+         from Meta forever. 400,000 covers the largest image either caller will
+         now accept. D1 is still not an image host: anything above this is
+         served once and not kept. */
+      if (j.length > 400_000) continue;
+      await env.DB.prepare(
+        `INSERT INTO ad_creative (ad_id, json, fetched_at) VALUES (?1,?2,datetime('now'))
+         ON CONFLICT(ad_id) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at`).bind(id, j).run();
+    } catch { /* best effort */ }
+  }
+  return out;
+}
+
+/** Everything a weekly/monthly report shows, frozen. `start`..`end` inclusive. */
+async function reportData(env, acct, period, start, end) {
+  const prevStart = period === 'weekly' ? addDays(start, -7) : `${prevMonth(monthOf(start))}-01`;
+  const prevEnd = addDays(start, -1);
+  const ymEnd = monthOf(end);
+  const monthStart = `${ymEnd}-01`;
+  const histFrom = addDays(prevStart < monthStart ? prevStart : monthStart, -29);   // covers the trailing-28d margin window AND month-to-date
+  const { results: twRows } = await env.DB.prepare(
+    `SELECT date, metric, value FROM tw_daily WHERE act_id = ?1 AND date >= ?2 AND date <= ?3`,
+  ).bind(acct.act_id, histFrom, end).all();
+  const piv = {};
+  for (const r of twRows) (piv[r.metric] ??= {})[r.date] = r.value;
+  const { results: metaRows } = await env.DB.prepare(
+    `SELECT date, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(clicks) AS clicks, SUM(link_clicks) AS link_clicks, SUM(purchases) AS purchases, SUM(revenue) AS revenue FROM daily_insights
+     WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date <= ?3 GROUP BY date`,
+  ).bind(acct.act_id, histFrom, end).all();
+  const metaBy = Object.fromEntries(metaRows.map(r => [r.date, r]));
+
+  const gjson = safeJson(acct.goals_json, {});
+  const cmPct = goalsFor(acct, ymEnd)?.cm_pct ?? null;
+
+  // The same COGS trust gate as the Daily Brief: a client whose cost data is
+  // broken must never see a Contribution Margin in a report with their name on it.
+  const dayMargins = []; let mNum = 0, mDen = 0;
+  for (let i = 1; i <= 28; i++) {
+    const d = addDays(start, -i);
+    const r = econDay(piv, metaBy, d, null);
+    if (r && r.gp != null && r.sales > 0) { dayMargins.push(r.gp / r.sales); mNum += r.gp; mDen += r.sales; }
+  }
+  const margin28 = mDen > 0 ? mNum / mDen : null;
+  const cogsQuality = cmPct != null
+    ? { verdict: 'override', reason: `using the ${Math.round(cmPct * 100)}% margin override` }
+    : judgeCogs(dayMargins, margin28);
+  const cmOk = cmPct != null || (cogsQuality.verdict !== 'broken' && cogsQuality.verdict !== 'none');
+
+  const curDates = [], prevDates = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) curDates.push(d);
+  for (let d = prevStart; d <= prevEnd; d = addDays(d, 1)) prevDates.push(d);
+  const days = curDates.map(d => econDay(piv, metaBy, d, cmPct)).filter(Boolean);
+  const prevDays = prevDates.map(d => econDay(piv, metaBy, d, cmPct)).filter(Boolean);
+  const cur = periodTotals(days);
+  const prev = periodTotals(prevDays);
+  if (!cmOk) {
+    for (const t of [cur, prev]) { t.cm = null; t.gp = null; t.margin = null; }
+    for (const r of days) { r.cm = null; r.gp = null; r.margin = null; }
+  }
+
+  // The plan for these exact days. Each day inherits ITS OWN month's goals,
+  // spread evenly - the agreed convention - so a week straddling a month
+  // boundary is measured against both months' plans, pro-rated.
+  const fcMargin = cmPct ?? margin28;
+  let fSales = null, fSpend = null;
+  const monthsSeen = {};
+  for (const d of curDates) {
+    const ym = monthOf(d);
+    const g = goalsFor(acct, ym);
+    monthsSeen[ym] ??= { planned: !!gjson[ym], has_goals: !!g };
+    if (!g) continue;
+    const dim = daysInMonth(d);
+    if (g.sales != null) fSales = (fSales ?? 0) + g.sales / dim;
+    if (g.spend != null) fSpend = (fSpend ?? 0) + g.spend / dim;
+  }
+  const forecast = {
+    sales: fSales, spend: fSpend,
+    mer: fSales != null && fSpend ? fSales / fSpend : null,
+    amer: goalsFor(acct, ymEnd)?.amer ?? null,
+    cm: cmOk && fSales != null && fSpend != null && fcMargin != null ? fSales * fcMargin - fSpend : null,
+    months: monthsSeen,
+  };
+
+  // Weekly reports carry a forward look: where the month stands after this week.
+  let pacing = null;
+  if (period === 'weekly') {
+    const mtdRows = [];
+    for (let d = monthStart; d <= end; d = addDays(d, 1)) { const r = econDay(piv, metaBy, d, cmPct); if (r) mtdRows.push(r); }
+    const mtd = periodTotals(mtdRows);
+    const gEnd = goalsFor(acct, ymEnd);
+    if (gEnd && (gEnd.sales != null || gEnd.spend != null)) {
+      const dim = daysInMonth(end);
+      const elapsed = Math.min(+end.slice(8, 10), dim);
+      const share = elapsed / dim;
+      const planToDate = gEnd.sales != null ? gEnd.sales * share : null;
+      pacing = {
+        month: ymEnd, days_elapsed: elapsed, days_in_month: dim,
+        goal_sales: gEnd.sales ?? null, goal_spend: gEnd.spend ?? null,
+        plan_to_date: planToDate, spend_plan_to_date: gEnd.spend != null ? gEnd.spend * share : null,
+        mtd_sales: mtd.sales, mtd_spend: mtd.spend,
+        // Plan-share projection when a plan exists (how the Daily Brief projects),
+        // plain run-rate otherwise.
+        projected: mtd.sales != null && planToDate > 0 ? mtd.sales / planToDate * gEnd.sales
+          : mtd.sales != null && elapsed > 0 ? mtd.sales / elapsed * dim : null,
+        planned: !!gjson[ymEnd],
+      };
+      // Saying a month is behind is half the job. The other half is the ask: what
+      // it takes from here. Returning revenue arrives on its own, so the shortfall
+      // has to be bought with new customers, which costs spend. Priced off THIS
+      // MONTH's own returning rate and aMER - the report states the window, and a
+      // month-to-date basis is the one both sides of the call can see.
+      const remain = dim - elapsed;
+      if (gEnd.sales != null && remain > 0 && mtd.sales != null) {
+        const retPerDay = mtd.ret_rev != null && elapsed > 0 ? mtd.ret_rev / elapsed : null;
+        const mAmer = mtd.new_rev != null && mtd.spend > 0 ? mtd.new_rev / mtd.spend : null;
+        const spendPerDay = mtd.spend != null && elapsed > 0 ? mtd.spend / elapsed : null;
+        const shortfall = gEnd.sales - mtd.sales;
+        const perDay = shortfall / remain;
+        const newPerDay = perDay - (retPerDay || 0);
+        const spendNeeded = mAmer && newPerDay > 0 ? newPerDay / mAmer : null;
+        pacing.to_hit = {
+          days_remaining: remain,
+          revenue_per_day: perDay,
+          new_per_day: newPerDay,
+          spend_per_day: spendNeeded,
+          spend_now_per_day: spendPerDay,
+          spend_ramp: spendNeeded != null && spendPerDay > 0 ? spendNeeded / spendPerDay : null,
+          amer: mAmer,
+          returning_per_day: retPerDay,
+          already_there: shortfall <= 0,
+          covered_by_returning: newPerDay <= 0,
+        };
+      }
+    }
+  }
+
+  // Monthly reports get the month cut into weeks instead - how it actually ran.
+  let weeks = null;
+  if (period === 'monthly') {
+    weeks = [];
+    for (let ws = start; ws <= end; ws = addDays(ws, 7)) {
+      const we = addDays(ws, 6) <= end ? addDays(ws, 6) : end;
+      const rows = days.filter(r => r.date >= ws && r.date <= we);
+      if (rows.length) {
+        const t = periodTotals(rows);
+        weeks.push({ from: ws, to: we, sales: t.sales, spend: t.spend, mer: t.mer });
+      }
+    }
+  }
+
+  const cfg = safeJson(acct.report_config_json, {});
+  // One Triple Whale call per window. TW computes the period ratios itself, so
+  // CPM, CTR and its peer benchmarks arrive correct rather than being
+  // reconstructed from daily rows that do not carry them.
+  let twCur = null, twPrev = null;
+  if (acct.tw_shop && env.TW_API_KEY) {
+    // twWindow, never twSummary - see the comment on twWindow. The raw call is
+    // shifted a day, which silently made every report cover Sun-Sat.
+    twCur = (await twWindow(env, acct.tw_shop, start, end).catch(() => null))?.map ?? null;
+    twPrev = (await twWindow(env, acct.tw_shop, prevStart, prevEnd).catch(() => null))?.map ?? null;
+  }
+  const channels = channelSections(piv, metaBy, { cur: curDates, prev: prevDates }, Array.isArray(cfg.hide) ? cfg.hide : [], twCur, twPrev);
+  // The nightly attribution sync stops a day short of the window's last day
+  // (it runs the evening before in the brands' zones), so top it up first.
+  if (acct.tw_shop && env.TW_API_KEY && end >= addDays(localDate(acct.tz), -7)) {
+    await syncTwAttribution(env, acct, 0, { from: addDays(end, -2), to: end }).catch(() => {});
+  }
+  await twAttributeChannels(env, acct, channels, [start, end], [prevStart, prevEnd]);
+
+  // Where the Meta money went: top ads by spend behind a materiality floor, so
+  // a $40 fluke can never headline. Deliberately framed as "where the budget
+  // went and what it did", not "the best ad" - a single crown is unjudgeable.
+  let ads = null;
+  // Ads that carried real money this period. Used twice: to build the creative
+  // table, and to decide which on/off changes are worth naming in the change
+  // log. ONE definition of "big", so the two sections can never disagree.
+  const bigAdIds = new Set();
+  const adSpendById = {};
+  const metaSpend = cur.meta_spend ?? 0;
+  if (metaSpend > 0) {
+    // No LIMIT: the long tail has to be counted, not dropped. A week can carry
+    // 150+ ads, of which a handful hold most of the spend - showing only those
+    // and saying nothing about the rest implies the table is the whole account.
+    const { results: adRows } = await env.DB.prepare(
+      `SELECT d.ad_id, SUM(d.spend) AS spend, SUM(d.purchases) AS purchases, SUM(d.revenue) AS revenue,
+              SUM(d.impressions) AS impressions, SUM(d.link_clicks) AS clicks,
+              SUM(d.video_3s) AS v3, SUM(d.video_thruplay) AS vtp, SUM(d.video_p100) AS vp100,
+              SUM(d.reach) AS reach, SUM(d.clicks_all) AS clicks_all, SUM(d.outbound_clicks) AS outbound,
+              SUM(d.video_p25) AS vp25, SUM(d.video_p50) AS vp50, SUM(d.video_p75) AS vp75, SUM(d.video_plays) AS plays,
+              -- avg watch time is an average, so it is weighted by impressions
+              -- rather than summed; summing would grow with the window length.
+              CASE WHEN SUM(d.impressions) > 0
+                   THEN SUM(d.video_avg_watch * d.impressions) / SUM(d.impressions) END AS avg_watch,
+              COALESCE(a.name, d.ad_id) AS name, a.media_type,
+              MAX(CASE WHEN mc.objective IN ('OUTCOME_LEADS', 'LEAD_GENERATION') THEN 1 ELSE 0 END) AS lead
+       FROM ad_daily d LEFT JOIN ads a ON a.act_id = d.act_id AND a.ad_id = d.ad_id LEFT JOIN meta_campaigns mc ON mc.campaign_id = a.campaign_id
+       WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.date <= ?3
+       GROUP BY d.ad_id HAVING SUM(d.spend) > 0 ORDER BY spend DESC LIMIT 500`,
+    ).bind(acct.act_id, start, end).all();
+    // The SAME ads in the prior period, so each card can say whether it is being
+    // scaled or wound down. A card without this reads as a snapshot with no
+    // direction, which is the thing a weekly report exists to show.
+    const { results: prevAdRows } = await env.DB.prepare(
+      `SELECT d.ad_id, SUM(d.spend) AS spend, SUM(d.purchases) AS purchases, SUM(d.revenue) AS revenue
+       FROM ad_daily d WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.date <= ?3
+       GROUP BY d.ad_id HAVING SUM(d.spend) > 0`,
+    ).bind(acct.act_id, prevStart, prevEnd).all();
+    const prevById = Object.fromEntries(prevAdRows.map(r => [r.ad_id, r]));
+    const floor = Math.max(50, metaSpend * 0.03);
+    const TOP_N = 10;
+    /* Lead and giveaway ads buy leads, not sales (2026-11-03): they are never ranked on ROAS or cost per purchase here. */
+    const qualified = adRows.filter(r => r.spend >= floor && !r.lead);
+    for (const r of adRows) adSpendById[r.ad_id] = r.spend;
+    for (const r of qualified) bigAdIds.add(r.ad_id);
+    const shown = qualified.slice(0, TOP_N);
+    const previews = await adPreviewLinks(env, shown.map(r => r.ad_id)).catch(() => ({}));
+    const thumbs = await adThumbnails(env, shown.map(r => r.ad_id)).catch(() => ({}));
+    const row = r => ({
+      name: r.name, spend: r.spend, purchases: r.purchases || null, revenue: r.revenue || null,
+      cpa: r.purchases ? r.spend / r.purchases : null,
+      roas: r.spend && r.revenue ? r.revenue / r.spend : null,
+      share: metaSpend ? r.spend / metaSpend : null,
+      // Motion's scroll-stopping pair. Hook = 3-second views ÷ impressions (did
+      // it stop the scroll); hold = ThruPlay ÷ 3-second views (did it earn the
+      // watch). Gated on v3 > 0 so rows synced before the video columns existed
+      // read as "no data", never as a 0% hook rate.
+      ctr: r.impressions && r.clicks ? r.clicks / r.impressions : null,
+      hook: r.impressions && r.v3 ? r.v3 / r.impressions : null,
+      hold: r.v3 ? (r.vtp || 0) / r.v3 : null,
+      completion: r.v3 ? (r.vp100 || 0) / r.v3 : null,   // watched to the end, of those it stopped
+      // Cost and efficiency, the rest of what a creative review asks for.
+      cpm: r.impressions ? r.spend / r.impressions * 1000 : null,
+      cpc: r.clicks ? r.spend / r.clicks : null,
+      // How many of the people it sent to the site actually bought. The clearest
+      // separator of "the creative works" from "the offer works".
+      cvr: r.clicks ? (r.purchases || 0) / r.clicks : null,
+      aov: r.purchases ? (r.revenue || 0) / r.purchases : null,
+      frequency: r.reach ? r.impressions / r.reach : null,
+      reach: r.reach || null,
+      // Cost to stop one thumb - spend over 3-second views. Directly comparable
+      // between video ads in a way CPM is not.
+      cost_per_thumbstop: r.v3 ? r.spend / r.v3 : null,
+      avg_watch: r.avg_watch ?? null,
+      // Retention is a share of video PLAYS, not of 3-second views. Dividing by
+      // 3-second views reported 150% at the 25% mark, because on a 7-second
+      // video the 25% point (1.75s) is reached before the 3-second one is.
+      // Older reports have no `plays`, so they fall back and stay capped.
+      retention: (r.plays || r.v3) ? (den => ({
+        p25: Math.min(1, (r.vp25 || 0) / den), p50: Math.min(1, (r.vp50 || 0) / den),
+        p75: Math.min(1, (r.vp75 || 0) / den), p100: Math.min(1, (r.vp100 || 0) / den),
+        basis: r.plays ? 'plays' : 'three_second_views',
+      }))(r.plays || r.v3) : null,
+      plays: r.plays || null,
+      preview: previews[r.ad_id] || null,
+      thumb: thumbs[r.ad_id]?.thumb || null,
+      video: !!thumbs[r.ad_id]?.video,
+      ad_id: r.ad_id,
+      // Kept so playback can skip a Meta round trip. The mp4 URL itself is
+      // deliberately NOT stored - it is signed and expires within hours.
+      video_id: thumbs[r.ad_id]?.video_id || null,
+      page_id: thumbs[r.ad_id]?.page_id || null,
+      duration: thumbs[r.ad_id]?.duration ?? null,
+      // The ad's own words, plus where it lives - everything the detail view needs
+      // is frozen with the numbers, so an archived report stays complete.
+      headline: thumbs[r.ad_id]?.headline || null,
+      body: thumbs[r.ad_id]?.body || null,
+      description: thumbs[r.ad_id]?.description || null,
+      cta: thumbs[r.ad_id]?.cta || null,
+      status: thumbs[r.ad_id]?.status || null,
+      created: thumbs[r.ad_id]?.created || null,
+      campaign: thumbs[r.ad_id]?.campaign || null,
+      adset: thumbs[r.ad_id]?.adset || null,
+      impressions: r.impressions || null,
+      clicks: r.clicks || null,
+      prev_spend: prevById[r.ad_id]?.spend ?? null,
+      prev_roas: prevById[r.ad_id]?.spend && prevById[r.ad_id]?.revenue
+        ? prevById[r.ad_id].revenue / prevById[r.ad_id].spend : null,
+      prev_cpa: prevById[r.ad_id]?.purchases
+        ? prevById[r.ad_id].spend / prevById[r.ad_id].purchases : null,
+    });
+    /* FORMAT SPLIT COMES FROM META'S OWN CREATIVE TYPE, NOT FROM AD NAMES.
+       (Cole, 2026-09-07: "don't tag stuff based off what the naming is... it
+       should be split between stills and videos... there's carousels too. Only
+       actual Meta stuff should be put on there. There should be nothing that's
+       untagged.")
+
+       It used to read the segment after the last `|` in the ad name, which was
+       wrong in three separate ways and all three reached clients:
+ - it invented categories. "UGC" is not a format, it is a style - a UGC
+           ad IS a video - so the table compared UGC against Still as though
+           they were alternatives at the same level.
+ - it leaked whatever else lived in that slot. Partner and editor names
+           landed in the same position, which is why "UGC | SA" showed up.
+ - it could never reach 100%. Ads with no pipe, or a shoot code instead
+           of a word, fell into "Untagged", which on Lucky's flagship week was a
+           third of ad spend - a row a client cannot act on.
+
+       `ads.media_type` is resolved from the creative itself (carousel checked
+       before video, since a carousel of videos behaves as a carousel), so the
+       three rows are the three things that actually exist. It is only populated
+       for ads whose creative we have fetched, so the fallback reads the DELIVERY
+       data: an ad with video plays is a video, anything else is a still. That
+       covers every ad that spent, which is what removes Untagged entirely.
+       The one honest limitation, stated in the UI: a carousel we have not
+       fetched the creative for is counted by that fallback as video or still. */
+    const FORMAT_LABEL = { video: 'Video', image: 'Static image', carousel: 'Carousel' };
+    const formatOf = r => {
+      if (r.media_type && FORMAT_LABEL[r.media_type]) return r.media_type;
+      return (r.plays > 0 || r.v3 > 0 || r.vp25 > 0) ? 'video' : 'image';
+    };
+    const totalAdSpend = adRows.reduce((a, r) => a + (r.spend || 0), 0);
+    const byFmt = {};
+    let typedSpend = 0;                       // spend whose type came from Meta, not inferred
+    for (const r of adRows) {
+      const id = formatOf(r);
+      const f = byFmt[id] ??= { id, label: FORMAT_LABEL[id], count: 0, spend: 0, purchases: 0, revenue: 0 };
+      f.count++; f.spend += r.spend || 0; f.purchases += r.purchases || 0; f.revenue += r.revenue || 0;
+      if (r.media_type && FORMAT_LABEL[r.media_type]) typedSpend += r.spend || 0;
+    }
+    const fin = f => ({
+      ...f,
+      share: totalAdSpend ? f.spend / totalAdSpend : null,
+      cpa: f.purchases ? f.spend / f.purchases : null,
+      roas: f.spend && f.revenue ? f.revenue / f.spend : null,
+    });
+    const named = Object.values(byFmt).sort((a, b) => b.spend - a.spend).map(fin);
+    const formats = named;
+    // What share of the split Meta itself confirmed, versus inferred from
+    // delivery. Disclosed rather than hidden, same rule as before.
+    const taggedShare = totalAdSpend ? typedSpend / totalAdSpend : 0;
+    // Everything not listed, as one line, so the table accounts for 100% of
+    // ad-level spend and the tail can be compared with the headline ads.
+    const shownSet = new Set(shown.map(r => r.ad_id));
+    const rest = adRows.filter(r => !shownSet.has(r.ad_id));
+    const restSpend = rest.reduce((a, r) => a + (r.spend || 0), 0);
+    const restPur = rest.reduce((a, r) => a + (r.purchases || 0), 0);
+    const restRev = rest.reduce((a, r) => a + (r.revenue || 0), 0);
+    const standout = qualified.filter(r => r.purchases >= 3)
+      .sort((a, b) => (a.spend / a.purchases) - (b.spend / b.purchases))[0] || null;
+    if (shown.length) ads = {
+      floor, top: shown.map(row),
+      /* The old 55%-tagged gate is gone with the naming convention it was
+         guarding: the split is now Meta's own creative type and always accounts
+         for 100% of ad-level spend, so there is no coverage left to fail on.
+         The only bar remaining is that a split needs something to split - one
+         row is a fact about the account, not a comparison. `formats_confirmed`
+         is how much of that spend Meta itself typed, versus inferred from
+         delivery data, and the page discloses it. */
+      formats: named.length >= 2 ? formats : null,
+      formats_confirmed: named.length >= 2 ? taggedShare : null,
+      // This account's OWN typical hook and hold, so an ad can be judged against
+      // what this brand actually achieves rather than a generic e-commerce
+      // benchmark. Motion's 30%/60% vary enormously by vertical, placement and
+      // video length, and the decision a buyer makes is "is this better than our
+      // normal", not "is this better than the internet".
+      // Median, not mean - one runaway ad should not move the bar. Needs at
+      // least 4 video ads or it is noise, and the UI falls back to the published
+      // benchmark and says so.
+      benchmarks: (() => {
+        const hooks = [], holds = [];
+        for (const r of qualified) {
+          if (r.impressions && r.v3) hooks.push(r.v3 / r.impressions);
+          if (r.v3) holds.push((r.vtp || 0) / r.v3);
+        }
+        const med = a => a.length ? a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)] : null;
+        return hooks.length >= 4 ? { hook: med(hooks), hold: med(holds), n: hooks.length } : null;
+      })(),
+      qualified_total: qualified.length,
+      others: rest.length ? {
+        count: rest.length, spend: restSpend, purchases: restPur || null, revenue: restRev || null,
+        cpa: restPur ? restSpend / restPur : null,
+        roas: restSpend && restRev ? restRev / restSpend : null,
+        share: metaSpend ? restSpend / metaSpend : null,
+        biggest: rest[0]?.spend ?? null,
+      } : null,
+      total_ads: adRows.length, total_spend: adRows.reduce((a, r) => a + (r.spend || 0), 0),
+      standout: standout ? { name: standout.name, cpa: standout.spend / standout.purchases, spend: standout.spend } : null,
+    };
+  }
+
+  // What we changed during the period - feeds the narrative and the internal
+  // view. NOT sent to the client's payload (the profit worker strips it).
+  //
+  // Ranked by MATERIALITY, never by time. Taking the first N chronologically fed
+  // the narrative fourteen rows of Meta's own review-state churn ("Pending
+  // Process -> Pending Review") purely because those fire first on a launch day,
+  // while the week's actual budget moves never made the list. `other` and `name`
+  // are dropped outright: image-library edits and renames are not decisions.
+  // Routine creative/tuning work is COUNTED rather than listed - a week with 58
+  // new ads produces a report nobody reads if each one gets a line.
+  const { results: evs } = await env.DB.prepare(
+    `SELECT event_time, category, summary, reason, object_id FROM activities
+     WHERE act_id IN ${metaOf(1)} AND event_time >= ?2 AND event_time <= ?3 AND confirmed != -1
+       AND category NOT IN ('other','name')
+     ORDER BY event_time ASC LIMIT 400`,
+  ).bind(acct.act_id, start, end + 'T23:59:59').all();
+  // `billing` is deliberately NOT notable: "Account billed" is Meta charging the
+  // card, not a decision we made, and it was crowding out real moves. `review`
+  // stays - a policy rejection genuinely changes what can deliver.
+  const notableCats = new Set(['budget', 'bid_strategy', 'new_campaign', 'new_adset',
+    'campaign_paused', 'campaign_relaunched', 'review']);
+  // Switching ONE ad on or off among 150 is routine and belongs in the count.
+  // Doing it to an ad that was carrying real budget is a decision, and burying
+  // that inside "64 ads relaunched" hides the most interesting thing we did.
+  // Threshold is the SAME floor the creative table uses, so "big" means one
+  // thing in this report rather than two.
+  const AD_CATS = new Set(['ad_paused', 'ad_relaunched', 'new_creative']);
+  const isBigAdMove = e => AD_CATS.has(e.category) && e.object_id && bigAdIds.has(e.object_id);
+  const notableAll = evs.filter(e => notableCats.has(e.category) || isBigAdMove(e));
+  const rollup = {};
+  for (const e of evs) if (!notableCats.has(e.category) && !isBigAdMove(e)) rollup[e.category] = (rollup[e.category] ?? 0) + 1;
+  const changes = {
+    notable: notableAll.slice(0, 14).map(e => ({
+      t: String(e.event_time).slice(0, 10), category: e.category, summary: e.summary, reason: e.reason,
+      spend: isBigAdMove(e) ? (adSpendById[e.object_id] ?? null) : null,
+    })),
+    notable_total: notableAll.length,
+    rollup,
+    total: evs.length,
+    ad_floor: bigAdIds.size ? Math.max(50, metaSpend * 0.03) : null,
+  };
+
+  /* EVERY ATTRIBUTION MODEL IS FROZEN INTO THE REPORT, not just the one picked.
+
+     A report is a snapshot: the client already has these numbers, and a page
+     that re-queried live would change under them. But Cole wants one control at
+     the top of the page saying which attribution the whole page is on, and to
+     move it while he reads. Both are satisfiable at once because every model
+     arrives in the SAME Triple Whale response and is already stored - so
+     computing all of them here costs two queries instead of one, and the page
+     then switches instantly with nothing to fetch and nothing that can drift.
+
+     Only what is ATTRIBUTED moves. Spend, impressions, clicks, CPM, CTR, hook
+     and hold stay each platform's own under every model, because Triple Whale
+     does not measure delivery. The blended scorecard does not move at all: it
+     is real store revenue over real total spend with no model involved, which
+     is the whole reason it is the headline.
+
+     `models` is derived from what is actually in the data rather than from
+     TW_ATTR_MODELS, because two of the seven we request (firstClick, lastClick)
+     come back empty from Triple Whale on every one of these shops - offering
+     them would be offering a control that silently shows nothing. */
+  const attr = await (async () => {
+    const shownIds = (ads?.top || []).map(a => a.ad_id).filter(Boolean);
+    const byChannel = {}, byAd = {}, models = new Set();
+    try {
+      const { results: chRows } = await env.DB.prepare(
+        `SELECT model, platform, SUM(revenue) AS rev, SUM(orders) AS ord
+           FROM tw_ad_attr
+          WHERE act_id = ?1 AND date >= ?2 AND date <= ?3 AND platform IS NOT NULL
+          GROUP BY model, platform`,
+      ).bind(acct.act_id, start, end).all();
+      for (const r of chRows) {
+        if (!(r.rev > 0 || r.ord > 0)) continue;
+        models.add(r.model);
+        (byChannel[r.model] ??= {})[r.platform] = { revenue: r.rev, orders: r.ord };
+      }
+      if (shownIds.length) {
+        const ph = shownIds.map((_, i) => `?${i + 4}`).join(',');
+        const { results: adAttr } = await env.DB.prepare(
+          `SELECT model, ad_id, SUM(revenue) AS rev, SUM(orders) AS ord
+             FROM tw_ad_attr
+            WHERE act_id = ?1 AND date >= ?2 AND date <= ?3 AND ad_id IN (${ph})
+            GROUP BY model, ad_id`,
+        ).bind(acct.act_id, start, end, ...shownIds).all();
+        for (const r of adAttr) (byAd[r.model] ??= {})[r.ad_id] = { revenue: r.rev, orders: r.ord };
+      }
+    } catch { return null; }               // never let this block a report
+    if (!models.size) return null;
+    return {
+      models: [...models],
+      channels: byChannel,
+      ads: byAd,
+      /* An ad with no row under a model is a REAL ZERO, not missing data - the
+         model simply credited it nothing. The renderers must show 0, never fall
+         back to the Meta figure, or an unattributed ad quietly climbs a CPA
+         sort. Same rule the Meta tab's creative browser already follows. */
+      zero_is_real: true,
+    };
+  })();
+
+  return {
+    account: { act_id: acct.act_id, name: acct.name, currency: acct.currency },
+    period, start, end, prev_start: prevStart, prev_end: prevEnd,
+    totals: cur, previous: prev, forecast, pacing, weeks, channels, ads,
+    attr,
+    changes, changes_total: evs.length,
+    chart: days.map(r => ({ date: r.date, sales: r.sales, spend: r.spend })),
+    cm_ok: cmOk, cogs_quality: cogsQuality, margin_28d: margin28, cm_pct: cmPct,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+const REPORT_SYSTEM = `You are a senior media buyer at Mobius Digital writing the executive summary of a client's WEEKLY or MONTHLY performance report. The report page already shows every number in cards and tables - do NOT restate them as a list.
+Write exactly three sections, plain text, section titles on their own line exactly as written, with NO colon, arrow or question mark after them:
+What we saw
+• 3-5 bullets: what happened over the period, stated plainly. The trend against the prior period, the new-vs-returning read, the per-channel read, and where the month stands. Conclusion first in every bullet.
+What it means
+2-4 sentences, written the way you would explain it to the owner across a table: the one or two things from this period that matter most for their money, and why, with the context someone outside advertising needs. It explains, it does not report: if a sentence here could have been a bullet above, it is in the wrong place. Where the change log supports it, say which of our changes drove what.
+What we're doing
+• 2-4 bullets: what we will actually do next, each with a trigger or a date where possible.
+
+WRITING RULES - these matter as much as the facts, because the page is already full of numbers:
+Every figure is ALREADY on the page in cards and tables, WITH its percentage against plan and against the prior period. Name a number only when the sentence collapses without it.
+TWO NUMBERS PER BULLET, MAXIMUM. A bullet carrying seven figures is a table crammed into a sentence and the point disappears.
+"What it means" carries NO new figures at all. It is the consequence in plain words.
+NO ABBREVIATIONS OR SHORTHAND. Write "month to date", not MTD. Write "Wednesday", not 48h. Write "about 20", not ~20. Write "September 8", not 09-08. This rule is about WORDS, not symbols: always write money with its currency symbol as "$36", never "36 dollars", and percentages as "64%".
+NEVER print a raw ad or campaign name. Say "the new creative".
+NO EM DASHES, EVER. Use a comma, a colon or a full stop. This is a standing rule across everything Mobius writes.
+${PLAIN_VOICE}
+Every sentence should survive being read once, at speed, by a client who does not work in ads.
+Rules: use ONLY the numbers provided - never invent or extrapolate figures. Money in the account's own currency, whole units. MER = ALL store revenue (every channel, not ad-attributed) ÷ ALL ad spend on every platform; aMER = new-customer revenue ÷ that same spend. Both are blended on BOTH sides - never call them attributed, and never confuse them with a channel ROAS (which is Triple Whale attributed, double-counts across platforms, and should be treated as directional). Write for the client: confident, plain language, no hedging filler. Under 230 words total. No greeting, no sign-off, no markdown headers, no asterisks for bold.`;
+
+async function writeReportNarrative(env, acct, data, steer) {
+  const f2 = n => n == null ? ' - ' : String(Math.round(n * 100) / 100);
+  const label = data.period === 'weekly' ? 'week' : 'month';
+  const slim = t => t ? { sales: f2(t.sales), spend: f2(t.spend), orders: t.orders, mer: f2(t.mer), amer: f2(t.amer), aov: f2(t.aov), new_customer_cpa: f2(t.ncpa), new_share: f2(t.new_share), cm: f2(t.cm) } : null;
+  const chLines = (data.channels || []).map(c => `- ${c.label}: ${JSON.stringify(c.cur)} | prior ${label}: ${JSON.stringify(c.prev)}`);
+  const twAd = id => { const m = data.attr?.ads?.[BRIEF_ATTR_MODEL]; return m ? (m[id] || { revenue: 0, orders: 0 }) : null; };
+  const adLines = (data.ads?.top || []).slice(0, 5).map(a => { const t = twAd(a.ad_id); const cpa = t ? (t.orders > 0 ? a.spend / t.orders : null) : a.cpa, roas = t ? (a.spend ? t.revenue / a.spend : null) : a.roas; return `- ${a.name}: spend ${f2(a.spend)} (${Math.round((a.share || 0) * 100)}% of Meta), CPA ${f2(cpa)}, ROAS ${f2(roas)}${t ? ' (Triple Whale)' : ' (Meta-reported, Triple Whale not available)'}`
+    + (a.hook != null ? `, hook rate ${Math.round(a.hook * 100)}% (3s views/impressions; 30-40% is typical)` : '')
+    + (a.hold != null ? `, hold rate ${Math.round(a.hold * 100)}% (ThruPlay/3s views; 40-50% is typical)` : ''); });
+  const fmtLines = (data.ads?.formats || []).map(f => `- ${f.label}: ${f.count} ads, spend ${f2(f.spend)} (${Math.round((f.share || 0) * 100)}%), CPA ${f2(f.cpa)}, ROAS ${f2(f.roas)}`);
+  // Notable changes individually; routine churn as counts. Feeding the model 14
+  // rows of "new ad" made it write about ad names instead of about the money.
+  const ch = data.changes || {};
+  const evLines = (Array.isArray(ch) ? ch : ch.notable || [])
+    .map(e => `- ${e.t} [${e.category}] ${e.summary}${e.reason ? ` {${e.reason}}` : ''}`);
+  const rollLine = !Array.isArray(ch) && ch.rollup && Object.keys(ch.rollup).length
+    ? Object.entries(ch.rollup).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${v} ${k.replace(/_/g, ' ')}`).join(', ')
+    : null;
+  const unplanned = Object.entries(data.forecast?.months || {}).filter(([, m]) => !m.planned && m.has_goals);
+  return claude(env, {
+    system: REPORT_SYSTEM,
+    maxTokens: 6000,   // opus-5 spends thinking tokens inside max_tokens; leave real headroom
+    user: `Client: ${acct.name} (currency ${acct.currency}). ${data.period === 'weekly' ? 'Weekly' : 'Monthly'} report covering ${data.start} → ${data.end}.\n` +
+      `This ${label}: ${JSON.stringify(slim(data.totals))}\n` +
+      `Prior ${label} (${data.prev_start} → ${data.prev_end}): ${JSON.stringify(slim(data.previous))}\n` +
+      `Plan for the period: ${JSON.stringify({ sales: f2(data.forecast?.sales), spend: f2(data.forecast?.spend), mer: f2(data.forecast?.mer), cm: f2(data.forecast?.cm) })}\n` +
+      (unplanned.length ? `IMPORTANT: no plan was actually set for ${unplanned.map(([ym]) => ym).join(', ')} - the "plan" figures are carried over from an earlier month. Do not present them as an agreed target; refer to them as the prior pace.\n` : '') +
+      (data.cm_ok ? '' : `IMPORTANT: this client's cost data is unreliable (${data.cogs_quality?.reason}). Contribution margin has been removed from the report - do NOT mention margin, CM or profit anywhere.\n`) +
+      (data.pacing ? `Where the month stands after this week (${data.pacing.month}): MTD sales ${f2(data.pacing.mtd_sales)} vs ${f2(data.pacing.plan_to_date)} planned by now; projected ${f2(data.pacing.projected)} against the ${f2(data.pacing.goal_sales)} goal.\n` : '') +
+      `Channels - revenue, ROAS, purchases and CPA are Triple Whale's pixel attribution (last platform click); spend, CPM and CTR are the platform's own. A line marked low_signal recorded fewer than two orders in the whole window, so quote its spend and say the conversions have not landed rather than repeating the ratio. There is no per-platform ROAS target: the agreed goals are the blended ones above. Never judge a platform's ROAS against the MER goal (blended MER counts every channel's revenue over total spend and is always higher, so that reports a healthy account as failing). Use these to say which channel moved, not to declare a target missed:\n${chLines.join('\n') || '- (none)'}\n` +
+      `Top Meta ads by spend:\n${adLines.join('\n') || '- (none)'}\n` +
+      (fmtLines.length ? `Meta spend by creative format (from the ad naming convention - covers every ad that spent):\n${fmtLines.join('\n')}\n` : '') +
+      `Budget, bidding and structural changes we made during the period:\n${evLines.join('\n') || '- (none)'}\n` +
+      (rollLine ? `Routine activity in the same period (counts only, do not list these individually): ${rollLine}.\n` : '') +
+      (await styleBlock(env, 'report', acct.act_id)) +
+      steerBlock(steer),
+  });
+}
+
+const repMoney = (n, cur) => n == null ? ' - ' : new Intl.NumberFormat('en-US',
+  { style: 'currency', currency: cur || 'USD', maximumFractionDigits: 0 }).format(n);
+const repPctVs = (a, b) => a != null && b ? `${a >= b ? '+' : ''}${Math.round((a / b - 1) * 100)}%` : null;
+
+/** The one-line summary used in both Slack messages. */
+/* ONE METRIC PER LINE, not a run-on. This string is the whole client-facing
+   Slack message for a report (plus a link), and as a single ` · `-joined line - 
+   "Revenue $4,742 (-51% vs plan, -34% vs prior week) · Spend $2,532 · MER 1.87x
+   · CM $1,404" - it wrapped to two or three lines on a phone with the wrap
+   landing in the middle of a figure, so no number had a stable shape to scan
+   for. Cole, 2026-09-07: "is there any way this can be put into a format kind of
+   similar to a bullet point, just easy to digest."
+   Bullets also let each metric carry its own comparison instead of only revenue
+   getting one, which is the more useful change. Kept to four lines: this is the
+   notice, not the report - the report is the page behind the link. */
+function reportHeadline(data) {
+  const cur = data.account.currency, t = data.totals;
+  const tag = data.period === 'weekly' ? 'week' : 'month';
+  const f = data.forecast || {}, p = data.previous || {};
+  const money = n => repMoney(n, cur);
+  const x = n => n != null ? `${n.toFixed(2)}x` : ' - ';
+  /* "vs plan" and "vs prior week" as a parenthetical, omitted entirely when
+     there is nothing to compare against - an empty bracket reads as a bug. */
+  const vs = (a, plan, prev) => {
+    const bits = [];
+    const vp = repPctVs(a, plan), vq = repPctVs(a, prev);
+    if (vp) bits.push(`${vp} vs plan`);
+    if (vq) bits.push(`${vq} vs prior ${tag}`);
+    return bits.length ? `  (${bits.join(', ')})` : '';
+  };
+  const L = [
+    `• *Revenue* ${money(t.sales)}${vs(t.sales, f.sales, p.sales)}`,
+    // No comparison arithmetic on spend beyond the plain figures: whether spend
+    // moving is good or bad is what the MER line answers.
+    `• *Ad spend* ${money(t.spend)}${vs(t.spend, f.spend, p.spend)}`,
+    `• *MER* ${x(t.mer)}${vs(t.mer, f.mer, p.mer)}`,
+  ];
+  if (t.cm != null) L.push(`• *Contribution margin* ${money(t.cm)}${vs(t.cm, f.cm, p.cm)}`);
+  return L.join('\n');
+}
+
+/** Build (or rebuild) one report as a DRAFT. A sent report is frozen - the
+ *  client already has its numbers, so regeneration refuses. */
+async function makeReport(env, acct, period, start, { force = false, steer } = {}) {
+  if (period !== 'weekly' && period !== 'monthly') throw new Error('period must be weekly or monthly');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start || '')) throw new Error('start must be YYYY-MM-DD');
+  if (period === 'monthly' && start.slice(8) !== '01') throw new Error('a monthly report starts on the 1st');
+  const end = period === 'weekly' ? addDays(start, 6)
+    : `${monthOf(start)}-${String(daysInMonth(start)).padStart(2, '0')}`;
+  const prior = await env.DB.prepare(
+    `SELECT status FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+  ).bind(acct.act_id, period, start).first();
+  if (prior?.status === 'sent') throw new Error('this report was already sent to the client - sent reports are frozen');
+  const data = await reportData(env, acct, period, start, end);
+  const expected = Math.round((new Date(end + 'T12:00:00Z') - new Date(start + 'T12:00:00Z')) / 86400e3) + 1;
+  const missing = expected - (data.totals.days ?? 0);
+  if (data.totals.sales == null) throw new Error('no Triple Whale data for this period - refresh Triple Whale data first');
+  if (missing > 0 && !force) throw new Error(`Triple Whale data is missing for ${missing} of the ${expected} days - refresh Triple Whale data and regenerate (or generate anyway)`);
+  data.missing_days = missing;
+  let summary = null, narrative_error = null;
+  try { summary = await writeReportNarrative(env, acct, data, steer); } catch (e) { narrative_error = e.message; }
+  // 'handled' for a brand with no client channel - see draftStatus.
+  await env.DB.prepare(
+    `INSERT INTO reports (act_id, period, period_start, period_end, status, generated_at, summary, data_json, steer)
+     VALUES (?1,?2,?3,?4,?9,?5,?6,?7,?8)
+     ON CONFLICT(act_id, period, period_start) DO UPDATE SET period_end = excluded.period_end,
+       status = excluded.status, generated_at = excluded.generated_at, summary = excluded.summary,
+       data_json = excluded.data_json, steer = excluded.steer, sent_at = NULL, sent_channel = NULL`,
+  ).bind(acct.act_id, period, start, end, new Date().toISOString(), summary, JSON.stringify(data), steer || null, draftStatus(acct)).run();
+  return { period, start, end, summary, data, narrative_error, steer: steer || null };
+}
+
+/** One stable client link per brand - opens their report archive (sent reports
+ *  only, rendered by the profit dashboard). Same pattern as shareTokens. */
+async function reportToken(env, actId) {
+  const tokens = safeJson(await getSetting(env, 'reportTokens'), {});
+  let tok = Object.keys(tokens).find(k => tokens[k].act_id === actId);
+  if (!tok) {
+    tok = crypto.randomUUID().replace(/-/g, '');
+    tokens[tok] = { act_id: actId, created: new Date().toISOString() };
+    await putSetting(env, 'reportTokens', JSON.stringify(tokens));
+  }
+  return tok;
+}
+
+/** Internal review post. Deliberately NEVER falls back to slack_channel or
+ *  brief_channel - as of 2026-08-27 every brand's alerts channel IS its client
+ *  channel, so a "fallback" would put a draft in front of the client. No
+ *  internal channel and no global reportChannel setting = no post; the draft
+ *  still exists in the Reports tab. */
+async function postReportDraft(env, acct, r) {
+  /* 2026-10-13: with the morning card on, the card is the Monday thread anchor in the brand channel, so the weekly and
+     monthly DRAFT cards (Send / Edit / Rewrite) go to the agency drafts channel with the daily drafts. A post there
+     failing falls back to the brand's internal channel, as before. */
+  const agency = (await cardOn(env)) ? await getSetting(env, 'dailyBriefsChannel').catch(() => null) : null;
+  const channel = agency || acct.slack_channel || await getSetting(env, 'reportChannel');
+  if (!channel) return { skipped: 'no internal reports channel configured for this brand' };
+  /* The card carries the summary and the buttons that act on it. It used to be
+     a headline and a link, which meant reviewing a report always cost a tab. */
+  const row = {
+    act_id: acct.act_id, period: r.period, period_start: r.start, period_end: r.end,
+    status: draftStatus(acct), summary: r.summary, data_json: JSON.stringify(r.data), steer: r.steer ?? null,
+  };
+  const card = await reportCard(env, acct, row);
+  let posted = await slackPost(env, channel, card.text, card.blocks,
+    { username: 'Locus', icon: ':clipboard:' }).catch(e => { if (!agency || !acct.slack_channel) throw e; return null; });
+  if (!posted?.ts && agency && acct.slack_channel && acct.slack_channel !== agency)
+    posted = await slackPost(env, acct.slack_channel, card.text, card.blocks, { username: 'Locus', icon: ':clipboard:' });
+  if (posted?.ts) {
+    await env.DB.prepare(
+      `UPDATE reports SET slack_ts = ?4, slack_channel = ?5 WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+    ).bind(acct.act_id, r.period, r.start, posted.ts, posted.channel || channel).run().catch(() => {});
+  }
+  return { ok: true, channel };
+}
+
+/** The Send-to-client button. Posts the headline + the client's archive link to
+ *  their channel and freezes the report. Nothing else ever posts to a client. */
+async function sendReport(env, acct, period, start) {
+  const row = await env.DB.prepare(
+    `SELECT * FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+  ).bind(acct.act_id, period, start).first();
+  if (!row) throw new Error('no report generated for that period yet');
+  const data = safeJson(row.data_json, null);
+  if (!data) throw new Error('this report has no data - regenerate it first');
+  // ONE client destination per brand, shared by the brief and both reports.
+  // Deliberately no fallback to the internal channel: "Send to client" quietly
+  // posting to the team is the failure this whole flow exists to prevent, so an
+  // unset client channel is an error you can see, not a silent redirect.
+  const channel = acct.brief_channel;
+  if (!channel) throw new Error('no client channel set for this brand - pick one in Settings');
+  /* The new shape (2026-10-19): the four numbers with one comparison each, one sentence, This week (the Monday call +
+     the calendar), From you, the link. Client-facing, so it posts as the person, not the app. */
+  const text = await clientReportText(env, acct, row, data);
+  const url = `${DASHBOARD_URL}?reports=${await reportToken(env, acct.act_id)}`;
+  await slackPost(env, channel, text, null, { asUser: true });
+  await env.DB.prepare(
+    `UPDATE reports SET status = 'sent', sent_at = ?4, sent_channel = ?5
+     WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+  ).bind(acct.act_id, period, start, new Date().toISOString(), channel).run();
+  await slackSyncReport(env, acct, period, start).catch(() => {});
+  return { ok: true, channel, url };
+}
+
+/** Cron pass, inside the same hourly Central-time gate as the Daily Brief.
+ *  Monday drafts last Mon–Sun for every brand; the 1st drafts last month.
+ *  DRAFTS ONLY - nothing reaches a client without the Send button. A brand
+ *  that failed (no row written) is retried on every later tick that day. */
+async function reportsPass(env) {
+  const today = localDate(BRIEF_TZ);
+  const jobs = [];
+  if (new Date(today + 'T12:00:00Z').getUTCDay() === 1) jobs.push({ period: 'weekly', start: addDays(today, -7) });
+  if (today.slice(8) === '01') jobs.push({ period: 'monthly', start: `${prevMonth(monthOf(today))}-01` });
+  if (!jobs.length) return { skipped: 'not a report day' };
+  const accounts = await listAccounts(env, true);
+  const results = [];
+  let did = false;
+  for (const a of accounts) {
+    const cfg = safeJson(a.report_config_json, {});
+    for (const j of jobs) {
+      if (cfg[j.period] === false) continue;
+      const prior = await env.DB.prepare(
+        `SELECT status FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+      ).bind(a.act_id, j.period, j.start).first().catch(() => null);
+      if (prior) { results.push({ name: a.name, period: j.period, already: prior.status }); continue; }
+      /* Same rule as the brief: do not start what this tick cannot finish.
+         A report half-written is a `reports` row with no narrative that then
+         blocks every retry, because the check above only asks whether a row
+         exists. That is exactly what happened on 2026-08-31. */
+      if (!subCanAfford(costOf('report', COST_REPORT_BRAND))) {
+        results.push({ name: a.name, period: j.period, deferred: 'out of subrequest budget - next tick picks this up' });
+        continue;
+      }
+      did = true;
+      try {
+       await measured('report', async () => {
+        // tw_daily is cumulative and dailyBriefs has usually just synced this brand
+        // in the same invocation - only sync here if the period's last day is absent,
+        // to stay well inside the Worker subrequest budget.
+        const have = await env.DB.prepare(
+          `SELECT 1 AS x FROM tw_daily WHERE act_id = ?1 AND date = ?2 LIMIT 1`,
+        ).bind(a.act_id, addDays(today, -1) < j.start ? j.start : addDays(today, -1)).first().catch(() => null);
+        if (!have) await syncTwDaily(env, a, j.period === 'monthly' ? 100 : 70).catch(() => {});
+        const r = await makeReport(env, a, j.period, j.start);
+        if (r.narrative_error) await alertClaudeFailure(env, `${j.period} report summary for ${a.name}`, r.narrative_error);
+        // Same switch as the daily brief: review means it waits for a human,
+        // off means it goes straight to the client. One rule for all three.
+        /* `ok: true` USED TO BE HARD-CODED HERE, next to a caught error.
+           On the first Monday reports ran, all six failed to reach Slack and
+           all six were recorded as successes - which is why nobody knew for a
+           week. The outcome is now whatever actually happened. */
+        // Internal-only brands post the card and stop: makeReport already
+        // stored the report as 'handled', and sendReport would only refuse.
+        /* 2026-10-19: DRAFTS ONLY, whatever review_first says. No report reaches a client before the Monday call unless a
+           person presses Send; a brand with review_first off is sent on the call's confirm (meetings.js) or by
+           reportFallbackPass at 11am Central. */
+        const step = { posted: await postReportDraft(env, a, r).catch(e => ({ error: e.message })) };
+        const failure = (step.posted || step.sent)?.error || null;
+        results.push({
+          name: a.name, period: j.period,
+          ...(failure ? { error: failure } : { ok: true }),
+          ...step,
+          narrative_error: r.narrative_error ?? null,
+        });
+       });
+      } catch (e) {
+        results.push({ name: a.name, period: j.period, error: e.message });
+      }
+    }
+  }
+  if (did) await putSetting(env, 'lastReportRun', JSON.stringify({ at: new Date().toISOString(), results })).catch(() => {});
+  return results;
+}
+
+/** 11am Central on a report day: a brand with review_first OFF whose report is still a draft gets it sent as it
+ *  stands (no This week block when the call was not confirmed), so a late call never leaves a client with nothing.
+ *  Brands with review_first on wait for a person's Send, as before. */
+const REPORT_FALLBACK_HOUR = 11;
+async function reportFallbackPass(env) {
+  if (centralHour() < REPORT_FALLBACK_HOUR) return { skipped: `before ${REPORT_FALLBACK_HOUR}am Central` };
+  const today = localDate(BRIEF_TZ);
+  const jobs = [];
+  if (new Date(today + 'T12:00:00Z').getUTCDay() === 1) jobs.push({ period: 'weekly', start: addDays(today, -7) });
+  if (today.slice(8) === '01') jobs.push({ period: 'monthly', start: `${prevMonth(monthOf(today))}-01` });
+  if (!jobs.length) return { skipped: 'not a report day' };
+  const results = [];
+  for (const a of await listAccounts(env, true)) {
+    if (a.review_first || internalOnly(a)) continue;
+    const cfg = safeJson(a.report_config_json, {});
+    for (const j of jobs) {
+      if (cfg[j.period] === false) continue;
+      const row = await env.DB.prepare(`SELECT status FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`).bind(a.act_id, j.period, j.start).first().catch(() => null);
+      if (row?.status !== 'draft') continue;
+      if (!subCanAfford(30)) { results.push({ name: a.name, period: j.period, deferred: 'budget' }); continue; }
+      results.push({ name: a.name, period: j.period, ...(await sendReport(env, a, j.period, j.start).then(r => ({ sent: r.channel })).catch(e => ({ error: e.message }))) });
+    }
+  }
+  return results;
+}
+
+/* `acct` is a brand (brand_accounts row: Meta id in meta_act) or a Meta sync row (act_id IS the Meta id). */
+const metaIdOf = acct => ('meta_act' in (acct || {}) ? acct.meta_act : acct?.act_id) || null;
+async function hourlyPacing(env, acct) {
+  const metaId = metaIdOf(acct);
+  if (!metaId) throw new Error('No Meta ad account connected for this brand.');
+  const today = localDate(acct.tz);
+  const since = addDays(today, -7);
+  const rows = await metaAll(env, `${metaId}/insights`, {
+    level: 'account', time_increment: 1,
+    breakdowns: 'hourly_stats_aggregated_by_advertiser_time_zone',
+    time_range: { since, until: today },
+    fields: 'spend,impressions,actions,action_values',
+    limit: 500,
+  }, 10);
+  const hourOf = r => Math.min(23, Math.max(0, +String(r.hourly_stats_aggregated_by_advertiser_time_zone || '').slice(0, 2) || 0));
+  const stmts = rows.map(r => env.DB.prepare(
+    `INSERT INTO hourly_insights (act_id, date, hour, spend, impressions, purchases, revenue, synced_at)
+     VALUES (?1,?2,?3,?4,?5,?6,?7,datetime('now'))
+     ON CONFLICT(act_id, date, hour) DO UPDATE SET spend = excluded.spend, impressions = excluded.impressions,
+       purchases = excluded.purchases, revenue = excluded.revenue, synced_at = excluded.synced_at`,
+  ).bind(metaId, r.date_start, hourOf(r), +r.spend || 0, +r.impressions || 0,
+    pickAction(r.actions, PURCHASE_TYPES), pickAction(r.action_values, PURCHASE_TYPES)));
+  for (let i = 0; i < stmts.length; i += D1_CHUNK) await env.DB.batch(stmts.slice(i, i + D1_CHUNK));
+
+  const byDay = {};
+  for (const r of rows) (byDay[r.date_start] ??= Array(24).fill(0))[hourOf(r)] += +r.spend || 0;
+  const cum = arr => { let s = 0; return arr.map(v => +(s += v).toFixed(2)); };
+  const todayCum = cum(byDay[today] || Array(24).fill(0));
+  const prevDays = [];
+  for (let i = 1; i <= 7; i++) { const d = byDay[addDays(today, -i)]; if (d) prevDays.push(cum(d)); }
+  const l7cum = Array.from({ length: 24 }, (_, h) => prevDays.length ? +(prevDays.reduce((s, d) => s + d[h], 0) / prevDays.length).toFixed(2) : null);
+  const curHour = Math.floor(localHourFrac(acct.tz));
+  const lastFull = Math.max(0, curHour - 1);        // compare through the last completed hour on both sides
+  const spent = todayCum[lastFull] ?? 0;
+  const l7ByNow = l7cum[lastFull];
+  const l7Total = l7cum[23];
+  return {
+    account: { act_id: acct.act_id, name: acct.name, currency: acct.currency, tz: acct.tz },
+    today, hour: curHour,
+    today_cum: todayCum.slice(0, Math.max(1, curHour)),   // elapsed hours only
+    l7_cum: l7cum,
+    spent, l7_by_now: l7ByNow, l7_daily_avg: l7Total,
+    vs_pace: l7ByNow ? spent / l7ByNow - 1 : null,
+    projected: l7ByNow && l7Total ? +(spent / (l7ByNow / l7Total)).toFixed(2) : null,
+    pulled_at: new Date().toISOString(),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Creative rotation math (Chat 3)                                   */
+/* ------------------------------------------------------------------ */
+
+/** Per-ad rollup for the selected window: who's carrying spend, who's earning it.
+ *  Verdicts are relative to the account's own window CPA, never absolute benchmarks. */
+/* ---- Ad-level rows for the live Creative browser ----
+   The weekly report already renders exactly this - big creative, stats
+   underneath, playable - but only inside a FROZEN document that appears twice a
+   month. Cole: "if a client asks what ads are working right now", there was no
+   answer except waiting for Monday. Same data, same card, live and sortable.
+
+   Every metric here is already synced nightly into `ad_daily` (19 columns since
+   2026-08-29); nothing new is pulled from Meta except the creative asset for
+   the handful of ads actually shown.
+
+   THE MATERIALITY FLOOR IS LOAD-BEARING. Sorting by ROAS or CPA without one
+   puts a $12 ad that happened to convert once at the top of every list, which
+   is noise dressed as a finding. The reports already use max($50, 3% of ad
+   spend) for the same reason - same floor here, and the response says how much
+   spend it excluded so the omission is never silent. */
+/* Sales are what a ratio rests on, so enough of them earns an ad a place in a
+   ratio ranking whatever it spent. Three is the smallest number that is not a
+   coincidence - one lucky conversion on a $12 ad is the thing the spend floor
+   exists to keep out, and it still is. */
+/* WHAT COUNTS AS A FORMAT - a dictionary, because nothing about the SHAPE of a
+   tag separates a format from a partner's name.
+   The tag is whatever follows the last `|` in the ad's own name, and the
+   convention is not uniform. Measured across all six brands, July–August 2026,
+   that slot holds: UGC and Still (real formats, 61–97% of spend depending on
+   the brand), partner names (James and Justin, Hozzle and Hack, Jesse, Owen,
+   Brian, Luke), a product line (Lifestyle Bundle), shoot codes (0616 carrying
+   $6,206 of Lucky's spend, and bare 1/2/3), and for 111 of Lucky's 274 ads no
+   pipe at all.
+   So the tool stops inferring: a tag is a FORMAT when it is a known format
+   word, and a LABEL otherwise. A label still shows on the card - it is useful,
+   it is what the team wrote - but it can never be reported as a creative
+   format, which is what stopped "James and Justin" from turning up in a
+   client's UGC-vs-Still table.
+   Meta already tells us the true medium (video / image / carousel) and that is
+   what the card's badge shows; this is only about the naming layer on top.
+   ADD WORDS HERE when the team adopts one. */
+const FORMAT_WORDS = new Map([
+  ['ugc', 'UGC'], ['still', 'Still'], ['stills', 'Still'], ['static', 'Static'],
+  ['statics', 'Static'], ['video', 'Video'], ['vid', 'Video'], ['gif', 'GIF'],
+  ['carousel', 'Carousel'], ['image', 'Image'], ['photo', 'Photo'],
+  ['whitelist', 'Whitelist'], ['ws', 'Whitelist'],
+]);
+
+/** The tag on an ad's name, and whether it is a format or just a label.
+ *  Case is normalised so "still" and "Still" are one thing, not two. */
+function nameTag(name) {
+  const m = /\|([^|]+)$/.exec(name || '');
+  const raw = m ? m[1].trim() : '';
+  // A tag with no letters is a shoot code, not a name for anything.
+  if (!raw || raw.length > 24 || !/[a-z]/i.test(raw)) return null;
+  const known = FORMAT_WORDS.get(raw.toLowerCase());
+  return known ? { tag: known, kind: 'format' } : { tag: raw, kind: 'label' };
+}
+
+const MIN_RANK_PURCHASES = 3;
+/* How many times over the goal CPA an ad must have spent before a ratio is
+   worth ranking. The team's own rule, and now the page's default; the control
+   in the Creative toolbar can loosen or tighten it for one look. */
+const DEFAULT_CPA_MULTIPLE = 3;
+
+async function adRows(env, acct, from, to, opts = {}) {
+  /* ATTRIBUTION SOURCE. `opts.attr` is a Triple Whale model name, or 'meta' /
+     absent for Meta's own reported conversions. Only the ATTRIBUTED figures
+     move - revenue, purchases and everything derived from them (ROAS, CPA, CVR,
+     AOV). Spend, impressions, reach, clicks, hook, hold, CTR and CPM stay Meta's
+     in every case, because Triple Whale does not measure delivery and never
+     claims to. */
+  let attrModel = opts.attr && opts.attr !== 'meta' ? opts.attr : null;
+  let attrBy = null, attrMissing = false;
+  if (attrModel) {
+    const { results: ar } = await env.DB.prepare(
+      `SELECT ad_id, SUM(revenue) AS revenue, SUM(orders) AS orders
+       FROM tw_ad_attr WHERE act_id = ?1 AND model = ?2 AND date >= ?3 AND date <= ?4
+       GROUP BY ad_id`).bind(acct.act_id, attrModel, from, to).all().catch(() => ({ results: [] }));
+    /* NOTHING STORED MEANS SAY SO. NEVER SUBSTITUTE.
+       I briefly made this fall back to Meta, and Cole was right to reject it:
+       "how will I know if it fails - if it fails then something's wrong and I
+       need to come back to you". A quiet source-swap turns a broken sync into
+       plausible-looking numbers, which is the worst of both. So the flag is
+       returned and NOTHING is attributed; the page refuses to draw cards and
+       says what happened instead. Showing zeros would be equally dishonest -
+       they read as a real result. */
+    if (!(ar || []).length) attrMissing = true;
+    else attrBy = Object.fromEntries(ar.map(r => [r.ad_id, r]));
+  }
+  const { results } = await env.DB.prepare(
+    `SELECT d.ad_id, a.name, a.created_time, a.first_spend_date, a.status, a.media_type,
+            SUM(d.spend) AS spend, SUM(d.revenue) AS revenue, SUM(d.purchases) AS purchases,
+            SUM(d.impressions) AS impressions, SUM(d.reach) AS reach,
+            SUM(d.link_clicks) AS link_clicks, SUM(d.clicks_all) AS clicks_all,
+            SUM(d.outbound_clicks) AS outbound_clicks,
+            SUM(d.video_3s) AS v3, SUM(d.video_thruplay) AS vtp,
+            SUM(d.video_p25) AS v25, SUM(d.video_p50) AS v50, SUM(d.video_p75) AS v75,
+            SUM(d.video_p100) AS v100, SUM(d.video_plays) AS vplays,
+            -- avg_watch is an AVERAGE per day and must never be summed; weight
+            -- it by that day's plays to get a true average across the window.
+            SUM(d.video_avg_watch * d.video_plays) AS watch_weighted
+     FROM ad_daily d JOIN ads a ON a.act_id = d.act_id AND a.ad_id = d.ad_id
+     WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.date <= ?3
+     GROUP BY d.ad_id HAVING SUM(d.spend) > 0
+     ORDER BY spend DESC LIMIT 500`,
+  ).bind(acct.act_id, from, to).all();
+  if (!results.length) return { ads: [], types: [], matched: 0, total_spend: 0, shown_spend: 0,
+    floor: 0, acct_cpa: null, attr: 'meta', attr_requested: null, attr_missing: false };
+
+  const today = localDate(acct.tz);
+  const totalSpend = results.reduce((n, r) => n + r.spend, 0);
+  // Under a Triple Whale model the account CPA (the spend bar's fallback and
+  // acct_cpa) must be built on the same attributed orders as the cards.
+  const totalPurch = results.reduce((n, r) => n + (attrBy ? (attrBy[r.ad_id]?.orders || 0) : r.purchases), 0);
+  const acctCpa = totalPurch ? totalSpend / totalPurch : null;
+  /* THE SPEND BAR: a multiple of the brand's GOAL CPA, set on the page.
+   *
+   * It replaced max($50, 3% of window spend), which scaled with the SIZE of the
+   * account rather than its economics - $106 at Party Patch against $779 at The
+   * Golf Sock, and only SIX of Dartee's 254 ads eligible for a ROAS sort.
+   *
+   * GOAL, not actual, and the distinction is the point (Cole, 2026-09-06).
+   * Judging ads against the CPA the account currently achieves means the bar
+   * RISES as performance gets worse, so you start looking later exactly when
+   * you should be looking sooner. A goal is a fixed line. `acct.target_cpa` is
+   * that line; the actual CPA is only the fallback until somebody sets one, and
+   * `floor_basis` says which is in force so a missing goal is visible rather
+   * than silent.
+   */
+  const targetCpa = acct.target_cpa > 0 ? acct.target_cpa : null;
+  const cpaBasis = targetCpa ?? acctCpa;
+  const mult = opts.mult != null && opts.mult >= 0 ? opts.mult : DEFAULT_CPA_MULTIPLE;
+  let floor, floorBasis, floorMult = null;
+  if (opts.minSpend != null && opts.minSpend >= 0) {
+    floor = opts.minSpend; floorBasis = 'custom';
+  } else if (cpaBasis) {
+    floorMult = mult; floor = mult * cpaBasis;
+    floorBasis = targetCpa ? 'target_cpa' : 'actual_cpa';
+  } else {
+    // Nothing sold in the window, so there is no CPA of any kind to build on.
+    floor = Math.max(50, totalSpend * 0.03); floorBasis = 'share';
+  }
+  /* A TYPED FIGURE IS A HARD FLOOR. The sales route below exists so a new
+     winner can appear before it has spent an automatic, CPA-derived bar. When
+     someone types "$100" they have said what qualifies, and a $12 ad with three
+     sales sitting on top of that list reads as the control doing nothing
+     (Cole, 2026-09-16). Under a custom threshold, spend is the only test. */
+  const salesRoute = floorBasis !== 'custom';
+
+  const rows = results.map(r => {
+    const imp = r.impressions || 0;
+    /* An ad with no attributed row has genuinely earned nothing under this
+       model - a real zero, not missing data - so it reads as 0, not null.
+       Getting that wrong would quietly promote unattributed ads up a CPA sort. */
+    const at = attrBy ? (attrBy[r.ad_id] || { revenue: 0, orders: 0 }) : null;
+    const revenue = at ? at.revenue : r.revenue;
+    const purchases = at ? at.orders : r.purchases;
+    // Ads already spending when our history begins would read as brand new, so
+    // fall back to Meta's own creation date for their age.
+    const origin = r.created_time && r.first_spend_date && String(r.created_time).slice(0, 10) < r.first_spend_date
+      ? String(r.created_time).slice(0, 10) : r.first_spend_date;
+    // The format tag is the segment after the last pipe in the ad's own name -
+    // "310 B | Still", "Cole - 3 | UGC". It must contain a LETTER, or shoot
+    // codes like "0616" get treated as a format.
+    const tagged = nameTag(r.name);
+    // Gated on v3 > 0: an image ad and a video ad synced before these columns
+    // existed must not look alike, and a 0% hook on a static is meaningless.
+    /* `ads.media_type` is authoritative once an ad has been looked at. Until
+       then fall back to the video signal we already store, so a never-seen ad
+       is still correctly video or static - it just cannot be known to be a
+       carousel yet, which is why the Carousel filter only appears when at
+       least one ad actually is one. */
+    const isVideo = (r.v3 || 0) > 0 || (r.vplays || 0) > 0;
+    const media = r.media_type || (isVideo ? 'video' : 'image');
+    return {
+      ad_id: r.ad_id, name: r.name || r.ad_id, status: r.status || null,
+      spend: r.spend, revenue, purchases,
+      roas: r.spend ? revenue / r.spend : null,
+      cpa: purchases ? r.spend / purchases : null,
+      attr: attrModel || 'meta',
+      impressions: imp, reach: r.reach || 0,
+      frequency: r.reach ? imp / r.reach : null,
+      cpm: imp ? (r.spend / imp) * 1000 : null,
+      ctr: imp ? (r.link_clicks || 0) / imp : null,
+      // Thumbstop is the 3-second view rate - the same numerator as hook. Kept
+      // as its own name because that is what the creative team calls it.
+      hook: isVideo && imp ? (r.v3 || 0) / imp : null,
+      hold: isVideo && r.v3 ? (r.vtp || 0) / r.v3 : null,
+      completion: isVideo && r.vplays ? (r.v100 || 0) / r.vplays : null,
+      /* `is_video` PUTS A PLAY BADGE ON THE CARD, so it has to mean "this can
+         be played", not "there is video in here somewhere". `|| isVideo`
+         defeated the whole point of `media_type` being authoritative: a
+         carousel of videos has v3 > 0, so it was flagged playable, and the
+         click died on "no playable video" because a carousel has no single
+         video id. `media` already falls back to isVideo when the type is
+         unknown, so nothing is lost by dropping the alternative. */
+      is_video: media === 'video', media_type: media,
+      format: tagged ? tagged.tag : null,
+      // 'format' = a known format word; 'label' = a partner, product or code.
+      format_kind: tagged ? tagged.kind : null,
+      /* Aliases and the derived metrics the detail popout shows. Named to match
+         what the REPORT's adDetailModal already expects, so one modal serves
+         both surfaces rather than a lookalike that drifts from it. */
+      video: media === 'video',
+      created: origin || null,
+      clicks: r.clicks_all || 0,
+      cpc: r.link_clicks ? r.spend / r.link_clicks : null,
+      cvr: r.link_clicks ? purchases / r.link_clicks : null,
+      aov: purchases ? revenue / purchases : null,
+      cost_per_thumbstop: r.v3 ? r.spend / r.v3 : null,
+      avg_watch: r.vplays ? (r.watch_weighted || 0) / r.vplays : null,
+      retention: isVideo && r.vplays ? {
+        p25: (r.v25 || 0) / r.vplays, p50: (r.v50 || 0) / r.vplays,
+        p75: (r.v75 || 0) / r.vplays, p100: (r.v100 || 0) / r.vplays,
+      } : null,
+      age: origin ? Math.max(0, ymdDiff(today, origin)) : null,
+      /* MATERIAL = "this ratio is worth ranking", and the two routes in are
+         NOT the same test. Cole asked whether 3x CPA of spend is essentially
+         three purchases; it is not, and the pair is why both are here:
+           SPEND >= 3x CPA - the ad had enough budget to have sold three times.
+             This is the route that catches LOSERS: an ad that took 5x CPA and
+             produced nothing is the single most useful row on a CPA sort, and
+             a purchases test can never surface it, because it has none.
+           SALES >= 3 - the ad actually sold three times. This is the route that
+             catches WINNERS EARLY, before they have spent much. Dartee's 357-7
+             and 357-13 launched 2 September, took $46 and $79 against a $180
+             bar, and returned 20.7x and 19.1x off 9 and 15 sales. A spend test
+             alone - including the team's own 3x-CPA rule - hides those for
+             weeks.
+         Either one earns a ranking; 357-12 ($2, one sale, 39x) satisfies
+         neither, which is exactly the noise a floor exists for. */
+      material: r.spend >= floor || (salesRoute && purchases >= MIN_RANK_PURCHASES),
+      material_by: r.spend >= floor ? 'spend' : salesRoute && purchases >= MIN_RANK_PURCHASES ? 'sales' : null,
+      share: totalSpend ? r.spend / totalSpend : 0,
+    };
+  });
+
+  /* The TYPES actually present, so the UI never offers a filter that would
+     return nothing. Only the three real media types - the pipe-suffix tags in
+     ad names (UGC, Still) are a naming convention, not a type, and offering
+     them beside Video/Static duplicated the same split twice over. */
+  const types = ['video', 'image', 'carousel'].filter(t => rows.some(r => r.media_type === t));
+
+  let list = rows;
+  if (opts.format === 'video') list = list.filter(r => r.media_type === 'video');
+  else if (opts.format === 'static') list = list.filter(r => r.media_type === 'image');
+  else if (opts.format === 'carousel') list = list.filter(r => r.media_type === 'carousel');
+
+  /* Ratio sorts see MATERIAL ads only. A sort by best ROAS that surfaces
+     an ad with $12 of spend is not a ranking, it is a rounding error. Spend
+     and recency have no such problem and rank everything. */
+  const RATIO = new Set(['roas', 'cpa', 'ctr', 'cpm', 'hook', 'hold', 'completion', 'frequency']);
+  const sort = opts.sort || 'spend';
+  if (RATIO.has(sort)) list = list.filter(r => r.material);
+  if (sort === 'hook' || sort === 'hold' || sort === 'completion') list = list.filter(r => r.is_video);
+
+  const dir = sort === 'cpa' || sort === 'cpm' || sort === 'frequency' ? 1 : -1;  // lower is better
+  const key = sort === 'newest' ? (r => -(r.age ?? 1e9)) : (r => r[sort]);
+  list = list.slice().sort((a, b) => {
+    const av = key(a), bv = key(b);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;                 // nulls last, whichever direction
+    if (bv == null) return -1;
+    return (av - bv) * dir;
+  });
+
+  const limit = Math.min(Math.max(+opts.limit || 8, 1), 40);
+  const top = list.slice(0, limit);
+  return {
+    ads: top, types, attr: attrModel || 'meta',
+    // Whether a Triple Whale model was ASKED for and had nothing behind it, so
+    // the page can explain the fallback instead of quietly changing source.
+    attr_requested: opts.attr && opts.attr !== 'meta' ? opts.attr : null,
+    attr_missing: attrMissing,
+    matched: list.length,
+    total_spend: totalSpend,
+    shown_spend: top.reduce((n, r) => n + r.spend, 0),
+    floor, floor_basis: floorBasis, floor_mult: floorMult,
+    min_purchases: MIN_RANK_PURCHASES, acct_cpa: acctCpa, target_cpa: targetCpa, sort,
+    // false under a custom threshold: sales are not a second way in there.
+    sales_route: salesRoute,
+    // How much of the account this ranking actually saw. "Showing 8 of 12" is
+    // a very different sentence when there are 256 ads behind it.
+    ads_with_spend: rows.length,
+    ranked_by_sales: rows.filter(r => r.material_by === 'sales').length,
+  };
+}
+
+async function adBreakdown(env, acct, windowDays, freshDays, win = null) {
+  const today = localDate(acct.tz);
+  const from = win ? win.from : addDays(today, -windowDays);
+  const to = win ? addDays(win.to, 1) : today;
+  const { results } = await env.DB.prepare(
+    `SELECT d.ad_id, a.name, a.first_spend_date, a.created_time,
+            SUM(d.spend) AS spend, SUM(d.purchases) AS purchases, SUM(d.revenue) AS revenue, SUM(d.impressions) AS impressions
+     FROM ad_daily d JOIN ads a ON a.act_id = d.act_id AND a.ad_id = d.ad_id
+     WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.date < ?3
+     GROUP BY d.ad_id HAVING SUM(d.spend) > 0
+     ORDER BY spend DESC LIMIT 40`,
+  ).bind(acct.act_id, from, to).all();
+  if (!results.length) return null;
+  /* Purchases and revenue are Triple Whale's (see twMetaDaily). Per ad, a TW
+     row is matched by ad_id, so non-Meta ids never land. If any day in the
+     window that had Meta spend is not synced, every attributed figure is null. */
+  const lastDay = addDays(to, -1);
+  const synced = await twMetaDaily(env, acct.act_id, from, lastDay);
+  const { results: spentDays } = await env.DB.prepare(
+    `SELECT DISTINCT date FROM ad_daily WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date < ?3 AND spend > 0`,
+  ).bind(acct.act_id, from, to).all();
+  const gap = spentDays.some(r => !synced[r.date]);
+  const { results: twAds } = gap ? { results: [] } : await env.DB.prepare(
+    `SELECT ad_id, SUM(revenue) AS revenue, SUM(orders) AS orders FROM tw_ad_attr
+     WHERE act_id = ?1 AND model = ?2 AND date >= ?3 AND date < ?4 AND (platform = 'meta' OR platform IS NULL)
+     GROUP BY ad_id`,
+  ).bind(acct.act_id, BRIEF_ATTR_MODEL, from, to).all();
+  const twBy = Object.fromEntries(twAds.map(r => [r.ad_id, r]));
+  for (const r of results) {
+    r.meta_purchases = r.purchases; r.meta_revenue = r.revenue;
+    const t = twBy[r.ad_id];
+    // No TW row on a synced window = a real zero for that ad, not missing data.
+    r.purchases = gap ? null : (t ? t.orders : 0);
+    r.revenue = gap ? null : (t ? t.revenue : 0);
+  }
+  const tot = results.reduce((a, r) => ({ spend: a.spend + r.spend, purch: a.purch + (r.purchases || 0) }), { spend: 0, purch: 0 });
+  const acctCpa = !gap && tot.purch ? tot.spend / tot.purch : null;
+  const ads = results.map(r => {
+    const cpa = r.purchases ? r.spend / r.purchases : null;
+    const origin = r.created_time && r.first_spend_date && String(r.created_time).slice(0, 10) < r.first_spend_date
+      ? String(r.created_time).slice(0, 10) : r.first_spend_date;
+    const age = origin ? Math.max(0, ymdDiff(today, origin)) : null;
+    let verdict = null;
+    if (acctCpa != null) {
+      if (cpa == null && r.spend >= acctCpa * 1.5) verdict = 'cut';           // spent 1.5 CPAs, zero purchases
+      else if (cpa != null && cpa <= acctCpa * 0.8) verdict = 'scale';
+      else if (cpa != null && cpa >= acctCpa * 1.4) verdict = 'cut';
+    }
+    return { ad_id: r.ad_id, name: r.name || r.ad_id, spend: r.spend, purchases: r.purchases,
+      revenue: r.revenue, cpa, roas: r.spend && r.revenue != null ? r.revenue / r.spend : null,
+      meta_purchases: r.meta_purchases, meta_revenue: r.meta_revenue,
+      share: tot.spend ? r.spend / tot.spend : 0, age, fresh: age != null && age <= freshDays, verdict };
+  });
+  return { window: windowDays, from, acct_cpa: acctCpa, total_spend: tot.spend, ads,
+    attribution: `triple_whale:${BRIEF_ATTR_MODEL}`, attr_gap: gap };
+}
+
+/* `win` is {from,to} when the caller has a real date range - the shared period
+   control - and null for the old "last N days" behaviour. The freshness cards
+   compare the window against the SAME LENGTH immediately before it, so an
+   arbitrary range works as well as a day count. The 97-day history behind the
+   weekly trend chart is separate and unaffected: that chart is about the shape
+   over time, not about the selected window. */
+async function creative(env, acct, freshDays, windowDays, win = null) {
+  const today = localDate(acct.tz);
+  const histFrom = win ? addDays(win.from, -97) : addDays(today, -97);
+  const from = histFrom;
+  const { results: rows } = await env.DB.prepare(
+    `SELECT d.date, d.spend, d.purchases, a.first_spend_date, a.created_time
+     FROM ad_daily d JOIN ads a ON a.act_id = d.act_id AND a.ad_id = d.ad_id
+     WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.date < ?3 AND d.spend > 0 AND a.first_spend_date IS NOT NULL`,
+  ).bind(acct.act_id, from, today).all();
+  if (!rows.length) return { empty: true };
+  // Ads already spending when our history starts would look "brand new" - for those,
+  // fall back to Meta's true creation date so their age is honest.
+  const clipEdge = addDays(from, 2);
+  const ageOf = (r, date) => {
+    const created = r.created_time ? String(r.created_time).slice(0, 10) : null;
+    const origin = r.first_spend_date <= clipEdge && created && created < r.first_spend_date ? created : r.first_spend_date;
+    return Math.max(0, ymdDiff(date, origin));
+  };
+  for (const r of rows) r.age = ageOf(r, r.date);
+
+  /* PURCHASES ARE TRIPLE WHALE'S (see twMetaDaily), not ad_daily's Meta count.
+     Orders are dated by the order, so they are read from tw_ad_attr directly
+     (an order can land on a day its ad did not spend) and aged by that date.
+     Only Meta ads can be aged, which is also what keeps Google ids out. A
+     window or week with Meta spend on a day TW has not synced has a null CPA. */
+  const synced = await twMetaDaily(env, acct.act_id, from, today);
+  const { results: attrRows } = await env.DB.prepare(
+    `SELECT t.date, SUM(t.orders) AS orders, a.first_spend_date, a.created_time
+     FROM tw_ad_attr t JOIN ads a ON a.ad_id = t.ad_id AND a.act_id IN ${metaOf(1)}
+     WHERE t.act_id = ?1 AND t.model = ?2 AND t.date >= ?3 AND t.date < ?4
+       AND (t.platform = 'meta' OR t.platform IS NULL) AND a.first_spend_date IS NOT NULL
+     GROUP BY t.ad_id, t.date`,
+  ).bind(acct.act_id, BRIEF_ATTR_MODEL, from, today).all().catch(() => ({ results: [] }));
+  for (const r of attrRows) r.age = ageOf(r, r.date);
+
+  const span = win ? Math.max(1, ymdDiff(win.to, win.from) + 1) : windowDays;
+  const winTo = win ? win.to : addDays(today, -1);
+  const winFrom = win ? win.from : addDays(today, -windowDays);
+  const prevFrom = addDays(winFrom, -span);
+  const split = (lo, hi) => {
+    const s = { freshSpend: 0, freshPurch: 0, staleSpend: 0, stalePurch: 0, ageSpend: 0, total: 0, gap: false };
+    for (const r of rows) {
+      if (r.date < lo || r.date > hi) continue;
+      s.total += r.spend; s.ageSpend += r.age * r.spend;
+      if (!synced[r.date]) s.gap = true;
+      if (r.age <= freshDays) s.freshSpend += r.spend; else s.staleSpend += r.spend;
+    }
+    for (const r of attrRows) {
+      if (r.date < lo || r.date > hi) continue;
+      if (r.age <= freshDays) s.freshPurch += r.orders || 0; else s.stalePurch += r.orders || 0;
+    }
+    return s;
+  };
+  const cur = split(winFrom, winTo);
+  const prev = split(prevFrom, addDays(winFrom, -1));
+
+  const weekStart = d => { const dt = new Date(d + 'T12:00:00Z'); dt.setUTCDate(dt.getUTCDate() - dt.getUTCDay()); return dt.toISOString().slice(0, 10); };
+  const weeks = {};
+  for (const r of rows) {
+    const w = weekStart(r.date);
+    const o = weeks[w] ??= { week: w, spend: 0, purchases: 0, b: [0, 0, 0, 0, 0], freshSpend: 0, gap: false };
+    o.spend += r.spend; o.freshSpend += r.age <= freshDays ? r.spend : 0;
+    if (!synced[r.date]) o.gap = true;
+    o.b[r.age <= 7 ? 0 : r.age <= 14 ? 1 : r.age <= 30 ? 2 : r.age <= 60 ? 3 : 4] += r.spend;
+  }
+  for (const r of attrRows) { const o = weeks[weekStart(r.date)]; if (o) o.purchases += r.orders || 0; }
+  const weekly = Object.values(weeks).sort((a, b) => a.week < b.week ? -1 : 1).map(w => ({
+    week: w.week, spend: w.spend,
+    cpa: !w.gap && w.purchases ? w.spend / w.purchases : null,
+    freshShare: w.spend ? w.freshSpend / w.spend : 0,
+    shares: w.b.map(x => w.spend ? x / w.spend : 0),
+  }));
+  const ranked = weekly.filter(w => w.cpa != null && w.spend > 0).slice().sort((a, b) => b.freshShare - a.freshShare);
+  const half = Math.min(6, Math.floor(ranked.length / 2));
+  const median = l => { const s = l.map(w => w.cpa).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+  const avgShare = l => l.length ? l.reduce((s, w) => s + w.freshShare, 0) / l.length : 0;
+  return {
+    account: { act_id: acct.act_id, name: acct.name, currency: acct.currency, today },
+    fresh: freshDays, window: windowDays,
+    cards: {
+      freshShare: cur.total ? cur.freshSpend / cur.total : null,
+      freshSharePrev: prev.total ? prev.freshSpend / prev.total : null,
+      swAge: cur.total ? cur.ageSpend / cur.total : null,
+      freshCpa: !cur.gap && cur.freshPurch ? cur.freshSpend / cur.freshPurch : null,
+      staleCpa: !cur.gap && cur.stalePurch ? cur.staleSpend / cur.stalePurch : null,
+      attr_gap: cur.gap,
+    },
+    attribution: `triple_whale:${BRIEF_ATTR_MODEL}`,
+    weekly,
+    ads: await adBreakdown(env, acct, Math.max(span, 7), freshDays, win),
+    insight: half >= 3 ? {
+      n: half,
+      topShare: avgShare(ranked.slice(0, half)), topCpa: median(ranked.slice(0, half)),
+      botShare: avgShare(ranked.slice(-half)), botCpa: median(ranked.slice(-half)),
+    } : null,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Overview math (all clients in one table)                          */
+/* ------------------------------------------------------------------ */
+
+/* THE META TAB'S ATTRIBUTION IS TRIPLE WHALE'S (Cole, 2026-10-04).
+   Every purchase, revenue, ROAS and CPA on the Meta tab comes from tw_ad_attr
+   under BRIEF_ATTR_MODEL (lastPlatformClick), the same source as the briefs and
+   reports. Spend, impressions, clicks, CTR, CPM and video stay Meta's, because
+   Triple Whale does not measure delivery. Meta's own counts survive only as
+   meta_purchases / meta_revenue, which nothing renders.
+
+   WHICH ROWS ARE META ADS. tw_ad_attr holds every platform. Rows carry
+   `platform` since late July; the older rows (late May to late July or August)
+   have platform NULL for EVERY platform, so for those a row counts only when
+   its ad_id is one of this account's Meta ads. `platform = 'meta'` alone would
+   drop two months of Meta orders; a join alone would miss the few 'meta' rows
+   whose ad never reached the `ads` table.
+
+   A DAY WITH NO ROWS AT ALL IS NOT SYNCED, never zero (same rule as briefData).
+   Coverage starts 2026-05-12, and yesterday can be missing until the morning
+   brief pulls it. Any window that touches an unsynced day returns null for its
+   attributed figures rather than quietly falling back to Meta's number. */
+const TW_META_ROW = `(t.platform = 'meta' OR (t.platform IS NULL AND a.ad_id IS NOT NULL))`;
+
+/** { date: { rev, ord } } of TW attribution on this account's Meta ads, one key
+ *  per SYNCED date (a synced date with no Meta orders reads 0, a missing key is
+ *  "not synced"). `to` is inclusive. */
+async function twMetaDaily(env, actId, from, to) {
+  const { results } = await env.DB.prepare(
+    `SELECT t.date,
+            SUM(CASE WHEN ${TW_META_ROW} THEN t.revenue ELSE 0 END) AS rev,
+            SUM(CASE WHEN ${TW_META_ROW} THEN t.orders ELSE 0 END) AS ord
+     FROM tw_ad_attr t LEFT JOIN ads a ON a.ad_id = t.ad_id AND a.act_id IN ${metaOf(1)}
+     WHERE t.act_id = ?1 AND t.model = ?2 AND t.date >= ?3 AND t.date <= ?4
+     GROUP BY t.date`,
+  ).bind(actId, BRIEF_ATTR_MODEL, from, to).all().catch(() => ({ results: [] }));
+  return Object.fromEntries((results || []).map(r => [r.date, { rev: r.rev || 0, ord: r.ord || 0 }]));
+}
+
+/** daily_insights rows with purchases/revenue swapped for TW (null on an
+ *  unsynced day). Same shape, so the Meta tab's maths keeps working. */
+function attributeRows(rows, tw) {
+  return rows.map(r => {
+    const t = tw[r.date];
+    return { ...r, meta_purchases: r.purchases, meta_revenue: r.revenue,
+      purchases: t ? t.ord : null, revenue: t ? t.rev : null };
+  });
+}
+
+/* `attributed` = the rows went through attributeRows: one unsynced day nulls the
+   window's purchases, revenue, CPA and ROAS. Without it (Meta's own rows, the
+   retired share link) a null still adds as zero, exactly as before. */
+function agg(rows, attributed = false) {
+  const s = rows.reduce((a, r) => {
+    a.spend += r.spend; a.impressions += r.impressions; a.clicks += r.link_clicks || r.clicks;
+    a.purchases += r.purchases || 0; a.revenue += r.revenue || 0; a.video_views += r.video_views; return a;
+  }, { spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0, video_views: 0, days: rows.length });
+  if (attributed) {
+    s.meta_purchases = rows.reduce((n, r) => n + (r.meta_purchases || 0), 0);
+    s.meta_revenue = rows.reduce((n, r) => n + (r.meta_revenue || 0), 0);
+    /* A day Triple Whale has not synced yet (yesterday, before the ~9am pull) must not
+       blank the whole window: CPA and ROAS are taken over the days it HAS, against those
+       same days' spend. The totals stay null, because a partial count would read low. */
+    const synced = rows.filter(r => r.purchases != null && r.revenue != null);
+    if (synced.length < rows.length) {
+      s.purchases = null; s.revenue = null; s.attr_missing_days = rows.length - synced.length;
+      const sp = synced.reduce((n, r) => n + r.spend, 0), pu = synced.reduce((n, r) => n + r.purchases, 0), rv = synced.reduce((n, r) => n + r.revenue, 0);
+      s._cpa = synced.length && pu ? sp / pu : null;
+      s._roas = synced.length && sp ? rv / sp : null;
+    }
+  }
+  const partial = '_cpa' in s;
+  const { _cpa, _roas, ...out } = s;
+  return {
+    ...out,
+    spend_per_day: s.days ? s.spend / s.days : null,
+    cpa: partial ? _cpa : s.purchases ? s.spend / s.purchases : null,
+    roas: partial ? _roas : s.spend && s.revenue != null ? s.revenue / s.spend : null,
+    ctr: s.impressions ? s.clicks / s.impressions : null,
+    cpm: s.impressions ? s.spend / s.impressions * 1000 : null,
+    thumbstop: s.impressions ? s.video_views / s.impressions : null,
+  };
+}
+
+/* `attr: false` keeps Meta's own purchases and revenue: only the retired share
+   link asks for that. Everything else (the Meta tab, the Strategist) gets
+   Triple Whale attribution in l7 / l30 / prev7 / prev30. */
+async function accountOverview(env, a, { attr = true } = {}) {
+  const today = localDate(a.tz);
+  const from = addDays(today, -70);
+  let { results: rows } = await env.DB.prepare(
+    `SELECT * FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 ORDER BY date`,
+  ).bind(a.act_id, from).all();
+  rows = sumByDate(rows);
+  if (attr) rows = attributeRows(rows, await twMetaDaily(env, a.act_id, from, today));
+  const byDate = Object.fromEntries(rows.map(r => [r.date, r]));
+  const range = (n, endOffset = 1) => {            // last n full days ending yesterday by default
+    const out = [];
+    for (let i = endOffset; i < n + endOffset; i++) { const d = byDate[addDays(today, -i)]; if (d) out.push(d); }
+    return out;
+  };
+  const ym = monthOf(today), pm = prevMonth(ym);
+  const dom = +today.slice(8, 10);
+  const dim = daysInMonth(today);
+  const mtdRows = rows.filter(r => r.date.startsWith(ym));
+  const mtd = mtdRows.reduce((s, r) => s + r.spend, 0);
+  const lastMonthRows = rows.filter(r => r.date.startsWith(pm));
+  const lastMonthTotal = lastMonthRows.reduce((s, r) => s + r.spend, 0);
+  const lastMonthSameDay = lastMonthRows.filter(r => +r.date.slice(8, 10) <= dom).reduce((s, r) => s + r.spend, 0);
+  const elapsed = (dom - 1 + localHourFrac(a.tz) / 24) / dim;    // fraction of month elapsed
+  const budget = a.budgets?.[ym] ?? a.monthly_budget ?? null;
+  const expected = budget != null ? budget * elapsed : null;
+  const rulesDoc = await env.DB.prepare(`SELECT data_json FROM p_br_doc WHERE act_id = ?1 AND line_id = '' AND key = 'rules'`).bind(a.act_id).first().catch(() => null);
+  const yellowPct = +(safeJson(rulesDoc?.data_json, {}).yellow_pct) > 0 ? +safeJson(rulesDoc.data_json, {}).yellow_pct : 30;
+  return {
+    act_id: a.act_id, name: a.name, currency: a.currency, tz: a.tz, today,
+    target_cpa: a.target_cpa ?? null, target_roas: a.target_roas ?? null, slack_channel: a.slack_channel ?? null,
+    yellow_pct: yellowPct,   // the brand's own "just over goal" zone (Settings, Goals), for the Meta Overview tile
+    last_sync_insights: a.last_sync_insights, last_sync_activities: a.last_sync_activities, last_error: a.last_error,
+    today_spend: byDate[today]?.spend ?? null,
+    // Meta only, everywhere on these pages: spend here must always match Ads Manager.
+    mtd: { spend: mtd, budget, expected, pace_pct: expected ? mtd / expected - 1 : null,
+      projected: elapsed > 0.02 ? mtd / elapsed : null, elapsed, days_in_month: dim, day_of_month: dom,
+      last_month_same_day: lastMonthSameDay, last_month_total: lastMonthTotal,
+      vs_last_month_pct: lastMonthSameDay ? mtd / lastMonthSameDay - 1 : null },
+    l7: agg(range(7), attr), l30: agg(range(30), attr), prev7: agg(range(7, 8), attr), prev30: agg(range(30, 31), attr),
+    attribution: attr ? `triple_whale:${BRIEF_ATTR_MODEL}` : 'meta',
+    days_of_data: rows.length,
+    changes_24h: (await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM activities WHERE act_id IN ${metaOf(1)} AND event_time >= ?2`,
+    ).bind(a.act_id, new Date(Date.now() - 86400e3).toISOString()).first())?.n ?? 0,
+  };
+}
+
+async function overview(env) {
+  const accounts = await listAccounts(env, true);
+  const out = [];
+  for (const a of accounts) out.push(await accountOverview(env, a));
+  return out;
+}
+
+/* Chart-strip events: the changes worth marking under an Averages chart. */
+async function seriesEvents(env, actId, fromISO) {
+  const { results } = await env.DB.prepare(
+    `SELECT id, event_time, category, summary, reason, suggested_reason, manual FROM activities
+     WHERE act_id IN ${metaOf(1)} AND event_time >= ?2 AND confirmed != -1
+       AND (category IN ('budget','new_campaign','campaign_paused','campaign_relaunched','bid_strategy','targeting') OR manual = 1)
+     ORDER BY event_time`,
+  ).bind(actId, fromISO).all();
+  return results;
+}
+
+/* ---- settings helpers + Slack ---- */
+
+async function getSetting(env, key) {
+  return (await env.DB.prepare(`SELECT value FROM settings WHERE key = ?1`).bind(key).first())?.value ?? null;
+}
+async function putSetting(env, key, value) {
+  await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .bind(key, value).run();
+}
+
+/* WHO THE MESSAGE COMES FROM.
+   Internal traffic - drafts awaiting review, delivery alerts, failure notices -
+   posts as the BOT, which is right: it is machine output and should look like
+   it. Anything reaching a CLIENT posts as a PERSON, via `asUser`.
+
+   Cole, 2026-08-31: "whenever I send it to the client I want it to come through
+   me specifically". This is not cosmetic. A bot token can set `username` and an
+   avatar, but Slack still stamps an APP badge on the message, so a client can
+   always tell. Only a user token (xoxp-) posts as the human - their name, their
+   picture, no badge.
+
+   Two rules follow:
+ - A user token can only post where THAT PERSON is a member. There is no
+     bot-style invite, and if he is not in the channel it fails, correctly.
+ - `asUser` NEVER falls back to the bot. Sending as "Mobius Reports" when he
+     asked for it to come from him is the wrong sender on a client message, and
+     he would never know it happened. It fails loudly instead. */
+async function slackPost(env, channel, text, blocks, opts = {}) {
+  const asUser = !!opts.asUser;
+  const token = asUser ? env.SLACK_USER_TOKEN : env.SLACK_BOT_TOKEN;
+  if (asUser && !token) {
+    throw new Error('No Slack user token is set, so this cannot be sent as you rather than as the bot. Add SLACK_USER_TOKEN in Cloudflare, or post it from Slack by hand.');
+  }
+  const send = payload => xfetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(r => r.json().catch(() => ({})));
+  /* thread_ts: a reply (the morning card's thread, morningcard.js teamPost). Never reply_broadcast. */
+  const base = { channel, text, ...(blocks ? { blocks } : {}), ...(opts.thread_ts ? { thread_ts: opts.thread_ts } : {}) };
+  if (asUser) {
+    // A user token posts AS that user; overriding name or avatar is neither
+    // possible nor wanted, so the identity fields are bot-only.
+    const j = await send(base);
+    if (!j.ok) {
+      const hint = j.error === 'not_in_channel' ? ' - you are not a member of that channel. Join it in Slack and send again.'
+        : (j.error === 'invalid_auth' || j.error === 'token_revoked') ? ' - the Slack user token is no longer valid and needs regenerating.'
+        : j.error === 'missing_scope' ? ' - the Slack user token is missing the chat:write scope.'
+        : '';
+      throw new Error(`Slack: ${j.error || 'unknown error'}${hint}`);
+    }
+    // The caller gets {ts, channel} so an interactive card can be rewritten in
+    // place later instead of a second message piling up underneath it.
+    return { ts: j.ts, channel: j.channel };
+  }
+  /* Locus's own notes carry the Mobius mark, not the old chart emoji. */
+  const face = opts.username === 'Locus' ? { icon_url: 'https://tools.go-mobius-digital.com/favicon.png' } : { icon_emoji: opts.icon || ':bar_chart:' };
+  let j = await send({ ...base, username: opts.username || 'Locus', ...face });
+  if (!j.ok && /missing_scope|invalid_arg/i.test(j.error || '')) j = await send(base);
+  if (!j.ok && j.error === 'not_in_channel') {
+    /* A channel the bot was never added to (the agency #daily-briefs channel, 2026-10-12): join it once and
+       send again. Public channels only; a private one still needs /invite in Slack, and the error says so. */
+    const jr = await xfetch('https://slack.com/api/conversations.join', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel }),
+    }).then(r => r.json().catch(() => ({}))).catch(() => ({}));
+    /* THE JOIN FAILED FOR #daily-briefs (found 2026-10-13): the bot lacks channels:join, so every daily draft fell back
+       to its brand's internal channel. Cole's own token (SLACK_USER_TOKEN, a member of the channel) can invite the
+       bot instead, the same way newclient.js invites it into channels Cole made. */
+    let inv = null;
+    if (!jr.ok && env.SLACK_USER_TOKEN) {
+      const call = (m, b) => xfetch(`https://slack.com/api/${m}`, { method: 'POST', headers: { 'Authorization': `Bearer ${env.SLACK_USER_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then(r => r.json().catch(() => ({}))).catch(() => ({}));
+      const me = await xfetch('https://slack.com/api/auth.test', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json().catch(() => ({}))).catch(() => ({}));
+      if (me.user_id) inv = await call('conversations.invite', { channel, users: me.user_id });
+    }
+    if (jr.ok || inv?.ok || inv?.error === 'already_in_channel') j = await send({ ...base, username: opts.username || 'Mobius Account Health', ...face });
+    else j.error = `not_in_channel - add the Locus app to that channel in Slack (/invite @Locus)${jr.error ? `; join failed: ${jr.error}` : ''}${inv?.error ? `; invite as Cole failed: ${inv.error}` : ''}`;
+  }
+  if (!j.ok) throw new Error(`Slack: ${j.error || 'unknown error'}`);
+  return { ts: j.ts, channel: j.channel };
+}
+
+/* ------------------------------------------------------------------ */
+/*  ACTING ON A DRAFT FROM INSIDE SLACK                                 */
+/*                                                                      */
+/*  Cole, 2026-09-07: "everything needs to be done from either in the    */
+/*  app or in Slack -- I want both, so I don't have to switch around."   */
+/*  Every action the Daily Brief and Reports tabs offer -- send to the   */
+/*  client, edit the wording, rewrite it with Claude (with or without a  */
+/*  steer), don't send -- now has a button on the review post itself.    */
+/*  Locus keeps every one of them, and gains the steer box so the two    */
+/*  surfaces offer exactly the same choices.                            */
+/*                                                                      */
+/*  ONE SOURCE OF TRUTH, TWO SURFACES. The D1 row is the truth; the      */
+/*  Slack card is a view of it. Anything that changes a draft -- a       */
+/*  button here or a click in Locus -- ends by rewriting the card from   */
+/*  the row (`slackSyncBrief` / `slackSyncReport`). That is what stops   */
+/*  a Send button sitting live in Slack under a brief that was already   */
+/*  sent from the app.                                                  */
+/* ------------------------------------------------------------------ */
+
+/** Slack's own call, as the bot. Returns the parsed body; never throws for a
+ *  Slack-level error, because most callers here are best-effort cosmetics. */
+async function slackApi(env, method, body) {
+  if (!env.SLACK_BOT_TOKEN) return { ok: false, error: 'no_bot_token' };
+  /* READ methods refuse a JSON body (Slack answers ok:false). conversations.replies sent as JSON is
+     why the Strategist answered a thread reply with no memory of the thread (found 2026-10-05):
+     the engine swallowed the error and sent the bare question. Reads go form-encoded. */
+  const read = /^(conversations\.(replies|history|info|members|list)|users\.(info|list|lookupByEmail)|reactions\.get|team\.info|auth\.test|chat\.getPermalink|pins\.list|files\.(info|getUploadURLExternal|completeUploadExternal))$/.test(method);
+  const init = read
+    ? { method: 'POST', headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(Object.entries(body || {}).filter(([, v]) => v != null).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)])).toString() }
+    : { method: 'POST', headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(body) };
+  return xfetch(`https://slack.com/api/${method}`, init).then(r => r.json()).catch(e => ({ ok: false, error: e.message }));
+}
+
+/** Rewrite a card in place. Silent on failure: a card we cannot update is a
+ *  cosmetic problem, and the action it describes has already happened. */
+async function slackUpdate(env, channel, ts, text, blocks) {
+  if (!channel || !ts) return { ok: false, error: 'no_message' };
+  return slackApi(env, 'chat.update', { channel, ts, text, ...(blocks ? { blocks } : {}) });
+}
+
+/** A one-off ephemeral note to the person who pressed a button -- used for the
+ *  refusals (not allowed to send, nothing to edit) that do not deserve to
+ *  rewrite the card everyone else is looking at. */
+async function slackWhisper(env, channel, user, text) {
+  if (!channel || !user) return;
+  await slackApi(env, 'chat.postEphemeral', { channel, user, text }).catch(() => {});
+}
+
+/* Slack caps a section's text at 3000 characters, and a brief occasionally runs
+   past it. Split on paragraph boundaries so the card reads as one message. */
+function mrkdwnSections(text, limit = 2900) {
+  const out = [];
+  let buf = '';
+  for (const para of String(text || '').split(/\n\n/)) {
+    const piece = para.length > limit ? para.slice(0, limit) : para;
+    if (buf && buf.length + piece.length + 2 > limit) { out.push(buf); buf = piece; }
+    else buf = buf ? `${buf}\n\n${piece}` : piece;
+  }
+  if (buf) out.push(buf);
+  return (out.length ? out : ['_(empty)_']).map(t => ({ type: 'section', text: { type: 'mrkdwn', text: t } }));
+}
+
+const btn = (text, action_id, value, opts = {}) => ({
+  type: 'button', text: { type: 'plain_text', text, emoji: true }, action_id, value,
+  ...(opts.style ? { style: opts.style } : {}),
+  ...(opts.url ? { url: opts.url } : {}),
+  ...(opts.confirm ? { confirm: opts.confirm } : {}),
+});
+
+const confirmDialog = (title, text, ok) => ({
+  title: { type: 'plain_text', text: title },
+  text: { type: 'mrkdwn', text },
+  confirm: { type: 'plain_text', text: ok },
+  deny: { type: 'plain_text', text: 'Cancel' },
+  style: 'primary',
+});
+
+/* WHO MAY PUT A MESSAGE IN FRONT OF A CLIENT FROM SLACK.
+   A client send posts under Cole's own name (SLACK_USER_TOKEN), so by default
+   only Cole may press it -- handing that button to a channel would let anyone
+   message a client as him without him knowing. Editing, rewriting and "don't
+   send" stay open to whoever is in the internal channel: none of them leave the
+   building. Locus -> Settings flips this to 'anyone' for a team that should
+   have it. */
+async function slackOwnerId(env) {
+  const cached = await getSetting(env, 'slackOwnerId');
+  if (cached) return cached;
+  if (!env.SLACK_USER_TOKEN) return null;
+  const r = await xfetch('https://slack.com/api/auth.test', {
+    headers: { Authorization: `Bearer ${env.SLACK_USER_TOKEN}` },
+  }).then(x => x.json()).catch(() => ({}));
+  if (r?.ok && r.user_id) { await putSetting(env, 'slackOwnerId', r.user_id).catch(() => {}); return r.user_id; }
+  return null;
+}
+async function maySendFromSlack(env, userId) {
+  if ((await getSetting(env, 'slackSendWho')) === 'anyone') return true;
+  const owner = await slackOwnerId(env);
+  return !owner || owner === userId;      // no owner resolved = do not lock everyone out
+}
+
+/* ---------------- Where a button sends you when you want the charts -------- */
+const LOCUS_BRIEF = (act, date) => `${DASHBOARD_URL}?open=brief&act=${encodeURIComponent(act)}&date=${date}`;
+const LOCUS_HEALTH = (act, date) => `${DASHBOARD_URL}?open=health&act=${encodeURIComponent(act)}&date=${date}`;
+const LOCUS_REPORTS = act => `${DASHBOARD_URL}?open=reports&act=${encodeURIComponent(act)}`;
+
+const shortTime = iso => {
+  try {
+    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: BRIEF_TZ }).format(new Date(iso));
+  } catch { return ''; }
+};
+
+/** THE DAILY BRIEF CARD. Rendered from the stored row and nothing else, so the
+ *  same function draws it whether the last thing that happened was the 9am
+ *  cron, a button in this channel, or a click in Locus. `banner` is the
+ *  transient line ("Claude is rewriting this…") that only exists mid-action. */
+/** `preview` = { daily, thread }: the client daily (clientpost.js dailyPost) and its thread, built by slackSyncBrief from
+ *  the stored numbers. A brand with a client channel shows THAT on its card, because that is the message the client gets
+ *  (the reporting audit, 2026-10-19: no model writes a line a client reads). The stored AI brief (row.text) is only drawn
+ *  for an internal-only brand, where the team is the reader. */
+function briefCard(acct, date, row, banner, preview = null) {
+  /* A 'draft' row for a brand that has no client channel is drawn as handled
+     too: rows written before this rule existed, or a brand whose client
+     channel was cleared, must not keep offering a Send that can only fail. */
+  const raw = row?.status || 'draft';
+  const status = raw === 'draft' && internalOnly(acct) ? 'handled' : raw;
+  const health = (safeJson(row?.data_json, {}) || {}).health || null;
+  const bad = health?.verdict === 'broken' && status !== 'sent';
+  const v = JSON.stringify({ a: acct.act_id, d: date });
+
+  /* ONE MESSAGE, NOT A STACK OF PANELS.
+     The first version of this card put the header in its own block, then a
+     divider, then the brief, then a context line - five panels where there used
+     to be one continuous message, and the divider cut the page in half right
+     under the heading. Cole, 2026-09-07: "what happened to our specific
+     structure, it literally went down and said here's this, here was the
+     forecast". The structure was intact; the message had been chopped up around
+     it, which reads as the same thing.
+
+     So the header, the data warning and the brief are ONE string, exactly as
+     the plain-text notice used to be. Slack caps a block at 3000 characters and
+     a brief runs past that perhaps once a week, so `mrkdwnSections` splits at a
+     paragraph break when it must - but nothing else is ever added between. The
+     buttons are the only thing that is genuinely a separate element. */
+  const head = status === 'sent'
+    ? `:white_check_mark: *Sent to the client - ${acct.name}, ${prettyDate(date)}*`
+      + (row?.channel ? `  ·  _posted to <#${row.channel}>${row.posted_at ? ` at ${shortTime(row.posted_at)} Central` : ''}_` : '')
+    : status === 'skipped'
+      ? `:heavy_minus_sign: *Not sending - ${acct.name}, ${prettyDate(date)}*  ·  _marked handled; the client was not messaged_`
+      : status === 'handled'
+        ? `:white_check_mark: *Daily Update - ${acct.name}, ${prettyDate(date)}*  ·  _internal only; this brand has no client channel, so nothing goes out_`
+        : `:memo: *Draft - ${acct.name}, ${prettyDate(date)}*  ·  _what the client gets, word for word; not sent yet_`;
+
+  /* The data warning goes ABOVE the brief and never inside it. The text is what
+     the client receives; this notice is ours. Without it the numbers look
+     ordinary - that is exactly how five brands under-reported spend by 70% for
+     three days in September 2026 with nobody noticing. */
+  const fix = bad ? health.flagged?.[0]?.issues?.find(i => i.severity === 'broken')?.fix : null;
+  const warn = bad
+    ? `:rotating_light: *Do not send - the numbers are wrong.* ${health.summary}`
+      + (fix ? `\n_${fix}_` : '')
+      + `\nSpend below has been rebuilt from the platforms' own reporting where possible.`
+    : '';
+  /* A non-blocking note for the team only: the numbers are fine, a feed behind
+     them is not. One line, so it never crowds the brief. */
+  const note = !bad && status !== 'sent'
+    ? health?.flagged?.flatMap(x => x.issues.filter(i => i.code === 'meta_missing').map(i => `${prettyDate(x.date)}: ${i.what}`))[0]
+    : null;
+  const warnLine = note ? `:information_source: _${note}. Numbers are right; Triple Whale's Meta link needs a reconnect._` : '';
+  const steer = row?.steer && status !== 'sent'
+    ? `\n\n_Last rewrite was steered: “${String(row.steer).slice(0, 200)}”_` : '';
+
+  // A sent card shows what the client actually has (edits included), not a fresh rebuild.
+  const daily = status === 'sent' && preview?.sent ? preview.sent : preview?.daily;
+  const clientText = daily
+    ? daily + (preview.thread ? `\n\n_In the thread under it:_\n${preview.thread}` : '') : null;
+  const body = [head, banner, warn || warnLine, clientText || row?.text || '_Nothing written for this day yet._']
+    .filter(Boolean).join('\n\n') + (clientText ? '' : steer);
+  const blocks = mrkdwnSections(body);
+
+  const els = [];
+  if (status === 'draft') {
+    if (bad) {
+      els.push(btn('Fix the numbers in Locus', 'noop_open', v, { url: LOCUS_HEALTH(acct.act_id, date) }));
+    } else {
+      els.push(btn('Send to client', 'brief_send', v, { style: 'primary', confirm: confirmDialog(
+        'Send this to the client?',
+        `This posts the brief for *${prettyDate(date)}* to ${acct.brief_channel ? `<#${acct.brief_channel}>` : 'the client channel'}, exactly as written above and under your own name. Everyone in that channel sees it.`,
+        'Send it') }));
+    }
+    if (!preview?.daily) { els.push(btn('Edit the wording', 'brief_edit', v)); els.push(btn('Rewrite with AI', 'brief_rewrite', v)); }
+    else els.push(btn(preview.edited ? 'Edit the post (edited)' : 'Edit the post', 'brief_edit_client', v));
+    els.push(btn('Don’t send', 'brief_skip', v, { confirm: confirmDialog(
+      'Don’t send this one?',
+      'This marks the day *handled* without messaging the client, and stops it being carried into later briefs. The numbers stay everywhere else in Locus. Press *Write it again* to change your mind.',
+      'Don’t send it') }));
+    if (!bad) els.push(btn(preview?.daily ? 'Write the Next line in Locus' : 'Open in Locus', 'noop_open', v, { url: LOCUS_BRIEF(acct.act_id, date) }));
+  } else if (status === 'handled') {
+    // Nothing to send and nothing to skip. The team still reads it, so the
+    // two buttons that change the words stay.
+    if (bad) els.push(btn('Fix the numbers in Locus', 'noop_open', v, { url: LOCUS_HEALTH(acct.act_id, date) }));
+    // The card now shows the numbers post, so the AI wording buttons only show for an old row with no preview.
+    if (!bad && acct.slack_channel && !acct.brief_channel) els.push(btn('Post to the team channel', 'brief_team', v, { style: 'primary' }));
+    if (!preview?.daily) { els.push(btn('Edit the wording', 'brief_edit', v)); els.push(btn('Rewrite with AI', 'brief_rewrite', v)); }
+    if (!bad) els.push(btn('Open in Locus', 'noop_open', v, { url: LOCUS_BRIEF(acct.act_id, date) }));
+  } else if (status === 'skipped') {
+    els.push(btn('Write it again', 'brief_redraft', v));
+    els.push(btn('Open in Locus', 'noop_open', v, { url: LOCUS_BRIEF(acct.act_id, date) }));
+  } else {
+    if (status === 'sent' && preview?.sent) els.push(btn('Edit the sent post', 'brief_edit_sent', v));
+    els.push(btn('Open in Locus', 'noop_open', v, { url: LOCUS_BRIEF(acct.act_id, date) }));
+  }
+  blocks.push({ type: 'actions', elements: els });
+
+  const fallback = status === 'sent' ? `Sent to the client - ${acct.name}, ${prettyDate(date)}`
+    : status === 'skipped' ? `Not sending - ${acct.name}, ${prettyDate(date)}`
+    : status === 'handled' ? `Daily Update - ${acct.name}, ${prettyDate(date)} (internal only)`
+      : `Draft - ${acct.name}, ${prettyDate(date)} (not sent to the client yet)`;
+  return { text: fallback, blocks };
+}
+
+/** THE REPORT CARD. Same rules as the brief card; the difference is that the
+ *  client receives a headline plus their archive link rather than the summary
+ *  itself, so the card says so instead of pretending the text is the message. */
+async function reportCard(env, acct, row, banner) {
+  const data = safeJson(row?.data_json, null);
+  /* Two links in the text itself, not only as buttons: buttons do not show in
+     notification previews or in some mobile views, and Cole read the notice
+     as having no link at all (2026-09-14). The client link is the same archive
+     link the client is sent; before the first send it opens empty. */
+  const locusUrl = LOCUS_REPORTS(acct.act_id);
+  const clientUrl = `${DASHBOARD_URL}?reports=${await reportToken(env, acct.act_id)}`;
+  const label = row.period === 'weekly' ? 'Weekly' : 'Monthly';
+  const range = `${prettyDate(row.period_start)} \u2192 ${prettyDate(row.period_end)}`;
+  const v = JSON.stringify({ a: acct.act_id, p: row.period, s: row.period_start });
+  const blocks = [];
+  // Same rule as briefCard: a draft for an internal-only brand is handled.
+  const handled = row.status === 'handled' || (row.status !== 'sent' && internalOnly(acct));
+
+  const head = row.status === 'sent'
+    ? `:white_check_mark: *${label} report sent to the client - ${acct.name}* (${range})`
+    : handled
+      ? `:white_check_mark: *${label} report - ${acct.name}* (${range})  \u00b7  _internal only; no client channel, so nothing goes out_`
+      : `:clipboard: *${label} report drafted - ${acct.name}* (${range})  \u00b7  _nothing sent yet_`;
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: head } });
+  if (banner) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: banner } });
+  /* 2026-10-19: the card carries the client post exactly as Send will post it (clientReportText), so a person reads what
+     the client reads, This week included once the Monday call is confirmed. */
+  if (data) blocks.push({ type: 'section', text: { type: 'mrkdwn', text: await clientReportText(env, acct, row, data).catch(() => reportHeadline(data)) } });
+
+  /* THE SUMMARY DELIBERATELY DOES NOT GO IN THE MESSAGE, and this is the one
+     place the report and the Daily Brief differ on purpose.
+
+     The brief IS its text - what is in Slack is exactly what the client
+     receives, so putting it in the message is putting the deliverable in front
+     of the team (Cole, 2026-08-28). A report is NOT its text. The deliverable
+     is the rendered page in Locus: the waterfall, the daily chart, the creative
+     cards, the channel tables. The summary is one component of it.
+
+     Pasting 300 words of raw summary into the channel therefore did not show
+     the report - it showed a fragment of it, unformatted, and buried the
+     headline that the notice exists to deliver. Cole, 2026-09-07, on the first
+     Monday it ran: "they look like shit, they don't even look like our standard
+     reporting template". He is right, and this is a straight revert to the
+     compact notice - headline, link, done - with the buttons kept, which were
+     the actual point of the change. */
+  const notes = [handled
+    ? `<${locusUrl}|Open the full report in Locus>. Nothing is sent for this brand - it is handled the moment it is written.`
+    : `<${locusUrl}|Open the full report in Locus>  ·  <${clientUrl}|What the client sees>. The client receives the text above, nothing else.`];
+  if (row.status === 'sent' && row.sent_channel) notes.push(`Posted to <#${row.sent_channel}>${row.sent_at ? ` at ${shortTime(row.sent_at)} Central` : ''}. A sent report is frozen.`);
+  if (row.steer && row.status !== 'sent') notes.push(`Last rewrite was steered: \u201c${String(row.steer).slice(0, 160)}\u201d`);
+  if (data?.missing_days) notes.push(`${data.missing_days} day(s) in this period had no Triple Whale data.`);
+  if (!row.summary) notes.push(handled ? ':warning: No summary was written - rewrite it.' : ':warning: No summary was written - rewrite it before sending.');
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: notes.join('  \u00b7  ') }] });
+
+  const els = [];
+  if (row.status !== 'sent') {
+    if (!handled) {
+      els.push(btn('Send to client', 'report_send', v, { style: 'primary', confirm: confirmDialog(
+        'Send this report to the client?',
+        `This posts the ${row.period} report (*${range}*) and its link to ${acct.brief_channel ? `<#${acct.brief_channel}>` : 'the client channel'} under your own name, and *freezes the report permanently*.`,
+        'Send it') }));
+    } else if (acct.slack_channel && !acct.brief_channel) els.push(btn('Post to the team channel', 'report_team', v, { style: 'primary' }));
+    els.push(btn('Edit the summary', 'report_edit', v));
+    els.push(btn('Rewrite with AI', 'report_rewrite', v));
+  }
+  els.push(btn('Open in Locus', 'noop_open', v, { url: LOCUS_REPORTS(acct.act_id) }));
+  blocks.push({ type: 'actions', elements: els });
+
+  return { text: `${label} report ${row.status === 'sent' ? 'sent' : handled ? 'ready (internal only)' : 'drafted'} - ${acct.name} (${range})`, blocks };
+}
+
+/* ---- Keep the card in step with the row, whichever surface moved it ---- */
+async function slackSyncBrief(env, acct, date, banner) {
+  const row = await env.DB.prepare(`SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2`)
+    .bind(acct.act_id, date).first().catch(() => null);
+  if (!row?.slack_ts || !row?.slack_channel) return;
+  const card = briefCard(acct, date, row, banner, await clientPreviewFor(env, acct, date).catch(() => null));
+  await slackUpdate(env, row.slack_channel, row.slack_ts, card.text, card.blocks);
+}
+/** What the client channel would get for this day: the six-line daily and its thread, from stored numbers (one
+ *  briefData read, no model). Internal-only brands get the same shape; nothing is sent for them. */
+async function clientPreviewFor(env, acct, date) {
+  // An internal-only brand (Lucky) gets the same post shape too (2026-10-21, Cole: "why does Lucky's look so different?").
+  const full = await briefData(env, acct, date);
+  const [sent, mine] = await Promise.all([clientPostOf(env, acct.act_id, date), clientDraftOf(env, acct.act_id, date)]);
+  const built = await clientDailyFor(env, acct, date, null, full);
+  // The built text is kept so "Edit the post" can open with it inside Slack's 3 seconds.
+  await putSetting(env, `clientBuilt:${acct.act_id}:${date}`, built).catch(() => {});
+  return { daily: mine || built, edited: !!mine, thread: clientDailyThreadFor(acct, date, full),
+    sent: sent?.ts ? sent.text : null };
+}
+
+/* A HAND-EDITED CLIENT POST, BEFORE IT IS SENT (2026-10-21, Cole: "give me the ability to edit it").
+   settings clientDraft:<act>:<date> holds the person's text; sendBrief posts it instead of the built daily
+   (the thread under it stays the numbers). Clearing the text goes back to the built version. */
+const clientDraftOf = async (env, act, date) => (await getSetting(env, `clientDraft:${act}:${date}`).catch(() => null)) || null;
+async function setClientDraft(env, acct, date, text) {
+  const t = String(text || '').trim();
+  if (t) await putSetting(env, `clientDraft:${acct.act_id}:${date}`, t);
+  else await env.DB.prepare(`DELETE FROM settings WHERE key = ?1`).bind(`clientDraft:${acct.act_id}:${date}`).run();
+  await slackSyncBrief(env, acct, date).catch(() => {});
+  return { ok: true, edited: !!t };
+}
+
+/* THE SENT CLIENT POST, EDITABLE (2026-10-21, Cole: "why can't I update this message from directly within Slack?").
+   The client daily posts as Cole, and Slack lets only the author's token edit a message, so nobody can fix it from the
+   Slack UI and the bot cannot either. sendBrief now keeps where it went (settings clientPost:<act>:<date> = {channel,
+   ts, text}); "Edit the sent post" on the card and in Locus rewrites that exact message with the same user token.
+   Posts sent before this have no record and can only be edited by hand. */
+const clientPostKey = (act, date) => `clientPost:${act}:${date}`;
+async function clientPostOf(env, act, date) {
+  return safeJson(await getSetting(env, clientPostKey(act, date)).catch(() => null), null);
+}
+async function keepClientPost(env, act, date, channel, ts, text) {
+  if (ts) await putSetting(env, clientPostKey(act, date), JSON.stringify({ channel, ts, text })).catch(() => {});
+}
+async function editClientPost(env, acct, date, text) {
+  const ref = await clientPostOf(env, acct.act_id, date);
+  if (!ref?.ts) return { error: 'This post went out before Locus kept a link to it, so it can only be edited in Slack by hand.' };
+  if (!env.SLACK_USER_TOKEN) return { error: 'No Slack user token is set, so the post cannot be edited as you.' };
+  const u = await xfetch('https://slack.com/api/chat.update', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.SLACK_USER_TOKEN}`, 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ channel: ref.channel, ts: ref.ts, text }),
+  }).then(r => r.json()).catch(() => ({}));
+  if (!u.ok) return { error: `Slack: ${u.error || 'no answer'}` };
+  await putSetting(env, clientPostKey(acct.act_id, date), JSON.stringify({ ...ref, text, edited_at: new Date().toISOString() }));
+  await slackSyncBrief(env, acct, date).catch(() => {});
+  return { ok: true, ts: ref.ts };
+}
+async function slackSyncReport(env, acct, period, start, banner) {
+  const row = await env.DB.prepare(
+    `SELECT * FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+  ).bind(acct.act_id, period, start).first().catch(() => null);
+  if (!row?.slack_ts || !row?.slack_channel) return;
+  const card = await reportCard(env, acct, row, banner);
+  await slackUpdate(env, row.slack_channel, row.slack_ts, card.text, card.blocks);
+}
+
+/* ADOPTING A CARD THAT PREDATES THE BUTTONS.
+   Every draft posted before this shipped is a plain-text notice with no stored
+   `slack_ts`, so nothing knows which message to rewrite. Rather than posting a
+   second copy underneath it, look it up: the old notice always opened with
+   ":memo: *Draft - <brand>, <pretty date>*", which is specific enough to match
+   on and rare enough not to collide. Needs channels:history / groups:history;
+   returns null (not an error) without them, and the caller posts fresh. */
+async function findDraftMessage(env, acct, date) {
+  const ch = acct.slack_channel;
+  if (!ch) return null;
+  const r = await slackApi(env, 'conversations.history', { channel: ch, limit: 100 });
+  if (!r.ok) return { error: r.error || 'could not read the channel' };
+  /* THE ONE EM DASH LEFT IN THE CODEBASE, and it has to stay. This needle is
+     matched against the text of Slack messages ALREADY POSTED, which were
+     written with an em dash. Sweeping it to a hyphen would leave the function
+     silently matching nothing - it would not error, it would just stop finding
+     the old notices it exists to adopt. Every dash a human will READ is gone;
+     this one is a lookup key for history, not copy. */
+  const needle = `*Draft — ${acct.name}, ${prettyDate(date)}*`;
+  const hit = (r.messages || []).find(m => (m.text || '').includes(needle));
+  return hit ? { ts: hit.ts, channel: ch } : null;
+}
+
+/* ---------------- Modals ---------------- */
+
+const EDIT_TEXT_CAP = 2900;   // Slack's plain_text_input tops out at 3000
+
+/* A BRIEF IS ROUTINELY LONGER THAN ONE SLACK TEXT BOX, so Edit used to refuse
+   and send you to Locus - which is the tab-switch this whole feature exists to
+   remove. Bonk's 6 September draft is 3,167 characters against a 3,000 limit.
+   The text is split across as many boxes as it needs, at paragraph breaks, and
+   rejoined on save. `joins` records the exact separator between each pair so
+   the round trip cannot lose or add a character; a single paragraph longer than
+   one box is hard-split and rejoins with nothing between. */
+function splitForEdit(text, cap = EDIT_TEXT_CAP) {
+  const parts = [], joins = [];
+  let buf = '';
+  for (const para of String(text ?? '').split('\n\n')) {
+    const next = buf ? `${buf}\n\n${para}` : para;
+    if (next.length <= cap) { buf = next; continue; }
+    if (buf) { parts.push(buf); joins.push('\n\n'); buf = ''; }
+    let rest = para;
+    while (rest.length > cap) { parts.push(rest.slice(0, cap)); joins.push(''); rest = rest.slice(cap); }
+    buf = rest;
+  }
+  parts.push(buf);
+  return { parts, joins };
+}
+
+/** Put the boxes back together in order, using the separators we split on. */
+function joinEdit(view, meta) {
+  const joins = Array.isArray(meta?.j) ? meta.j : [];
+  const vals = Object.keys(view?.state?.values || {})
+    .filter(k => /^body\d+$/.test(k))
+    .sort((a, b) => +a.slice(4) - +b.slice(4))
+    .map(k => view.state.values[k]?.v?.value ?? '');
+  return vals.reduce((acc, v, i) => i === 0 ? v : acc + (joins[i - 1] ?? '\n\n') + v, '');
+}
+
+function editModal({ callback_id, meta, title, label, hint, value, submit = 'Save' }) {
+  const { parts, joins } = splitForEdit(value);
+  const many = parts.length > 1;
+  return {
+    type: 'modal', callback_id,
+    private_metadata: JSON.stringify({ ...meta, j: joins }),
+    title: { type: 'plain_text', text: title },
+    submit: { type: 'plain_text', text: submit },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: parts.map((chunk, i) => ({
+      type: 'input', block_id: `body${i}`,
+      label: { type: 'plain_text', text: many ? `${label} - ${i + 1}/${parts.length}` : label },
+      ...(i === 0 && many ? { hint: { type: 'plain_text', text: 'Too long for one box - split here, joined back exactly on save.' } } : {}),
+      ...(i > 0 ? { hint: { type: 'plain_text', text: 'Carries on from above.' } } : {}),
+      element: { type: 'plain_text_input', action_id: 'v', multiline: true, max_length: 3000,
+        initial_value: chunk, focus_on_load: i === 0 },
+    })),
+  };
+}
+
+/* THE STEER BOX, AND WHY IT IS OPTIONAL.
+   Cole asked the open question himself: does "rewrite" just rewrite, or does it
+   take a suggestion? Both, in one control. Leave it empty and it is the old
+   behaviour; type a sentence and that sentence outranks the standing prompt.
+   The same box exists on the Rewrite button in Locus, so neither surface can do
+   something the other cannot. */
+function rewriteModal({ callback_id, meta, title, what, current }) {
+  return {
+    type: 'modal', callback_id, private_metadata: JSON.stringify(meta),
+    title: { type: 'plain_text', text: title },
+    submit: { type: 'plain_text', text: 'Rewrite it' },
+    close: { type: 'plain_text', text: 'Cancel' },
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text:
+        `Claude writes ${what} again from the numbers and the Change Log. *Any wording edited on this draft is replaced.* It takes about 20–30 seconds; the message in the channel updates itself when it is done.` } },
+      { type: 'input', block_id: 'steer', optional: true,
+        label: { type: 'plain_text', text: 'Anything you want changed?' },
+        hint: { type: 'plain_text', text: 'Optional - leave it empty for a straight rewrite. It can change emphasis, order, length or tone, but it cannot invent a number.' },
+        element: { type: 'plain_text_input', action_id: 'v', multiline: true, max_length: 1200,
+          initial_value: current ? String(current).slice(0, 1200) : undefined,
+          placeholder: { type: 'plain_text', text: 'e.g. lead with the Google spend, and drop the hedging on Meta' } } },
+    ],
+  };
+}
+
+const modalValue = (view, block) => view?.state?.values?.[block]?.v?.value ?? '';
+
+/* ---------------- The endpoint Slack calls ---------------- */
+
+/* Slack signs every interaction: HMAC of "v0:<timestamp>:<raw body>". Verifying
+   it is what makes this endpoint safe to leave outside the admin gate - without
+   it, anyone who learned the URL could send a client a brief. Fails closed when
+   no signing secret is set. Same shape as the Ledger worker's. */
+async function verifySlackSig(env, ts, rawBody, sig) {
+  if (!env.SLACK_SIGNING_SECRET || !ts || !sig) return false;
+  if (Math.abs(Date.now() / 1000 - +ts) > 300) return false;            // replay guard
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.SLACK_SIGNING_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`v0:${ts}:${rawBody}`));
+  const mine = 'v0=' + [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, '0')).join('');
+  if (mine.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < mine.length; i++) diff |= mine.charCodeAt(i) ^ sig.charCodeAt(i);
+  return diff === 0;
+}
+
+const ACK = () => new Response('', { status: 200 });
+
+/* SLACK GIVES YOU THREE SECONDS. Everything slow - a send, a 30-second Claude
+   rewrite - is acknowledged first and done in waitUntil, with the card redrawn
+   when it lands. The two things that must happen inside the three seconds are
+   the modal opens, because a trigger_id expires. */
+async function handleSlackInteract(request, env, ctx) {
+  const raw = await request.text();
+  const ok = await verifySlackSig(env, request.headers.get('x-slack-request-timestamp'), raw,
+    request.headers.get('x-slack-signature'));
+  if (!ok) return new Response('bad signature', { status: 401 });
+  const form = new URLSearchParams(raw);
+  if (form.get('ssl_check')) return ACK();
+  const payload = safeJson(form.get('payload'), null);
+  if (!payload) return ACK();
+  try {
+    /* New client buttons: "is this their ad account?" here (it needs Meta), the rest in newclient.js. */
+    const nc = payload.type === 'block_actions' ? (payload.actions || []).find(a => /^nc_/.test(a.action_id || '')) : null;
+    if (nc) {
+      if (nc.action_id !== 'nc_meta_yes') return await handleNewClientAction(env, ctx, payload);
+      const v = safeJson(nc.value, {});
+      ctx.waitUntil((async () => {
+        const r = await env.DB.prepare(`SELECT * FROM p_newclient WHERE id = ?1`).bind(String(v.id || '')).first();
+        /* v.act is the META ad account (accounts = Meta accounts); r.act_id is the client's brand. */
+        const a = await env.DB.prepare(`SELECT act_id, name FROM accounts WHERE act_id = ?1`).bind(String(v.act || '')).first();
+        const hasMeta = r?.act_id ? await env.DB.prepare(`SELECT 1 FROM connections WHERE brand_id = ?1 AND kind = 'meta'`).bind(r.act_id).first() : null;
+        const res = !r || !a ? { error: 'That client or ad account is gone.' } : hasMeta ? { error: `${r.name} is already connected.` } : await connectMetaFor(env, r, a);
+        if (payload.response_url) await xfetch(payload.response_url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ replace_original: true, text: res.error ? `Not connected: ${res.error}` : `✓ "${a.name}" connected to ${r.name}.` }) }).catch(() => {});
+      })());
+      return ACK();
+    }
+    /* Monday test calls: the Do it button (asana-brand.js). Acknowledged now, done after. */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => a.action_id === 'tests_do')) {
+      ctx.waitUntil(runMondayPlan(env, payload).catch(() => {}));
+      return ACK();
+    }
+    /* The daily check-in's buttons and forms, and the review post's Approve all / Ask for changes (checkin.js, 2026-10-26). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^ci_/.test(a.action_id || ''))) { await checkinAction(env, ctx, checkinDeps(ctx), payload); return ACK(); }
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^rv_/.test(a.action_id || ''))) { await reviewAction(env, ctx, checkinDeps(ctx), payload); return ACK(); }
+    if (payload.type === 'view_submission' && /^ci_/.test(payload.view?.callback_id || '')) {
+      const errors = checkinErrors(payload);
+      if (errors) return new Response(JSON.stringify({ response_action: 'errors', errors }), { headers: { 'content-type': 'application/json' } });
+      ctx.waitUntil(submitCheckin(env, checkinDeps(ctx), payload).catch(e => console.log('checkin submit: ' + e.message))); return ACK(); }
+    if (payload.type === 'view_submission' && /^rv_/.test(payload.view?.callback_id || '')) { await reviewSubmit(env, ctx, checkinDeps(ctx), payload); return ACK(); }
+    /* Test minimums due off: Take it off / Take all N off under the morning card (minoff.js, 2026-10-15). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^minoff_/.test(a.action_id || '')))
+      return await handleMinOffButton(env, ctx, payload, minOffDeps(), { ACK, xfetch });
+    /* An action item's Done button on its reminder line (actions.js, 2026-10-13). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^act_done/.test(a.action_id || '')))
+      return await handleActionButton(env, ctx, payload, actionDeps(), { ACK, xfetch });
+    /* Locus Social's "Posted it" button on a Notify fallback DM (socialpost.js, 2026-10-19). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^soc_/.test(a.action_id || '')))
+      return await handleSocialButton(env, ctx, payload, socialPostDeps(), { ACK, xfetch });
+    /* Platform status: "Send to all clients" on an #outages card (pulse.js). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => a.action_id === 'pulse_send'))
+      return await pulseButton(env, ctx, payload, { slackApi, ACK });
+    /* The ideas bot's buttons (Creator link, Asana brief, Studio, Redo, Discard...). */
+    if (payload.type === 'block_actions' && (payload.actions || []).some(a => /^idea_/.test(a.action_id || '')))
+      return env.IDEAS_BOT === 'off' ? ACK() : await handleIdeaAction(env, ctx, payload);
+    /* Stop on a Strategist answer that is still working: the loop checks the flag before its next round. */
+    const stopTap = payload.type === 'block_actions' ? (payload.actions || []).find(a => a.action_id === 'ask_stop') : null;
+    if (stopTap) {
+      const run = String(safeJson(stopTap.value, {}).run || '');
+      const cur = safeJson(await getSetting(env, `askRun:${run}`), null);
+      if (run && cur) await putSetting(env, `askRun:${run}`, JSON.stringify({ ...cur, stop: true }));
+      return ACK();
+    }
+    /* An Apply / No thanks tap on one of the Strategist's proposal cards. */
+    const tap = payload.type === 'block_actions' ? (payload.actions || []).find(a => a.action_id === 'ask_apply' || a.action_id === 'ask_cancel') : null;
+    if (tap) {
+      const val = safeJson(tap.value, {});
+      const { engine, h } = strategist();
+      /* 2026-10-15: applied after the ack. A grouped card (Apply all) runs several changes in a row, past Slack's 3 seconds. */
+      const say = body => payload.response_url ? xfetch(payload.response_url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {}) : null;
+      ctx.waitUntil((async () => {
+        /* Only Cole and the team apply a card (slackaccess.js); a guest or an outsider in a shared channel cannot. */
+        if (!val.cancel) {
+          const g = await whoIs(env, accessDeps(), payload.user?.id).catch(() => ({ ok: false }));
+          if (!g.ok || g.role === 'guest') { await slackWhisper(env, payload.channel?.id, payload.user?.id, 'Only the Mobius Digital team can apply this.'); return; }
+        }
+        const many = String(val.askp || '').includes(',') && !val.cancel;
+        if (many) await say({ replace_original: true, text: 'Applying them now...' });
+        const res = await engine.applyProposal(env, String(val.askp || ''), h(), { cancel: !!val.cancel, ctx: { ...askCaller(env, 'Bearer ' + (env.ADMIN_TOKEN || ''), ctx), who: payload.user?.name || payload.user?.username || (payload.user?.id ? `<@${payload.user.id}>` : null), whoId: payload.user?.id || null } }).catch(e => ({ error: String(e.message || e) }));
+        /* A note that carries a Locus or share link (a saved dashboard, a scenario, a Studio batch) gets it as a button too. */
+        const done = res.group ? (res.error ? '⚠️ ' + res.error : res.note) : res.error ? '⚠️ ' + res.error : res.cancelled ? '✓ Left as it was.' : `✓ ${res.note || res.summary || 'Applied.'}`;
+        const link = !res.error && !res.cancelled ? (String(res.note || '').match(/https:\/\/(?:tools\.go-mobius-digital\.com|mobius-[a-z-]+\.mobius-digital\.workers\.dev|next\.frame\.io|f\.io)\/[^\s)]+/) || [])[0]?.replace(/[.,;]+$/, '') : null;
+        await say({ replace_original: true, text: done, ...(link || res.group ? { blocks: [{ type: 'section', text: { type: 'mrkdwn', text: done.slice(0, 2900) } },
+          ...(link ? [{ type: 'actions', elements: [{ type: 'button', action_id: 'noop_open', style: 'primary', text: { type: 'plain_text', text: /\?open=dash/.test(link) ? 'Open the dashboard' : 'Open it' }, url: link }] }] : [])] } : {}) });
+      })());
+      return ACK();
+    }
+    if (payload.type === 'block_actions') return await slackBlockAction(env, ctx, payload);
+    if (payload.type === 'view_submission') return await slackViewSubmit(env, ctx, payload);
+  } catch (e) {
+    // Never 500 at Slack: it renders a red banner over the card and tells the
+    // human nothing useful. Whisper the real reason instead.
+    await slackWhisper(env, payload?.container?.channel_id, payload?.user?.id,
+      `That did not work: ${e.message}`).catch(() => {});
+  }
+  return ACK();
+}
+
+/* A brand by any id it has had: Slack buttons posted before phase 3 carry the old act_ id. */
+const acctById = (env, id) => acctOf(env, id);
+
+async function slackBlockAction(env, ctx, p) {
+  const a = p.actions?.[0] || {};
+  const id = a.action_id || '';
+  if (id === 'noop_open') return ACK();                 // a link button; Slack still asks
+  const meta = safeJson(a.value, {}) || {};
+  const chan = p.container?.channel_id || p.channel?.id || null;
+  const mts = p.container?.message_ts || null;
+  const user = p.user?.id || null;
+  const acct = meta.a ? await acctById(env, meta.a) : null;
+  if (!acct) { ctx.waitUntil(slackWhisper(env, chan, user, 'That brand is no longer in Locus, so this card cannot do anything.')); return ACK(); }
+
+  /* A card posted before the buttons shipped has no pointer stored. Adopt the
+     message we were just clicked from, so every later redraw finds it. */
+  const adopt = id.startsWith('brief_')
+    ? env.DB.prepare(`UPDATE briefs SET slack_ts = COALESCE(slack_ts, ?3), slack_channel = COALESCE(slack_channel, ?4) WHERE act_id = ?1 AND date = ?2`)
+      .bind(acct.act_id, meta.d, mts, chan).run().catch(() => {})
+    : env.DB.prepare(`UPDATE reports SET slack_ts = COALESCE(slack_ts, ?4), slack_channel = COALESCE(slack_channel, ?5) WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`)
+      .bind(acct.act_id, meta.p, meta.s, mts, chan).run().catch(() => {});
+  await adopt;
+
+  /* ---- the two that must open a modal inside three seconds ---- */
+  if (id === 'brief_edit' || id === 'report_edit') {
+    const isBrief = id === 'brief_edit';
+    const row = isBrief
+      ? await env.DB.prepare(`SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, meta.d).first()
+      : await env.DB.prepare(`SELECT * FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`).bind(acct.act_id, meta.p, meta.s).first();
+    const body = isBrief ? row?.text : row?.summary;
+    if (!row || row.status === 'sent') {
+      await slackWhisper(env, chan, user, 'That one has already been sent to the client, so its wording is frozen - it is the record of what they received.');
+      return ACK();
+    }
+    await slackApi(env, 'views.open', { trigger_id: p.trigger_id, view: editModal({
+      callback_id: isBrief ? 'brief_edit_submit' : 'report_edit_submit',
+      meta, title: isBrief ? 'Edit the brief' : 'Edit the summary',
+      label: isBrief ? 'The brief, exactly as the client will read it' : 'The executive summary',
+      hint: '',
+      value: body || '',
+    }) });
+    return ACK();
+  }
+
+  /* The client daily before it is sent: open the text the card shows (the hand edit, else the built daily). */
+  if (id === 'brief_edit_client') {
+    const row = await env.DB.prepare(`SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, meta.d).first();
+    if (row?.status === 'sent') {
+      await slackWhisper(env, chan, user, 'That one was sent already. Use Edit the sent post on the card.');
+      return ACK();
+    }
+    // Nothing kept (a card posted before the text was saved): build it now from stored numbers, no model, well inside 3s.
+    const value = (await clientDraftOf(env, acct.act_id, meta.d)) || (await getSetting(env, `clientBuilt:${acct.act_id}:${meta.d}`))
+      || (await Promise.race([clientPreviewFor(env, acct, meta.d).then(p => p?.daily), new Promise(r => setTimeout(() => r(''), 2000))]).catch(() => '')) || '';
+    await slackApi(env, 'views.open', { trigger_id: p.trigger_id, view: editModal({
+      callback_id: 'brief_edit_client_submit', meta, title: 'Edit the post',
+      label: 'What the client gets, word for word', hint: '', value, submit: 'Save',
+    }) });
+    return ACK();
+  }
+
+  /* The client daily as the client has it. Same gate as Send: it changes what the client reads, under Cole's name. */
+  if (id === 'brief_edit_sent') {
+    if (!(await maySendFromSlack(env, user))) {
+      await slackWhisper(env, chan, user, 'Only Cole can change a post in the client channel, because it is posted under his name.');
+      return ACK();
+    }
+    const ref = await clientPostOf(env, acct.act_id, meta.d);
+    if (!ref?.ts) {
+      await slackWhisper(env, chan, user, 'This post went out before Locus kept a link to it, so it can only be edited in Slack by hand.');
+      return ACK();
+    }
+    await slackApi(env, 'views.open', { trigger_id: p.trigger_id, view: editModal({
+      callback_id: 'brief_edit_sent_submit', meta, title: 'Edit the sent post',
+      label: 'What the client sees in their channel', hint: '', value: ref.text || '', submit: 'Update it',
+    }) });
+    return ACK();
+  }
+
+  if (id === 'brief_rewrite' || id === 'report_rewrite') {
+    const isBrief = id === 'brief_rewrite';
+    const row = isBrief
+      ? await env.DB.prepare(`SELECT status, steer FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, meta.d).first()
+      : await env.DB.prepare(`SELECT status, steer FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`).bind(acct.act_id, meta.p, meta.s).first();
+    if (row?.status === 'sent') {
+      await slackWhisper(env, chan, user, 'That was already sent to the client, so it cannot be rewritten - say so in the channel instead.');
+      return ACK();
+    }
+    await slackApi(env, 'views.open', { trigger_id: p.trigger_id, view: rewriteModal({
+      callback_id: isBrief ? 'brief_rewrite_submit' : 'report_rewrite_submit',
+      meta, title: 'Rewrite with AI',
+      what: isBrief ? `the brief for ${prettyDate(meta.d)}` : 'the summary',
+      current: row?.steer || '',
+    }) });
+    return ACK();
+  }
+
+  /* ---- everything else: ack now, work in the background ---- */
+  if (id === 'brief_send' || id === 'report_send') {
+    if (!(await maySendFromSlack(env, user))) {
+      await slackWhisper(env, chan, user,
+        'Only Cole can send to a client from Slack, because the message goes out under his name. Change that in Locus → Settings → “Who can send to clients from Slack”.');
+      return ACK();
+    }
+    ctx.waitUntil((async () => {
+      if (id === 'brief_send') {
+        await slackSyncBrief(env, acct, meta.d, ':hourglass_flowing_sand: _Sending…_');
+        const r = await sendBrief(env, acct, meta.d, { useStored: true }).catch(e => ({ error: e.message }));
+        await slackSyncBrief(env, acct, meta.d, r.ok ? null : `:warning: *Not sent.* ${r.error || r.skipped}`);
+        if (r.ok) await slackWhisper(env, chan, user, `Sent to <#${r.channel}> ✓`);
+      } else {
+        await slackSyncReport(env, acct, meta.p, meta.s, ':hourglass_flowing_sand: _Sending…_');
+        const r = await sendReport(env, acct, meta.p, meta.s).catch(e => ({ error: e.message }));
+        await slackSyncReport(env, acct, meta.p, meta.s, r.ok ? null : `:warning: *Not sent.* ${r.error}`);
+        if (r.ok) await slackWhisper(env, chan, user, `Sent to <#${r.channel}> ✓`);
+      }
+    })());
+    return ACK();
+  }
+
+  /* An internal-only brand's daily or report, posted to its own channel (postBriefToTeam). Anyone in the channel. */
+  if (id === 'brief_team' || id === 'report_team') {
+    ctx.waitUntil((async () => {
+      const r = id === 'brief_team'
+        ? await postBriefToTeam(env, acct, meta.d).catch(e => ({ error: e.message }))
+        : await postReportToTeam(env, acct, meta.p, meta.s).catch(e => ({ error: e.message }));
+      await slackWhisper(env, chan, user, r.ok ? `Posted to <#${r.channel}> ✓` : `Not posted: ${r.error}`);
+    })());
+    return ACK();
+  }
+
+  if (id === 'brief_skip') {
+    ctx.waitUntil((async () => {
+      const prior = await env.DB.prepare(`SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`)
+        .bind(acct.act_id, meta.d).first().catch(() => null);
+      if (prior?.status === 'sent') { await slackWhisper(env, chan, user, 'That brief already went to the client - it cannot be un-sent.'); return; }
+      const upd = await env.DB.prepare(`UPDATE briefs SET status = 'skipped' WHERE act_id = ?1 AND date = ?2 AND status <> 'sent'`)
+        .bind(acct.act_id, meta.d).run().catch(() => null);
+      if (!upd?.meta?.changes) await upsertBrief(env, acct.act_id, meta.d, 'skipped', null, 'Skipped - deliberately not sent to the client.', undefined);
+      await slackSyncBrief(env, acct, meta.d);
+    })());
+    return ACK();
+  }
+
+  if (id === 'brief_redraft') {
+    ctx.waitUntil((async () => {
+      await slackSyncBrief(env, acct, meta.d, ':hourglass_flowing_sand: _Claude is writing it… (~20s)_');
+      const r = await makeBrief(env, acct, meta.d).catch(e => ({ error: e.message }));
+      if (r.error) { await slackSyncBrief(env, acct, meta.d, `:warning: *Could not write it.* ${r.error}`); return; }
+      await upsertBrief(env, acct.act_id, meta.d, draftStatus(acct), null, r.text, r.data, { health: r.health ?? null, steer: null });
+      await slackSyncBrief(env, acct, meta.d);
+    })());
+    return ACK();
+  }
+
+  return ACK();
+}
+
+async function slackViewSubmit(env, ctx, p) {
+  const cb = p.view?.callback_id || '';
+  const meta = safeJson(p.view?.private_metadata, {}) || {};
+  const user = p.user?.id || null;
+  const acct = meta.a ? await acctById(env, meta.a) : null;
+  if (!acct) return ACK();
+
+  if (cb === 'brief_edit_submit') {
+    const text = joinEdit(p.view, meta);
+    if (!text.trim()) {
+      return new Response(JSON.stringify({ response_action: 'errors', errors: { body0: 'A brief cannot be empty.' } }),
+        { headers: { 'content-type': 'application/json' } });
+    }
+    ctx.waitUntil((async () => {
+      const r = await env.DB.prepare(`UPDATE briefs SET text = ?3 WHERE act_id = ?1 AND date = ?2 AND status IN ('draft','handled')`)
+        .bind(acct.act_id, meta.d, text).run().catch(() => null);
+      if (!r?.meta?.changes) return;                 // sent in the meantime; the card already says so
+      await slackSyncBrief(env, acct, meta.d);
+    })());
+    return ACK();
+  }
+
+  if (cb === 'brief_edit_client_submit') {
+    const text = joinEdit(p.view, meta);
+    // Same text as the built daily = no edit; an empty box goes back to the built daily.
+    const built = await getSetting(env, `clientBuilt:${acct.act_id}:${meta.d}`).catch(() => null);
+    ctx.waitUntil(setClientDraft(env, acct, meta.d, text.trim() === String(built || '').trim() ? '' : text));
+    return ACK();
+  }
+
+  if (cb === 'brief_edit_sent_submit') {
+    const text = joinEdit(p.view, meta);
+    const err = msg => new Response(JSON.stringify({ response_action: 'errors', errors: { body0: msg } }),
+      { headers: { 'content-type': 'application/json' } });
+    if (!text.trim()) return err('The post cannot be empty.');
+    if (!(await maySendFromSlack(env, user))) return err('Only Cole can change a post in the client channel.');
+    const r = await editClientPost(env, acct, meta.d, text);
+    return r.ok ? ACK() : err(r.error);
+  }
+
+  if (cb === 'report_edit_submit') {
+    const summary = joinEdit(p.view, meta);
+    ctx.waitUntil((async () => {
+      await env.DB.prepare(`UPDATE reports SET summary = ?4 WHERE act_id = ?1 AND period = ?2 AND period_start = ?3 AND status IN ('draft','handled')`)
+        .bind(acct.act_id, meta.p, meta.s, summary).run().catch(() => {});
+      await slackSyncReport(env, acct, meta.p, meta.s);
+    })());
+    return ACK();
+  }
+
+  if (cb === 'brief_rewrite_submit') {
+    const steer = modalValue(p.view, 'steer').trim() || null;
+    ctx.waitUntil((async () => {
+      await slackSyncBrief(env, acct, meta.d, `:hourglass_flowing_sand: _Claude is rewriting this… (~20s)_${steer ? `\n_Steered: “${steer.slice(0, 200)}”_` : ''}`);
+      const r = await makeBrief(env, acct, meta.d, { steer }).catch(e => ({ error: e.message }));
+      if (r.error) { await slackSyncBrief(env, acct, meta.d, `:warning: *Could not rewrite it.* ${r.error}`); return; }
+      await upsertBrief(env, acct.act_id, meta.d, draftStatus(acct), null, r.text, r.data, { health: r.health ?? null, steer });
+      await slackSyncBrief(env, acct, meta.d,
+        r.narrative_error ? `:warning: _Numbers only - Claude failed: ${r.narrative_error}_` : null);
+    })());
+    return ACK();
+  }
+
+  if (cb === 'report_rewrite_submit') {
+    const steer = modalValue(p.view, 'steer').trim() || null;
+    ctx.waitUntil((async () => {
+      await slackSyncReport(env, acct, meta.p, meta.s, `:hourglass_flowing_sand: _Claude is rewriting this… (~30s)_${steer ? `\n_Steered: “${steer.slice(0, 200)}”_` : ''}`);
+      try {
+        await makeReport(env, acct, meta.p, meta.s, { force: true, steer });
+        await slackSyncReport(env, acct, meta.p, meta.s);
+      } catch (e) {
+        await slackSyncReport(env, acct, meta.p, meta.s, `:warning: *Could not rewrite it.* ${e.message}`);
+      }
+    })());
+    return ACK();
+  }
+
+  return ACK();
+}
+
+/* THE COLUMNS THE CARDS NEED, ON A DATABASE THAT PREDATES THEM.
+   D1 has no migration runner here, and telling Cole to paste ALTER statements is
+   how a deploy half-lands. This runs once, is guarded by a settings key, and
+   swallows the "duplicate column" error so a re-run is harmless. */
+/* THE MORNING'S DRAFTS SHOULD NOT HAVE TO WAIT FOR TOMORROW.
+   When this deploys, every draft already in a channel is the old plain-text
+   notice. This runs once on the next hourly tick and rewrites each one in
+   place - same text, same figures, buttons added. It renders from the stored
+   row, so Claude is never called and not a word changes; the only edit is the
+   message in Slack. Guarded by a settings key, capped at the last three days,
+   and it never touches a brief already marked sent. */
+const CARD_UPGRADE = '2026-09-07-buttons';
+async function upgradeCardsOnce(env) {
+  if ((await getSetting(env, 'cardUpgrade')) === CARD_UPGRADE) return null;
+  // Written FIRST: a half-finished pass must not run again and post duplicates.
+  await putSetting(env, 'cardUpgrade', CARD_UPGRADE).catch(() => {});
+  const out = [];
+  for (const acct of await listAccounts(env, true)) {
+    const today = localDate(acct.tz);
+    for (let back = 1; back <= 3; back++) {
+      const date = addDays(today, -back);
+      const row = await env.DB.prepare(
+        `SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2 AND status = 'draft' AND slack_ts IS NULL`,
+      ).bind(acct.act_id, date).first().catch(() => null);
+      if (!row) continue;
+      const found = await findDraftMessage(env, acct, date).catch(() => null);
+      if (!found?.ts) { out.push({ name: acct.name, date, skipped: found?.error || 'no message found' }); continue; }
+      const card = briefCard(acct, date, row);
+      const u = await slackUpdate(env, found.channel, found.ts, card.text, card.blocks);
+      if (!u.ok) { out.push({ name: acct.name, date, error: u.error }); continue; }
+      await env.DB.prepare(`UPDATE briefs SET slack_ts = ?3, slack_channel = ?4 WHERE act_id = ?1 AND date = ?2`)
+        .bind(acct.act_id, date, found.ts, found.channel).run().catch(() => {});
+      out.push({ name: acct.name, date, upgraded: true });
+    }
+  }
+  return out;
+}
+
+/* ONE-TIME: the drafts that were already stacked up for internal-only brands.
+   Before 2026-09-10 Lucky Golf and The Golf Sock accumulated 'draft' rows that
+   could never be finished - no client channel, so no send - and each one kept
+   the catch-up carrying its day forward. Mark them handled, then redraw the
+   cards still in Slack so their Send buttons go away. Guarded by a settings
+   key, written first so a half-run cannot repeat. */
+/* ONE-OFF (2026-10-20): the draft cards posted before the card showed the client text get redrawn once, so this
+   morning's six cards in #daily-briefs read as what the client gets instead of the old AI brief. Keyed, so it runs once. */
+const CLIENT_CARDS_UPGRADE = '2026-10-20-client-text';
+async function clientCardsOnce(env) {
+  if ((await getSetting(env, 'clientCardsUpgrade')) === CLIENT_CARDS_UPGRADE) return null;
+  await putSetting(env, 'clientCardsUpgrade', CLIENT_CARDS_UPGRADE).catch(() => {});
+  const out = { cards: 0, errors: [] };
+  for (const acct of (await listAccounts(env, true)).filter(a => !internalOnly(a))) {
+    const { results } = await env.DB.prepare(
+      `SELECT date FROM briefs WHERE act_id = ?1 AND status = 'draft' AND slack_ts IS NOT NULL AND date >= ?2`,
+    ).bind(acct.act_id, addDays(localDate(BRIEF_TZ), -2)).all().catch(() => ({ results: [] }));
+    for (const row of results) {
+      try { await slackSyncBrief(env, acct, row.date); out.cards++; } catch (e) { out.errors.push(`${acct.name} ${row.date}: ${e.message}`); }
+    }
+  }
+  return out;
+}
+const HANDLED_UPGRADE = '2026-09-10-internal-only';
+async function handledOnce(env) {
+  if ((await getSetting(env, 'handledUpgrade')) === HANDLED_UPGRADE) return null;
+  await putSetting(env, 'handledUpgrade', HANDLED_UPGRADE).catch(() => {});
+  const out = { briefs: 0, reports: 0, cards: 0, brands: [] };
+  for (const acct of (await listAccounts(env, true)).filter(internalOnly)) {
+    out.brands.push(acct.name);
+    const b = await env.DB.prepare(`UPDATE briefs SET status = 'handled' WHERE act_id = ?1 AND status = 'draft'`)
+      .bind(acct.act_id).run().catch(() => null);
+    out.briefs += b?.meta?.changes || 0;
+    const r = await env.DB.prepare(`UPDATE reports SET status = 'handled' WHERE act_id = ?1 AND status = 'draft'`)
+      .bind(acct.act_id).run().catch(() => null);
+    out.reports += r?.meta?.changes || 0;
+    const { results: bc } = await env.DB.prepare(
+      `SELECT date FROM briefs WHERE act_id = ?1 AND status = 'handled' AND slack_ts IS NOT NULL ORDER BY date DESC LIMIT 5`,
+    ).bind(acct.act_id).all().catch(() => ({ results: [] }));
+    for (const row of bc) { await slackSyncBrief(env, acct, row.date).catch(() => {}); out.cards++; }
+    const { results: rc } = await env.DB.prepare(
+      `SELECT period, period_start FROM reports WHERE act_id = ?1 AND status = 'handled' AND slack_ts IS NOT NULL ORDER BY period_start DESC LIMIT 4`,
+    ).bind(acct.act_id).all().catch(() => ({ results: [] }));
+    for (const row of rc) { await slackSyncReport(env, acct, row.period, row.period_start).catch(() => {}); out.cards++; }
+  }
+  return out;
+}
+
+const SCHEMA_VERSION = '2026-09-07-slack-cards';
+async function ensureSlackColumns(env) {
+  if ((await getSetting(env, 'schemaVersion')) === SCHEMA_VERSION) return;
+  for (const sql of [
+    `ALTER TABLE briefs ADD COLUMN slack_ts TEXT`,
+    `ALTER TABLE briefs ADD COLUMN slack_channel TEXT`,
+    `ALTER TABLE briefs ADD COLUMN steer TEXT`,
+    `ALTER TABLE reports ADD COLUMN slack_ts TEXT`,
+    `ALTER TABLE reports ADD COLUMN slack_channel TEXT`,
+    `ALTER TABLE reports ADD COLUMN steer TEXT`,
+  ]) await env.DB.prepare(sql).run().catch(() => {});      // already there = fine
+  await putSetting(env, 'schemaVersion', SCHEMA_VERSION).catch(() => {});
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  Delivery alerts - the only scheduled Slack alert left.               */
+/*                                                                      */
+/*  An ad account can stop spending silently: a declined card, a         */
+/*  campaign paused by mistake, ads rejected on policy. Nothing else in  */
+/*  Locus notices, and every hour it goes unseen is spend that never     */
+/*  happened.                                                            */
+/*                                                                      */
+/*  Two checks per account per day, both against the account's OWN       */
+/*  recent normal - never an absolute number:                            */
+/*    · mid-afternoon, on today so far (catches it while it can be fixed)*/
+/*    · next morning, on the completed day (catches what broke overnight)*/
+/*                                                                      */
+/*  This replaced a 03:30 UTC nightly pass, which ran at 10:30pm Central */
+/*  and - because the local day was not over at that hour - reported on  */
+/*  the day BEFORE yesterday. A break on Monday surfaced late on Tuesday.*/
+/* ------------------------------------------------------------------ */
+
+const DELIVERY_FLOOR = 0.4;          // at or below 40% of normal = something is wrong
+const DELIVERY_MIN_SPEND = 50;       // ignore accounts too small to judge
+const DELIVERY_MORNING_HOUR = 8;     // local, reports on yesterday
+const DELIVERY_INTRADAY_HOUR = 14;   // local, reports on today so far
+
+/** Per-account alert bookkeeping, so one problem is one message.
+ *  { act_id: { day: 'YYYY-MM-DD', intra: 'YYYY-MM-DD', alerted: 'YYYY-MM-DD' } }
+ *  `day`/`intra` record that a check RAN (so a missed cron tick still recovers
+ *  later the same day); `alerted` records the DATE a problem was reported about,
+ *  so the morning pass stays quiet about a day the afternoon already flagged. */
+async function deliveryState(env) {
+  return safeJson(await getSetting(env, 'deliveryState'), {});
+}
+
+/** Yesterday against this account's own 7-day median. Pure D1, no Meta call. */
+async function checkCompletedDay(env, a, day) {
+  const { results } = await env.DB.prepare(
+    `SELECT date, SUM(spend) AS spend FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 AND date <= ?3 GROUP BY date ORDER BY date`,
+  ).bind(a.act_id, addDays(day, -7), day).all();
+  const dayRow = results.find(r => r.date === day);
+  const prior = results.filter(r => r.date !== day).map(r => r.spend).sort((x, z) => x - z);
+  if (prior.length < 4) return null;                       // not enough history to judge
+  const med = prior[Math.floor(prior.length / 2)];
+  if (med < DELIVERY_MIN_SPEND) return null;               // tiny spender: too noisy
+
+  /* NO ROW IS NOT ZERO SPEND. Meta has not told us about this day yet, or the
+     sync did not get to this brand. Either way there is nothing to judge, and
+     guessing $0 is how a brand spending $892 got a billing alarm. Say what is
+     actually wrong instead - a stale sync IS a fault, just a different one. */
+  if (!dayRow) {
+    const f = await insightsFreshness(env, a, day);
+    return `🕓 *${a.name}* - no Meta spend data for ${day} yet, so delivery could not be checked.` +
+      (f.latest ? ` The last day on file is ${f.latest}.` : ' There is no spend history at all for this brand.') +
+      ` _This is a sync problem, not necessarily a spend problem - check the account in Ads Manager if it persists past the next sync._`;
+  }
+
+  const spend = dayRow.spend ?? 0;
+  if (spend > med * DELIVERY_FLOOR) return null;
+  return spend === 0
+    ? `🚨 *${a.name}* spent *nothing* yesterday (a normal day is about ${money(med, a.currency)}). Check billing, campaign status and policy.`
+    : `⚠️ *${a.name}* spent ${money(spend, a.currency)} yesterday - ${Math.round((1 - spend / med) * 100)}% below its normal ${money(med, a.currency)}. Something may be paused or throttled.`;
+}
+
+/** Today so far against the shape of a normal day by this hour. One Meta call. */
+async function checkToday(env, a) {
+  let p;
+  try { p = await hourlyPacing(env, a); } catch { return null; }
+  if (!p || !(p.l7_by_now >= DELIVERY_MIN_SPEND / 2)) return null;   // too early / too small to judge
+  if (p.spent > p.l7_by_now * DELIVERY_FLOOR) return null;
+  return p.spent === 0
+    ? `🚨 *${a.name}* has spent *nothing* so far today (normally about ${money(p.l7_by_now, a.currency)} by this hour). Check billing, campaign status and policy.`
+    : `⚠️ *${a.name}* has spent ${money(p.spent, a.currency)} so far today against ${money(p.l7_by_now, a.currency)} on a normal day by now - ${Math.round((1 - p.spent / p.l7_by_now) * 100)}% down. Worth a look in Ads Manager while the day is still live.`;
+}
+
+/** Runs on every hourly tick; each account gates itself on its OWN local clock,
+ *  because the brands are spread across three US timezones and "2pm" has to mean
+ *  2pm where the account is. */
+async function deliveryPass(env) {
+  if (!env.SLACK_BOT_TOKEN) return { skipped: 'no SLACK_BOT_TOKEN secret' };
+  const def = await getSetting(env, 'slackChannel');
+  const state = await deliveryState(env);
+  const byChannel = new Map();
+  let touched = false;
+
+  const deferred = [];
+  for (const a of await listAccounts(env, true)) {
+    if (!a.meta_act) continue;   // no Meta ad account (phase 3): nothing to check delivery on
+    if (await alertsMuted(env, a.act_id)) continue;   // test brand (Golf Sock): never pages Slack
+    /* A brand skipped here is NOT marked as checked (st.day / st.intra stay
+       put), so the next tick re-checks it. That is the whole reason the state
+       flags record "a check ran" rather than "an hour passed". */
+    if (!subCanAfford(costOf('delivery', COST_DELIVERY_BRAND))) { deferred.push(a.name); continue; }
+    const today = localDate(a.tz);
+    const hour = Math.floor(localHourFrac(a.tz));
+    const yesterday = addDays(today, -1);
+    const st = state[a.act_id] || (state[a.act_id] = {});
+    const queue = line => {
+      const ch = internalChannel(a) || def;   // never a brand's client channel (one-channel brands, 2026-10-19)
+      if (!ch || !line) return;
+      if (!byChannel.has(ch)) byChannel.set(ch, []);
+      byChannel.get(ch).push(line);
+    };
+
+    // Same day, mid-afternoon - the one that can still save the day's spend.
+    if (hour >= DELIVERY_INTRADAY_HOUR && st.intra !== today) {
+      st.intra = today; touched = true;
+      const line = await checkToday(env, a).catch(() => null);
+      if (line && st.alerted !== today) { st.alerted = today; queue(line); }
+    }
+    // Next morning, on the completed day. Skipped when the afternoon pass
+    // already reported that same day - one problem, one message.
+    if (hour >= DELIVERY_MORNING_HOUR && st.day !== today) {
+      st.day = today; touched = true;
+      if (st.alerted !== yesterday) {
+        const line = await checkCompletedDay(env, a, yesterday).catch(() => null);
+        if (line) { st.alerted = yesterday; queue(line); }
+      }
+    }
+  }
+
+  if (touched) await putSetting(env, 'deliveryState', JSON.stringify(state)).catch(() => {});
+  if (!byChannel.size) return { ok: true, alerts: 0, ...(deferred.length ? { deferred } : {}) };
+  let alerts = 0;
+  const results = [];
+  for (const [ch, lines] of byChannel) {
+    alerts += lines.length;
+    try {
+      await slackPost(env, ch, `Delivery check: ${lines.length} account${lines.length > 1 ? 's' : ''} spending well below normal`, [
+        { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n\n') } },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: `<${DASHBOARD_URL}?open=meta|Open Locus → Meta> · compared with this account's own last 7 days, never a fixed target` }] },
+      ]);
+      results.push({ channel: ch, sent: lines.length });
+    } catch (e) { results.push({ channel: ch, error: e.message }); }
+  }
+  return { ok: true, alerts, channels: results };
+}
+
+/* ------------------------------------------------------------------ */
+/*  HTTP                                                               */
+/* ------------------------------------------------------------------ */
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, PUT, POST, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+};
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+  status, headers: { 'Content-Type': 'application/json', ...CORS },
+});
+
+async function sha256hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* ---- Google sign-in + shared sessions (used by /hq and every tool) ---- */
+
+const ALLOWED_DOMAIN = 'go-mobius-digital.com';
+const SESSION_DAYS = 30;
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+/* No 'dev' fallback (2026-10-09): with neither secret set, nothing verifies (see profit worker.js for why). */
+async function hmacKey(env) {
+  if (!(env.SESSION_SECRET || env.ADMIN_TOKEN)) throw new Error('SESSION_SECRET is not set');
+  return crypto.subtle.importKey('raw', new TextEncoder().encode(env.SESSION_SECRET || env.ADMIN_TOKEN),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+}
+
+/** Session token: base64url(email|exp) + '.' + HMAC. Verified by every tool worker sharing SESSION_SECRET. */
+async function mintSession(env, email) {
+  const exp = Date.now() + SESSION_DAYS * 86400e3;
+  const payload = btoa(`${email}|${exp}`).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const sig = b64u(await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode(payload)));
+  return { token: `mds.${payload}.${sig}`, email, exp };
+}
+
+async function verifySession(env, token) {
+  const m = /^mds\.([\w-]+)\.([\w-]+)$/.exec(token || '');
+  if (!m || !(env.SESSION_SECRET || env.ADMIN_TOKEN)) return null;
+  const sig = b64u(await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode(m[1])));
+  if (sig !== m[2]) return null;
+  let email, exp;
+  try { [email, exp] = atob(m[1].replace(/-/g, '+').replace(/_/g, '/')).split('|'); } catch { return null; }
+  if (+exp < Date.now()) return null;
+  return { email, exp: +exp };
+}
+
+async function emailAllowed(env, email) {
+  if (!email) return false;
+  if (email.toLowerCase().endsWith('@' + ALLOWED_DOMAIN)) return true;
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'allowedEmails'`).first().catch(() => null);
+  const extra = safeJson(row?.value, []);
+  return extra.map(e => String(e).toLowerCase()).includes(email.toLowerCase());
+}
+
+/** Verify a Google ID token (from Google Identity Services) and mint a session. */
+async function googleLogin(env, credential, invite) {
+  if (!env.GOOGLE_CLIENT_ID || env.GOOGLE_CLIENT_ID.startsWith('PASTE')) {
+    return { error: 'Google sign-in is not configured yet', status: 501 };
+  }
+  const res = await xfetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
+  const info = await res.json().catch(() => ({}));
+  if (!res.ok || info.aud !== env.GOOGLE_CLIENT_ID) return { error: 'Invalid Google token', status: 401 };
+  if (info.email_verified !== 'true' && info.email_verified !== true) return { error: 'Email not verified', status: 401 };
+  /* A client login (clients.js) signs in the same way; brandguard.js decides what it may open. */
+  const team = await emailAllowed(env, info.email);
+  /* An invite link (?invite=) lets the person use ANY Google account: that email takes over the invited login. */
+  const client = !team && ((invite && await claimInvite(env, invite, info.email).catch(() => false)) || await isClientEmail(env, info.email));
+  if (!team && !client) return { error: `${info.email} has no Locus login. Ask Mobius Digital to invite this email.`, status: 403 };
+  const s = await mintSession(env, info.email);
+  if (client) await touchClient(env, info.email, 'login').catch(() => {});
+  /* Production v2: the Google photo shows on the person's comments and cards instead of their initial. */
+  if (info.picture) await savePhoto(env, info.email, info.picture).catch(() => {});
+  return { ...s, name: info.name || '', picture: info.picture || '', role: client ? 'client' : 'team' };
+}
+
+/* ---- Roles ----
+   TWO roles and no more: admin, and viewer. `settings.userRoles` maps an email
+   to its role and ANYONE NOT LISTED IS AN ADMIN, which is exactly today's
+   behaviour - so adding this cannot lock anybody out, including whoever forgets
+   they added themselves.
+   A viewer is GET-only. That is the whole rule: they see every screen and can
+   press nothing that leaves the building - no send to client, no plan save, no
+   margin override, no settings, no sync. It reuses the read-only gate the demo
+   account already proved, rather than inventing a second permission model. */
+async function roleFor(env, email) {
+  if (!email) return 'admin';
+  try {
+    const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'userRoles'`).first();
+    const map = safeJson(row?.value, {}) || {};
+    return String(map[String(email).toLowerCase()] || 'admin').toLowerCase() === 'viewer' ? 'viewer' : 'admin';
+  } catch { return 'admin'; }
+}
+
+/** The signed-in email, or null for a password/token session that has none. */
+/* Look now, when something happened (connect.js): Meta = assign the team on what clients shared, then connect a waiting
+   new client's ad account; Google = link GA4 / Search Console, send a typed Google Ads ID's manager request, link an
+   accepted one. 'all' = Cole's Check now. */
+async function connectNow(env, key, brandId) {
+  const out = {};
+  if (key === 'meta' || key === 'all') {
+    out.meta = await partnerSweep(env, idxDeps()).then(r => ({ added: r.added, errors: r.errors })).catch(e => ({ error: e.message }));
+    out.connected = await autoConnectMeta(env).catch(e => ({ error: e.message }));
+  }
+  if (['ga4', 'gsc', 'all'].includes(key)) out.google = await googleMatch(env).then(r => r.matched).catch(e => ({ error: e.message }));
+  if (key === 'google_ads' || key === 'all') {
+    out.ads_sent = await onboardAdsTick(env, googleAdsInvite).catch(e => ({ error: e.message }));
+    out.ads_linked = await connectPendingTick(env).catch(e => ({ error: e.message }));
+  }
+  return out;
+}
+/* The brand behind a connect token, with its internal channel (connect.js tellTeam). */
+async function connectTokenBrand(env, tok) {
+  const t = safeJson((await env.DB.prepare(`SELECT value FROM settings WHERE key = 'connectTokens'`).first())?.value, {});
+  const id = t[tok]; if (!id) return null;
+  return env.DB.prepare(`SELECT act_id, name, slack_channel FROM brand_accounts WHERE act_id = ?1`).bind(id).first();
+}
+async function sessionEmail(env, request) {
+  const auth = request.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return null;
+  const sess = await verifySession(env, auth.slice(7));
+  return sess?.email || null;
+}
+
+async function isAdmin(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return false;
+  const tok = auth.slice(7);
+  if (env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) return true;
+  /* A client login passes ONLY on a route brandguard.js cleared for it (its allowlist). */
+  if (clientScope(request)) return true;
+  const sess = await verifySession(env, tok);
+  if (sess && (await emailAllowed(env, sess.email))) return true;
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'passwordHash'`).first();
+  return !!row?.value && (await sha256hex(tok)) === row.value;
+}
+
+/** Write down what a scheduled tick actually did, including what it could not
+ *  afford. This is the only record anyone has, so it is budgeted for (see
+ *  SUB_RESERVE) and it never throws. */
+async function recordRun(env, key, payload) {
+  const body = JSON.stringify({
+    at: new Date().toISOString(),
+    subrequests: { used: subUsed(), limit: SUB_LIMIT, cost_per_unit: costReport() },
+    ...payload,
+  });
+  await env.DB.prepare(
+    `INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).bind(key, body.slice(0, 60000)).run().catch(() => {});
+}
+
+/* ------------------------------------------------------------------ */
+/*  Keeping the data fresh - spread across the hourly ticks            */
+/* ------------------------------------------------------------------ */
+/* This used to be the whole of nightly(): one 03:30 invocation looping every
+ * brand. On the free plan that got through ONE brand before Cloudflare killed
+ * it, so five of six sat a day stale every single day, and nothing said so - 
+ * the delivery check then read the missing day as "spent nothing" and shouted
+ * about a brand that had spent $892.
+ *
+ * Now: STALEST FIRST, as many as this tick can afford, every hour. Six brands
+ * over 24 ticks means each one is refreshed several times a day and no tick has
+ * to be big. A brand that errors sorts to the front next hour automatically,
+ * because its last_sync_insights did not move - the retry is the ordering, not
+ * a separate mechanism. */
+async function syncPass(env) {
+  if (!subCanAfford(costOf('sync', COST_SYNC_BRAND))) {
+    return { skipped: 'budget spent on higher-priority work this tick' };
+  }
+  /* Phase 3: the Meta half walks the Meta ad accounts (metaSyncRows: act_id = the META id,
+     brand_id = its brand); the Triple Whale half walks brands, once per brand per tick. A brand
+     with no Meta account (Speedin) still gets its Triple Whale sync, ordered by when it last had one. */
+  const brands = await listAccounts(env, true);
+  if (!brands.length) return { skipped: 'no active accounts' };
+  const brandBy = new Map(brands.map(b => [b.act_id, b]));
+  const metaRows = await metaSyncRows(env);
+  const withMeta = new Set(metaRows.map(r => r.brand_id));
+  const noMeta = brands.filter(b => !withMeta.has(b.act_id) && b.tw_shop);
+  const twAt = {};
+  if (noMeta.length) {
+    const { results } = await env.DB.prepare(`SELECT act_id, MAX(synced_at) AS t FROM tw_daily WHERE act_id IN (${noMeta.map((_, i) => `?${i + 1}`).join(',')}) GROUP BY act_id`)
+      .bind(...noMeta.map(b => b.act_id)).all().catch(() => ({ results: [] }));
+    for (const r of results || []) twAt[r.act_id] = r.t;
+  }
+  const units = [...metaRows.map(m => ({ meta: m, brand: brandBy.get(m.brand_id), key: m.last_sync_insights })),
+    ...noMeta.map(b => ({ meta: null, brand: b, key: twAt[b.act_id] }))];
+  // NULL (never synced) sorts first under an empty-string key, which is right:
+  // a brand with no data at all is the most urgent thing on the list.
+  units.sort((x, z) => String(x.key || '').localeCompare(String(z.key || '')));
+
+  // Meta said stop. Asking again on the next tick is how a short limit becomes
+  // a long one, and the D1-backed data is only an hour stale meanwhile.
+  if (await metaBackedOff(env)) return { skipped: 'Meta rate limit - backing off until it clears' };
+  const done = [];
+  const twDone = new Set();
+  for (const u of units) {
+    const name = u.brand?.name || u.meta?.name;
+    if (!subCanAfford(costOf('sync', COST_SYNC_BRAND))) { done.push({ name, deferred: 'out of budget' }); break; }
+    const r = await measured('sync', async () => {
+      // Cheap half only - see syncAccount. Ad-level rides the nightly.
+      const x = u.meta ? await syncAccount(env, u.meta, undefined, { includeAds: false }) : { act_id: u.brand.act_id, name };
+      // Triple Whale rides along with the same brand rather than in its own loop.
+      // Doing all Meta then all TW meant TW was always the half that got cut.
+      if (u.brand && !twDone.has(u.brand.act_id)) {
+        twDone.add(u.brand.act_id);
+        x.tw = await syncTwDaily(env, u.brand, 10).catch(e => ({ error: e.message }));
+      }
+      return x;
+    });
+    done.push(r);
+  }
+  return { synced: done, remaining: subLeft() };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Nightly - only the work that genuinely wants a quiet hour          */
+/* ------------------------------------------------------------------ */
+/* ---- the Strategist (strategist.js, on ../../ask/engine.js) ---- */
+let _strat = null;
+function strategist() {
+  if (!_strat) _strat = buildStrategist(strategistDeps());
+  return _strat;
+}
+let _stratDeps = null;
+function strategistDeps() {
+  if (!_stratDeps) _stratDeps = ({
+    getSetting, putSetting, safeJson, listAccounts, overview, briefData, dataHealth, storePeriod,
+    localDate, addDays, ymdDiff, daysInMonth, briefHour, slack: slackApi,
+    claude: (env, args) => claude(env, args),
+    /* draft_from_thread (2026-10-07): the Strategist hands a media thread to the ideas pipeline,
+       and from then on plain replies in it are the team's, as when the router picks ideas. */
+    closeThread: (env, channel, ts) => closeStrategistThread(env, channel, ts),
+    /* The Viktor-grade pass (2026-10-09, strattools.js): Slack index, Locus routes as Cole, files. */
+    xfetch, mintSession, idx: idxDeps(),
+    ahFetch: (req, env) => AH_APP.fetch(req, env, { waitUntil() {} }),
+    /* Live checks, alerts, scheduled tasks, the Ledger door (alerts.js, checknow.js, 2026-10-09). */
+    auto: autoDeps(),
+  });
+  return _stratDeps;
+}
+/* What checknow.js, alerts.js and the scheduled checks need from here. */
+function autoDeps() {
+  return { getSetting, putSetting, listAccounts, localDate, localHourFrac, addDays, twSummary, twShift, metaAll, pickAction, PURCHASE_TYPES, xfetch,
+    subCanAfford, centralHour, centralDate, slackApi, isAdmin, sessionEmail, goalsFor, daysInMonth, twMetaDaily, mintSession, postDashboard };
+}
+/* What Claude Code's MCP door (mcp.js) needs from here: Locus as Cole (in-process, or PROFIT), Slack, the index. */
+function mcpDeps() {
+  return { mintSession, slackPost, slackApi, listAccounts, getSetting, xfetch, idx: idxDeps(),
+    ahFetch: (req, env) => AH_APP.fetch(req, env, { waitUntil() {} }) };
+}
+/* What the Slack index (slackindex.js) needs from here. */
+function idxDeps() {
+  return { slackApi, getSetting, putSetting, safeJson, xfetch, canAfford: n => subCanAfford(n) };
+}
+/* The daily smoke check (smoke.js, 2026-10-10). `meter` lets it run this worker's own routes in-process:
+   handle() resets SUB_USED and COST_SEEN, so hold() saves both and its restore puts back the saved count plus
+   what the smoke check counted itself. */
+function smokeDeps() {
+  return { getSetting, putSetting, listAccounts, localDate, addDays, centralHour, centralDate, slackApi, isAdmin, xfetch, mintSession, integrationsReport,
+    ahFetch: (req, env) => AH_APP.fetch(req, env, { waitUntil() {} }),
+    meter: { left: subLeft, used: subUsed, spend: subSpend, zero: () => { SUB_USED = 0; },
+      hold: () => { const used = SUB_USED, seen = new Map(COST_SEEN); return extra => { SUB_USED = used + extra; COST_SEEN.clear(); for (const [k, v] of seen) COST_SEEN.set(k, v); }; } } };
+}
+/* What the What-moved post (moved.js) and the scheduled questions (askschedule.js) need from here. */
+/* morning.js: the numbers as the owner over the PROFIT binding, filtered per person with brandsFor. */
+function morningDeps() { return { ...hubDeps(), mintSession, brandsFor, morningPeople, emailAllowed, isClientEmail }; }
+/* meetings.js: Fireflies in, Asana / the weekly report / Requests / Slack out. */
+/* checkin.js: the daily check-in and the review posts. prod = what prodwork's decide needs (the Production route's deps). */
+function checkinDeps(ctx) {
+  const m = meetingDeps();
+  const wait = p => (ctx?.waitUntil ? ctx.waitUntil(p) : p);
+  return { getSetting, putSetting, slackApi, centralDate, centralHour, listBrands: m.listBrands, teamPost: actionDeps().teamPost, xfetch,
+    prod: { ...actionDeps(), waitUntil: wait, moveCard: prodMove, formatOf: prodFormat, readDoc: prodReadDoc, origin: 'https://mobius-account-health.mobius-digital.workers.dev' } };
+}
+function meetingDeps() {
+  return {
+    xfetch, slackPost, slackApi, centralDate, isAdmin, sessionEmail, clientScope, asana, asanaAll,
+    canAfford: n => subCanAfford(n),
+    listBrands: async env => (await listAccounts(env, true)).map(a => ({ act_id: a.act_id, name: a.name, slack_channel: a.slack_channel || null, brief_channel: a.brief_channel || null, review_first: !!a.review_first })),
+    createAsk: (env, act, title, text, who) => createAsk(env, { slackPost }, act, title, text, who),
+    slackSyncReport: async (env, act, start) => { const a = await acctOf(env, act); if (a) await slackSyncReport(env, a, 'weekly', start); },
+    /* The weekly goes to the client when the Monday call is confirmed, for brands that do not review first (2026-10-19). */
+    sendReport: async (env, act, start) => { const a = await acctOf(env, act); if (!a) throw new Error('no such brand'); return sendReport(env, a, 'weekly', start); },
+  };
+}
+/* actions.js: the team's action items; reminders under the brand's morning card (or its internal channel), a DM when it has none. */
+function actionDeps() {
+  const base = { ...meetingDeps(), slackApi, centralHour, centralDate };
+  return { ...base, teamPost: (env, ch, text, blocks, opts) => teamPost(env, base, ch, text, blocks, opts), tagOf: (env, name) => tagOf(env, base, name),
+    cardReaction: (env, ev) => cardReaction(env, base, ev), onProdMoved: (env, id) => cardProdDone(env, base, id) };
+}
+/* todaypost.js: the 8am "Today's calls" post per brand, read from the profit worker as the owner. The morning card
+   carries it since 2026-10-13, so it only runs when the card is switched off. */
+function todayDeps() { return { getSetting, putSetting, listAccounts, centralHour, centralDate, slackPost, mintSession, canAfford: n => subCanAfford(n), cardOn }; }
+/* morningcard.js: the one morning post per brand, its thread, and keeping it up to date. */
+function cardDeps() {
+  const base = { getSetting, putSetting, listAccounts, centralHour, centralDate, slackPost, slackApi, mintSession, canAfford: n => subCanAfford(n),
+    listBrands: async env => (await listAccounts(env, true)).map(a => ({ act_id: a.act_id, name: a.name, slack_channel: a.slack_channel || null })),
+    teamOf: calendarTeam };
+  return { ...base, calendarData, listBoard: (env, d, o) => listBoard(env, base, o),
+    /* The leak finder's list (cached an hour) for the card's one "new leak" line. */
+    leaks: (env, act, o = {}) => leaksFor(env, { getSetting, putSetting, xfetch, mintSession, canAfford: n => subCanAfford(n) }, act, o),
+    leadsYesterday };
+}
+/* The morning card's leads line (Cole, 2026-10-25: "while the campaign's running, talk about the lead campaign and what
+   it produced the previous day"; it replaced a daily scheduled question that wrote a wall of text). Every ACTIVE
+   OUTCOME_LEADS campaign on the brand's Meta accounts, read LIVE for that day: spend and actions in two requests (Meta
+   zeroes spend when one request asks for both). Leads = the first action type present in LEAD_ACTIONS. */
+const LEAD_ACTIONS = ['lead', 'onsite_conversion.lead_grouped', 'offsite_conversion.fb_pixel_lead', 'complete_registration'];
+async function leadsYesterday(env, brandId, date) {
+  const out = [];
+  for (const { act } of await metaActs(env, brandId)) {
+    const camps = (await env.DB.prepare(`SELECT campaign_id, name, daily_budget FROM meta_campaigns WHERE act_id = ?1 AND objective = 'OUTCOME_LEADS' AND status = 'ACTIVE' LIMIT 3`)
+      .bind(act).all().catch(() => ({ results: [] }))).results || [];
+    for (const c of camps) {
+      const time_range = { since: date, until: date };
+      const [m, a] = await Promise.all([
+        meta(env, `${c.campaign_id}/insights`, { fields: 'spend', time_range }),
+        meta(env, `${c.campaign_id}/insights`, { fields: 'actions', time_range }),
+      ]);
+      const acts = a.data?.[0]?.actions || [];
+      const hit = LEAD_ACTIONS.map(t => acts.find(x => x.action_type === t)).find(Boolean);
+      out.push({ id: c.campaign_id, name: c.name, budget: c.daily_budget, spend: +(m.data?.[0]?.spend || 0), leads: hit ? +hit.value || 0 : 0 });
+    }
+  }
+  return out;
+}
+/* minoff.js: the daily "test minimum due off" line under each brand's morning card, and its Take it off buttons.
+   The write is the Locus one (metawrite.js locusWrite kind min_spend, min 0) as the tapper; the synced ad set row
+   drops its minimum like the /api/meta/write route's syncedRow does. */
+function minOffDeps() {
+  const base = { getSetting, putSetting, centralHour, centralDate, slackPost, slackApi };
+  return { ...base, listAccounts, canAfford: n => subCanAfford(n), teamOf: calendarTeam,
+    teamPost: (env, ch, text, blocks, opts) => teamPost(env, base, ch, text, blocks, opts), tagOf: (env, name) => tagOf(env, base, name),
+    dueOff: (env, act) => testMinimumsDue(env, act),
+    slackName: (env, uid) => slackName(env, { slackApi }, uid),
+    write: async (env, b, c) => {
+      const r = await metaLocusWrite(env, { xfetch, listAccounts, getSetting, putSetting }, b, c);
+      if (r.ok && r.level === 'adset' && r.object) await env.DB.prepare(`UPDATE meta_adsets SET min_spend = NULL WHERE adset_id = ?1`).bind(String(r.object)).run().catch(() => {});
+      return r;
+    } };
+}
+/* buyerlist.js: the one Buyer list (Locus page and the one daily Slack post). The ad calls are read from the profit worker
+   as the owner (todaypost.js readToday), the test minimums from minoff.js state or live, the launches from the board. */
+/* trybe.js: the daily Trybe pull, the stale alert in the brand's internal channel, the Trybe tab. */
+function trybeDeps() {
+  return { xfetch, centralDate, centralHour, slackPost, canAfford: n => subCanAfford(n),
+    listBrands: async env => (await listAccounts(env, true)).map(a => ({ act_id: a.act_id, name: a.name, slack_channel: a.slack_channel || null, brief_channel: a.brief_channel || null })) };
+}
+function buyerDeps() {
+  const base = { getSetting, putSetting, centralHour, centralDate, slackPost, slackApi };
+  return { ...base, listAccounts, mintSession, xfetch, canAfford: n => subCanAfford(n), tagOf: (env, name) => tagOf(env, base, name),
+    listBrands: async env => (await listAccounts(env, true)).map(a => ({ act_id: a.act_id, name: a.name, slack_channel: a.slack_channel || null })),
+    listBoard: (env, o) => listBoard(env, { centralDate, listBrands: async e => (await listAccounts(e, true)).map(a => ({ act_id: a.act_id, name: a.name })) }, o),
+    dueOff: (env, act) => testMinimumsDue(env, act),
+    /* the Launched section's live Meta status (launch.js refreshStatus: one ads read per account) */
+    launchStatus: (env, rows) => launchRefresh(env, { xfetch, listAccounts, getSetting, putSetting }, rows) };
+}
+/* Every way a task gets done (the Locus tick, the Slack Done button, a ✅) ends in markDone; the card strikes its line. */
+onActionDone((env, row) => cardActionDone(env, cardDeps(), row));
+/* Cole's calendar blocks (blocks.js, 2026-10-27): his tasks land in a block day, done ones are ticked there. */
+setBlockFetch((...a) => xfetch(...a));
+onActionPlaced((env, row) => blockActionPlaced(env, row));
+onActionDone((env, row) => blockActionDone(env, row));
+/* Cole deleted a task's event on his calendar = done (blocks.js syncCalendar). */
+setBlockDone((env, id, o) => markDone(env, id, true, o));
+const blockDeps = () => ({ getSetting, putSetting });
+function hubDeps() {
+  return { getSetting, putSetting, listAccounts, localDate, addDays, centralHour, centralDate, slackPost, slackApi,
+    subCanAfford, strategist, isAdmin, sessionEmail, postDashboard, auto: autoDeps() };
+}
+/* The Strategist's night: the checks over what the syncs wrote, the watches,
+   remembered; urgent new findings to the team channel; Monday, the briefing. */
+/* A post under the Strategist's name where the app allows it (chat:write.customize), the app's name where not. */
+async function strategistSay(env, channel, text) {
+  const r = await slackApi(env, 'chat.postMessage', { channel, text, unfurl_links: false, username: 'Locus' });
+  if (r && r.ok === false && /missing_scope|invalid_arg|not_allowed/.test(String(r.error || '')))
+    return slackApi(env, 'chat.postMessage', { channel, text, unfurl_links: false });
+  return r;
+}
+/* An action's Apply is the same request the screen sends, through this
+ * worker's own front door: as the caller from Locus, as the admin from a
+ * Slack tap (the card only ever reaches the team's own channel). */
+function askCaller(env, auth, execCtx) {
+  return { auth, call: async (method, path, body) => {
+    const res = await AH_APP.fetch(new Request('https://ah.internal' + path, { method,
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }), env, execCtx || { waitUntil() {} });
+    const j = await res.json().catch(() => ({}));
+    return res.ok ? j : { error: j.error || `HTTP ${res.status}` };
+  } };
+}
+async function strategistNightly(env) {
+  const { engine, h } = strategist();
+  const r = await engine.nightly(env, h());
+  const channel = await getSetting(env, 'strategistChannel');
+  const urgent = r.fresh.filter(f => f.severity === 'high');
+  if (channel) for (const f of urgent.slice(0, 3))
+    await strategistSay(env, channel, `*${f.title}*\n${f.detail || ''}`).catch(() => {});
+  return { found: r.found, fresh: r.fresh.length, urgent: urgent.length };
+}
+async function strategistBriefing(env, force = false) {
+  const { engine, h } = strategist();
+  const text = await engine.briefing(env, h(), { force });
+  const channel = await getSetting(env, 'strategistChannel');
+  if (text && channel) await strategistSay(env, channel, `*Monday briefing*\n\n${text}`).catch(() => {});
+  return text;
+}
+
+/* An @-mention in a brand's INTERNAL channel, or a DM. The client channel is
+   never a door: the numbers here are the team's. Slack retries anything not
+   acknowledged in three seconds, so the answer runs after the ack and each
+   message is claimed once. */
+async function handleSlackEvent(request, env, ctx) {
+  const raw = await request.text();
+  const body = safeJson(raw, null);
+  if (body?.type === 'url_verification') return json({ challenge: body.challenge });
+  const ok = await verifySlackSig(env, request.headers.get('x-slack-request-timestamp'), raw, request.headers.get('x-slack-signature'));
+  if (!ok) return new Response('bad signature', { status: 401 });
+  let ev = body?.event;
+  /* The Slack index (slackindex.js, 2026-10-09): every message in a brand's internal or client channel is
+     written down as it arrives, before any routing, so the Strategist knows what was said. Reading only:
+     nothing below ever answers in a client channel. */
+  if (body?.type === 'event_callback' && ev?.type === 'message') ctx.waitUntil(indexEvent(env, idxDeps(), ev).catch(e => console.log('slack index: ' + e.message)));
+  /* Someone joined a new client's channel: welcome them a few seconds later (newclient.js). */
+  if (body?.type === 'event_callback' && ev?.type === 'member_joined_channel') {
+    /* One minute later (Cole), on the queue: waitUntil would be cut off long before that. */
+    const job = { kind: 'welcome', channel: ev.channel };
+    ctx.waitUntil((env.IDEA_Q ? env.IDEA_Q.send(job, { delaySeconds: 60 }) : new Promise(r => setTimeout(r, 8000)).then(() => welcomeOnJoinByChannel(env, ev.channel))).catch(e => console.log('welcome on join: ' + e.message)));
+    return ACK();
+  }
+  /* A ✅ on an action item's reminder line marks every item in it done (actions.js, 2026-10-13). Other reactions are ignored. */
+  if (body?.type === 'event_callback' && ev?.type === 'reaction_added') {
+    ctx.waitUntil(handleReaction(env, actionDeps(), ev).catch(e => console.log('action reaction: ' + e.message)));
+    return ACK();
+  }
+  /* A message that uploads a clip or image arrives with subtype file_share; the ideas bot wants those,
+     and so does an open Strategist thread (Ahsan's untagged "Approve." with screenshots was dropped
+     here on 2026-10-06 because only app_mention passed). */
+  const okSubtype = !ev?.subtype || /^(file_share|thread_broadcast)$/.test(ev.subtype);
+  if (body?.type !== 'event_callback' || !ev || ev.bot_id || !okSubtype) return ACK();
+  const dm = ev.channel_type === 'im';
+  /* A group DM (Cole + Noma + the app, 2026-10-14) is gated like a DM (who is asking) but answers like a
+     channel: only when tagged, or a reply in a thread it already answered, never every message. */
+  /* An app_mention carries no channel_type, so a mention in a group DM is looked up (cached). */
+  const group = ev.channel_type === 'mpim' || (!ev.channel_type && !dm && await isGroupDm(env, ev.channel));
+  /* A mention inside a channel thread arrives TWICE: as app_mention and as a plain message whose
+     text carries <@bot>. Both count as a mention; the claim below keeps one. */
+  const botId = body?.authorizations?.[0]?.user_id || null;
+  const mentioned = ev.type === 'app_mention' || (!!botId && String(ev.text || '').includes(`<@${botId}>`));
+  const inThread = !!ev.thread_ts && ev.thread_ts !== ev.ts;
+  if (!dm && !mentioned) {
+    /* A plain reply in a thread. Cole (2026-10-05): "if I reply in a thread to the Strategist I
+       shouldn't have to mention it again." It answers when the thread is OPEN: the Strategist
+       was mentioned in it before, or it started the thread itself. Every other thread in the
+       channel is the team's own, and a reply there never reaches a model. Decided BEFORE
+       claiming the message, so a bowed-out plain copy cannot swallow its app_mention twin. */
+    if (ev.type !== 'message' || !inThread || !ev.user) return ACK();
+    if (!(await strategistThreadOpen(env, ev.channel, ev.thread_ts))) return ACK();
+    /* Cole (2026-10-06): "what if I'm talking to Ahsan in the thread?" A reply that tags a person
+       is theirs (the bot's own tag was handled above, so any tag left is a human). Anything else
+       is read once by a small model that says whether it is for the Strategist. */
+    if (/<@U[A-Z0-9]+/.test(ev.text || '')) return ACK();
+    if (!(await replyForStrategist(env, ev).catch(e => { console.log('reply gate: ' + e.message); return false; }))) { console.log(`reply gate: no for ${ev.channel}:${ev.ts}`); return ACK(); }
+  }
+  /* A bare tag in a thread ("@Locus" and nothing else) means "this, please": it carries the asker's own messages since
+     the Strategist last spoke. It used to reach the engine as an empty question and be dropped without a word (Cole,
+     2026-10-18: "just make the ads", then "@Locus" twice, then "Was this done?" + "@Locus", and nothing ever came back).
+     When one of those messages is already being answered, the tag adds nothing. */
+  if (mentioned && inThread && !plainTag(ev.text) && !(ev.files || []).length) {
+    const prior = await unansweredAsk(env, ev).catch(() => null);
+    if (prior === 'answered') return ACK();
+    ev = { ...ev, text: `${ev.text || ''} ${prior || '(they tagged you with no words: pick the thread up where it stands and do the open ask)'}` };
+  }
+  const claim = await env.DB.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)`)
+    .bind(`askSeen:${ev.channel}:${ev.ts}`, String(Date.now())).run().catch(() => ({ meta: { changes: 1 } }));
+  if (!claim.meta?.changes) return ACK();
+  /* WHO MAY USE LOCUS (slackaccess.js, 2026-10-21): Cole, the people on the Slack access list, and the team. Anyone
+     else gets nothing, and on a tag a private note only they can see. Checked in every channel, DMs included. */
+  const gate = await whoIs(env, accessDeps(), ev.user).catch(e => ({ ok: false, role: 'error', reply: `I could not check who you are (${e.message}). Try again in a minute.` }));
+  if (!gate.ok) {
+    if (dm) ctx.waitUntil(slackApi(env, 'chat.postMessage', { channel: ev.channel, thread_ts: ev.thread_ts || ev.ts, text: gate.reply, username: 'Locus' }).catch(() => {}));
+    else if (mentioned) ctx.waitUntil(slackApi(env, 'chat.postEphemeral', { channel: ev.channel, user: ev.user, thread_ts: ev.thread_ts || undefined, text: gate.reply }).catch(() => {}));
+    return ACK();
+  }
+  let brandRow = null, agencyCh = false, other = null;
+  if (!dm && !group) {
+    /* The brand comes from brands (brands.js), so a brand with no Meta account (Speedin) is still a
+       brand. brand_accounts is the fallback (an active or demo brand's internal channel). */
+    const b = await brandByChannel(env, ev.channel).catch(() => null);
+    brandRow = b ? { act_id: b.id, name: b.name, brand: b }
+      : await env.DB.prepare(`SELECT act_id, name FROM brand_accounts WHERE slack_channel = ?1 LIMIT 1`).bind(ev.channel).first();
+    /* The agency Strategist channel (settings.strategistChannel, #locus-alerts since 2026-10-10) answers like a DM:
+       any brand, named in the words. Any other channel the app is in (a shared channel with a partner agency, a
+       client channel, a project channel) answers too, unless Agency settings turned Locus off there. */
+    if (!brandRow && !(agencyCh = ev.channel === await getSetting(env, 'strategistChannel').catch(() => null))) {
+      if (gate.access.channels[ev.channel]?.off) return ACK();
+      const info = await channelInfo(env, accessDeps(), ev.channel).catch(() => ({ name: '', shared: false }));
+      const { results: brands } = await env.DB.prepare(`SELECT id, name FROM brands WHERE status IN ('active', 'demo')`).all().catch(() => ({ results: [] }));
+      other = { name: info.name, shared: info.shared, brand: await brandForChannel(env, gate.access, ev.channel, info.name, brands || []) };
+    }
+  }
+  /* A person limited to some brands (a teammate in userBrands, or a guest) never gets another brand's channel. */
+  const chanBrand = brandRow?.act_id || other?.brand?.id || null;
+  if (gate.brands && chanBrand && !gate.brands.includes(chanBrand)) {
+    if (mentioned) ctx.waitUntil(slackApi(env, 'chat.postEphemeral', { channel: ev.channel, user: ev.user, text: 'You do not have Locus access for this brand. Ask Cole if you need it.' }).catch(() => {}));
+    return ACK();
+  }
+  const rule = await accessRule(env, gate);
+  const asker = `Asked by ${gate.name}${gate.role === 'guest' ? ', a person OUTSIDE Mobius Digital whom Cole gave read-only access: answer and analyze, never change anything, never offer to change anything, and never share internal costs, margins, other brands or the team\'s private notes' : ''}.`;
+  /* DMs to the app come HERE since 2026-10-09 (slack-router sends every DM to Locus; they went to the Ledger).
+     The brand comes from the words; the Ledger is one tool away (ask_ledger, Cole only). */
+  let dmScreen = null;
+  if (dm || group || agencyCh) {
+    dmScreen = { dm: true, note: `This is a direct message from ${gate.name}${gate.email ? ` (${gate.email})` : ''} to you, the Strategist. There is no channel brand: work out the brand from their words and the conversation; when it matters and is unclear, ask which brand in one line. Questions about Mobius Digital's OWN money (the agency's income, expenses, receipts, bills, its P&L, taxes, the bank) go to ask_ledger, which only works for Cole.${rule}`
+      + (agencyCh ? " This is the agency Strategist channel (Cole's private channel, where alerts land): any brand, named in the words." : '')
+      + (group ? ' This is a GROUP DM: other teammates read this thread and may ask you follow-ups. Answer whoever tagged you, by name; talk to the people the asker names.' : '') };
+  }
+  /* The channel IS the brand: a question in #lucky-ads is about Lucky Golf unless it names another
+     brand. Without this the Strategist asked "which brand?" in Lucky's own channel (2026-10-04). */
+  const outsiders = other?.shared ? ' People OUTSIDE Mobius Digital (the client, a partner agency) are in this channel and read every word you post: write for them too. Never mention other brands, the agency\'s own money, internal margins or costs unless the asker asked for exactly that, and never paste the team\'s private notes.' : '';
+  const screen = brandRow ? { slack_channel_brand: brandRow.name, act_id: brandRow.act_id,
+    note: `This is ${brandRow.name}'s internal team channel. Every question here is about ${brandRow.name} (act_id ${brandRow.act_id}) unless it names another brand. Never ask which brand.${brandRow.brand ? ' ' + connectionNote(brandRow.brand) : ''} ${asker}${rule}` }
+    : other ? { ...(other.brand ? { slack_channel_brand: other.brand.name, act_id: other.brand.id } : {}),
+      note: `This is #${other.name || ev.channel}, a Slack channel that is not a brand's internal team channel.${other.brand ? ` It is about ${other.brand.name} (act_id ${other.brand.id}): every question here is about ${other.brand.name} unless it names another brand. Never ask which brand.` : ' Work out the brand from the channel name and the words; when it matters and is unclear, ask which brand in one line.'}${outsiders} ${asker}${rule}` }
+    : dmScreen;
+  if (screen) screen.guest = gate.role === 'guest';
+  /* /slack/owns says yes for this channel from now on, so plain replies in Locus's threads here reach it too. */
+  if (other) ctx.waitUntil(putSetting(env, `locusChan:${ev.channel}`, '1').catch(() => {}));
+  ctx.waitUntil((async () => {
+    /* 2026-10-09, Cole: "stop having a list of words that make it do X or Y, it should judge from the
+       context". EVERY tag goes to the Strategist. It reads the thread and decides; when the job is
+       watching a reference and drafting from it, it calls draft_from_thread (the ideas pipeline is
+       now a tool, never a second front door). The word router (ideas.js ideaWanted) sent Fela's
+       "update this in the creator link" to the ideas bot, which died as "No draft yet". */
+    if (!dm && screen) {
+      const root = ev.thread_ts || ev.ts;
+      const idea = await env.DB.prepare(`SELECT status FROM idea_thread WHERE id = ?1`).bind(`${ev.channel}:${root}`).first().catch(() => null);
+      if (idea) screen.note += ` This thread already has an Ideas draft card (status ${idea.status || 'drafted'}). If the person wants that draft changed or redone, call draft_from_thread with their change as steer: it revises the card. Anything else, do it yourself.`;
+    }
+    /* From here on the thread is a conversation with the Strategist: replies need no tag. */
+    if (!dm) await openStrategistThread(env, ev.channel, ev.thread_ts || ev.ts).catch(() => {});
+    /* The answer runs on the queue: waitUntil after the Slack ack lives ~30 seconds, and a
+       big-model answer on a long thread runs past that. Cole's "analyze this" under Noma's
+       Ice & Gold write-up (2026-10-08) was killed mid-answer: eyes on, nothing posted. */
+    if (env.IDEA_Q) return env.IDEA_Q.send({ kind: 'strategist', ev, screen });
+    await strategistSlackAnswer(env, ev, screen);
+  })().catch(e => console.log('strategist slack: ' + e.message)));
+  return ACK();
+}
+
+/* Who may use Locus in Slack lives in slackaccess.js (the access list + the team rule); these are its deps. */
+function accessDeps() {
+  return { slack: slackApi, getSetting, putSetting, emailAllowed, userBrands: async e => safeJson(await getSetting(e, 'userBrands'), {}) || {} };
+}
+/* A person limited to some brands gets the ACCESS RULE in the prompt (a team member in userBrands, or a guest). */
+async function accessRule(env, gate) {
+  let only = gate.brands ? new Set(gate.brands) : null;
+  if (!only && gate.role === 'team' && gate.email) only = await brandsFor(env, gate.email).catch(() => null);
+  if (!only) return '';
+  const { results } = await env.DB.prepare(`SELECT id, name FROM brands`).all().catch(() => ({ results: [] }));
+  const names = (await listAccounts(env, false)).filter(a => only.has(a.act_id)).map(a => a.name)
+    .concat((results || []).filter(b => only.has(b.id)).map(b => b.name));
+  return ` ACCESS RULE: this person may only see ${[...new Set(names)].join(', ') || 'one brand'}. Read, mention, compare or total no other brand; if asked about one, say they do not have access.`;
+}
+
+/* Is this channel a group DM? conversations.info once per channel, kept in settings (a channel never changes kind). */
+async function isGroupDm(env, ch) {
+  if (!ch || !/^[A-Z0-9]{5,20}$/.test(ch)) return false;
+  const key = `isMpim:${ch}`;
+  const hit = await getSetting(env, key).catch(() => null);
+  if (hit === '1' || hit === '0') return hit === '1';
+  const r = await slackApi(env, 'conversations.info', { channel: ch }).catch(() => null);
+  if (!r?.ok) return false;
+  const yes = !!r.channel?.is_mpim;
+  await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2`).bind(key, yes ? '1' : '0').run().catch(() => {});
+  return yes;
+}
+
+async function strategistSlackAnswer(env, ev, screen) {
+  const { engine, h } = strategist();
+  const findings = await engine.openFindings(env, h()).catch(() => []);
+  /* call: a plainly asked-for internal setting is applied right away, as the owner (the same as an Apply tap from Slack). */
+  /* who: the asker's Slack name, so a change made straight from a message is logged as theirs in the Change Log. */
+  const u = ev.user ? await slackApi(env, 'users.info', { user: ev.user }).catch(() => null) : null;
+  const who = u?.user?.real_name || u?.user?.profile?.real_name || u?.user?.name || (ev.user ? `<@${ev.user}>` : null);
+  /* A guest (an outside person on the Slack access list) reads only: no call, so nothing applies straight from a message. */
+  return engine.answerSlack(env, ev, h(), { findings: findings.slice(0, 6), ...(screen ? { screen } : {}), who, call: screen?.guest ? null : askCaller(env, 'Bearer ' + (env.ADMIN_TOKEN || ''), null).call });
+}
+
+/* A thread is "open" (plain replies in it go to the reply gate) only once the Strategist was TAGGED there. The mark
+   lives in settings as askThread2:<channel>:<ts> = 1 (2026-11-04: a new key, because askThread: rows also held threads
+   opened just for being Locus's own post, which is no longer a door). An idea thread is marked 0. */
+async function openStrategistThread(env, channel, ts) {
+  if (!channel || !ts) return;
+  await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, '1') ON CONFLICT(key) DO UPDATE SET value = '1'`).bind(`askThread2:${channel}:${ts}`).run();
+}
+/* Does a plain reply in an open thread want the Strategist? Haiku reads the last few messages and
+   the new one. A question or instruction aimed at nobody in particular, or a follow-up to what the
+   Strategist said, is YES; teammates talking to each other (a named person, a plan, a status, a
+   thanks) is NO. Unsure = NO (2026-11-04): a missed question costs a tag, a wrong jump-in costs a deleted message in front of a client. About a tenth of a cent. */
+const GATE_SYSTEM = `You decide whether an AI assistant called the Strategist, which sits in a marketing team's Slack thread, should answer the newest message.
+YES when the message is for the Strategist: a question or an instruction aimed at nobody in particular, a follow-up to something the Strategist said, a correction of it, or an answer to a question the Strategist asked.
+NO when people are talking to each other: the message names or addresses a specific person, answers or reacts to what another PERSON just said ("wym?", "ohh I get it", "so you want..."), or it is a plan, a status update, an agreement, a thanks or small talk between people.
+When the message right before the newest one is from another person (not the assistant), the newest message is almost always a reply to them: NO unless it plainly asks the assistant for something.
+When unsure, NO. Reply with exactly one word: YES or NO.`;
+const plainTag = t => String(t || '').replace(/<@[A-Z0-9]+(?:\|[^>]*)?>/g, '').trim();
+/* The asker's messages in this thread after the Strategist's last post, as one text; 'answered' when one of them was
+   already claimed (it is being or was answered); null when there is none. */
+async function unansweredAsk(env, ev) {
+  const r = await slackApi(env, 'conversations.replies', { channel: ev.channel, ts: ev.thread_ts, limit: 200, latest: ev.ts, inclusive: false });
+  const before = (r?.messages || []).filter(m => Number(m.ts) < Number(ev.ts));
+  const mine = [];
+  for (let i = before.length - 1; i >= 0; i--) {
+    const m = before[i];
+    if (m.bot_id || m.subtype === 'bot_message') break;
+    if (m.user !== ev.user) continue;
+    if (plainTag(m.text) || (m.files || []).length) mine.unshift(m);
+  }
+  if (!mine.length) return null;
+  for (const m of mine) {
+    const seen = await env.DB.prepare(`SELECT 1 AS x FROM settings WHERE key = ?1`).bind(`askSeen:${ev.channel}:${m.ts}`).first().catch(() => null);
+    if (seen) return 'answered';
+  }
+  return mine.map(m => plainTag(m.text)).filter(Boolean).join(' / ');
+}
+async function replyForStrategist(env, ev) {
+  if (!env.ANTHROPIC_API_KEY) return true;
+  const r = await slackApi(env, 'conversations.replies', { channel: ev.channel, ts: ev.thread_ts, limit: 200, latest: ev.ts, inclusive: true });
+  const all = (r?.messages || []).filter(m => m.ts !== ev.ts);
+  /* Only the asker and the Strategist in the thread: there is nobody else it could be for. Cole's "Now I'm just
+     confused, just make the ads" (2026-10-18) was read as NOT for the Strategist in his own one-on-one thread. */
+  if (all.every(m => m.bot_id || m.subtype === 'bot_message' || !m.user || m.user === ev.user)) return true;
+  const msgs = all.slice(-8);
+  const who = m => m.bot_id || m.subtype === 'bot_message' ? `${m.username || m.bot_profile?.name || 'bot'} (assistant)` : m.user === ev.user ? 'the same person who wrote the newest message' : `teammate ${m.user || '?'}`;
+  const text = m => String(m.text || '').replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, '@$1').slice(0, 700);
+  const transcript = msgs.map(m => `${who(m)}: ${text(m)}`).join('\n');
+  const res = await xfetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 5, system: GATE_SYSTEM,
+      messages: [{ role: 'user', content: `THREAD SO FAR:\n${transcript || '(nothing before this)'}\n\nNEWEST MESSAGE: ${text(ev)}\n\nYES or NO?` }] }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.error?.message || `Claude API HTTP ${res.status}`);
+  const a = (j.content || []).map(b => b.text || '').join('').trim().toUpperCase();
+  return /^YES\b/.test(a);
+}
+async function closeStrategistThread(env, channel, ts) {
+  if (!channel || !ts) return;
+  await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, '0') ON CONFLICT(key) DO UPDATE SET value = '0'`).bind(`askThread2:${channel}:${ts}`).run();
+}
+async function strategistThreadOpen(env, channel, ts) {
+  /* An idea thread is never the Strategist's, whatever happened in it before the ideas bot took over. */
+  if (await env.DB.prepare(`SELECT 1 AS x FROM idea_thread WHERE id = ?1`).bind(`${channel}:${ts}`).first().catch(() => null)) return false;
+  /* 2026-11-04, Cole: "I need to tag Locus for it to be in a thread." A thread is open ONLY after someone tagged the
+     Strategist in it (openStrategistThread). A thread Locus started itself (a post, a card, a message sent through it)
+     is not: it answered Cole and Nikolai in #lucky-email under its own post with nobody tagging it. */
+  const have = await env.DB.prepare(`SELECT value FROM settings WHERE key = ?1`).bind(`askThread2:${channel}:${ts}`).first().catch(() => null);
+  return !!have && have.value === '1';
+}
+
+async function nightly(env) {
+  const out = {};
+  /* Cole, 2026-08-30: "I want it to include ALL things I own and future things
+     too" - i.e. never press a Discover button again. New accounts land with
+     active = 0, so this only ever grows the pool you can pick a brand from;
+     nothing starts syncing, reporting or posting to Slack on its own.
+
+     IT NO LONGER RUNS FIRST. Discovery walks 25 ad accounts across every
+     business and is the single most expensive thing here; running it ahead of
+     the syncs meant it spent most of the night's allowance before one brand had
+     been touched, which is exactly how five of six ended up stale. It goes last
+     now, on whatever is left, and simply waits for tomorrow if there is nothing
+     left - a new ad account showing up a day later costs nothing, a brand going
+     a day stale costs a false alarm in a client channel. */
+  const accounts = await listAccounts(env, true);
+
+  /* Triple Whale ad-level attribution. A 7-day window because attribution
+     RESTATES as journeys resolve - yesterday's numbers keep moving for several
+     days, so re-pulling a week and replacing it is what keeps the stored figures
+     converging on the truth rather than freezing a first guess. */
+  const twAttr = [];
+  for (const a of accounts) {
+    if (!subCanAfford(costOf('attr', COST_SYNC_BRAND))) { twAttr.push({ name: a.name, deferred: 'out of budget' }); break; }
+    twAttr.push(await syncTwAttribution(env, a, 7).catch(e => ({ name: a.name, error: e.message })));
+  }
+  /* HISTORY FILLS ITSELF. The rolling 7 days above keeps recent attribution
+     correcting as journeys resolve, but it never reaches backwards - so a
+     90-day window would stay empty forever unless someone remembered to press
+     a button, which is not a system, it is a chore. One older slice per night,
+     walking back to TW_ATTR_HISTORY_DAYS and then stopping. Resumable via
+     `tw_attr_cursor`, the same shape as the ad-insights backfill. */
+  for (const a of accounts) {
+    if (a.tw_attr_done) continue;
+    if (!subCanAfford(costOf('attr', COST_SYNC_BRAND))) { twAttr.push({ name: a.name, backfill: true, deferred: 'out of budget' }); break; }
+    try {
+      const today = localDate(a.tz);
+      const floor = addDays(today, -TW_ATTR_HISTORY_DAYS);
+      const to = addDays(a.tw_attr_cursor || addDays(today, -7), -1);
+      if (to <= floor) {
+        await env.DB.prepare(`UPDATE brands SET tw_attr_done = 1 WHERE id = ?1`).bind(a.act_id).run();
+        continue;
+      }
+      const from = addDays(to, -14) < floor ? floor : addDays(to, -14);
+      const r = await syncTwAttribution(env, a, 0, { from, to });
+      await env.DB.prepare(`UPDATE brands SET tw_attr_cursor = ?2 WHERE id = ?1`).bind(a.act_id, from).run();
+      twAttr.push({ ...r, backfill: true });
+    } catch (e) { twAttr.push({ name: a.name, backfill: true, error: e.message }); }
+  }
+  out.twAttr = twAttr;
+
+  /* Customer history: one older 14-day slice of orders per brand per night until 400
+     days are in (see backfillTwOrders). Cheap: a few pages and a dozen writes. */
+  const twOrders = [];
+  for (const a of accounts) {
+    if (!subCanAfford(costOf('attr', COST_SYNC_BRAND))) { twOrders.push({ name: a.name, deferred: 'out of budget' }); break; }
+    twOrders.push(await backfillTwOrders(env, a, 1).catch(e => ({ name: a.name, error: e.message })));
+    if (subCanAfford(costOf('attr', COST_SYNC_BRAND))) twOrders.push(await backfillTwTouches(env, a, 1).catch(e => ({ name: a.name, touches_error: e.message })));
+  }
+  out.twOrders = twOrders;
+
+  /* The ad-level walk, once a day, here and nowhere else. Rate-limited by Meta
+     rather than by us, so it is also the first thing to yield when Meta is
+     unhappy - `metaBackedOff` short-circuits the whole pass. */
+  const ads = [];
+  /* Meta's own walk: one per Meta ad account (act_id = the Meta id), not per brand. */
+  const metaRows = await metaSyncRows(env);
+  for (const a of metaRows) {
+    if (await metaBackedOff(env)) {
+      // Everyone left in the loop gets queued too, or they would wait a whole day.
+      for (const b of metaRows.slice(metaRows.indexOf(a))) await queueAdRetry(env, b.act_id).catch(() => {});
+      ads.push({ name: a.name, deferred: 'Meta rate limit - queued for the hourly retry' });
+      break;
+    }
+    if (!subCanAfford(costOf('ads', COST_SYNC_BRAND))) { ads.push({ name: a.name, deferred: 'out of budget' }); break; }
+    try { ads.push({ name: a.name, ...(await measured('ads', () => syncAdDaily(env, a, { maxSlices: 8 }))) }); }
+    catch (e) { ads.push({ name: a.name, error: e.message }); await noteMetaError(env, e); }
+  }
+  out.ads = ads;
+
+  // Whatever is left goes to the syncs, then discovery last of all.
+  out.sync = await syncPass(env).catch(e => ({ error: e.message }));
+  out.discover = subCanAfford(costOf('sync', COST_SYNC_BRAND))
+    ? await discoverAccounts(env).catch(e => ({ error: e.message }))
+    : { deferred: 'out of budget - runs tomorrow' };
+
+  // The Strategist looks the book over last, once the syncs have written.
+  // Its checks are a handful of SELECTs; the Monday briefing is one model call.
+  out.strategist = await strategistNightly(env).catch(e => ({ error: e.message }));
+  /* Its memory: the day's brand channels read once, facts kept or corrected by topic (stratmem.js). */
+  out.strategistMemory = await consolidate(env, { xfetch, getSetting, putSetting, canAfford: n => subCanAfford(n) }).catch(e => ({ error: e.message }));
+  if (new Date().getUTCDay() === 1) out.strategistBriefing = await strategistBriefing(env).then(t => !!t).catch(e => ({ error: e.message }));
+
+  await recordRun(env, 'lastRun', out);
+  await alertScheduleTrouble(env, 'nightly sync', out);
+  return out;
+}
+
+const AH_APP = {
+  /* The ideas bot's slow work (watch the video, write the draft) runs here: a queue consumer
+     gets minutes, where waitUntil after a Slack ack gets about thirty seconds. max_retries is
+     0 so a failure is said in the thread once, never posted twice. */
+  async queue(batch, env) {
+    env = meterEnv(env); subReset(env);
+    for (const m of batch.messages) {
+      if (m.body?.kind === 'welcome') await welcomeOnJoinByChannel(env, m.body.channel).catch(e => console.log('welcome job: ' + e.message));
+      else if (m.body?.kind === 'strategist') await strategistSlackAnswer(env, m.body.ev, m.body.screen).catch(e => console.log('strategist job: ' + e.message));
+      /* The Strategist pressed Make (studiomake.js): plan, make, post the ads in the thread. */
+      else if (m.body?.kind === 'studio_make') await runStudioMake(env, strategistDeps(), m.body).catch(async e => { console.log('studio make job: ' + e.message); if (m.body.channel) await slackApi(env, 'chat.postMessage', { channel: m.body.channel, thread_ts: m.body.thread, text: `Making the ads failed: ${e.message}` }).catch(() => {}); });
+      else if (env.IDEAS_BOT !== 'off') await runIdeaJob(env, m.body).catch(e => console.log('idea job: ' + e.message));
+      m.ack();
+    }
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(ensureSlackColumns(meterEnv(env)).catch(() => {}));
+    // Cloudflare cron expressions are fixed at deploy time and always UTC, so the
+    // Daily Brief trigger runs EVERY hour and the worker decides whether this is
+    // the configured hour in Central. That keeps the send time editable from the
+    // dashboard and stable across daylight saving, without adding a trigger (the
+    // account is at the free-plan limit of 5).
+    /* Locus Social posting (socialpost.js, 2026-10-19): every 5 minutes, posts whose time has come go out; the hourly
+       tick below also runs it as a catch-up and pulls the results once a day. */
+    if (event.cron === '*/5 * * * *') {
+      env = meterEnv(env); subReset(env);
+      /* Platform status (pulse.js, 2026-11-06): the outage monitor that was the separate Pulse worker. */
+      ctx.waitUntil(pulseTick(env, { F: xfetch, slackApi }).then(r => { if (r.changes) return recordRun(env, 'lastPulse', r); }).catch(e => console.log('pulse: ' + e.message)));
+      ctx.waitUntil(socialPostTick(env, socialPostDeps()).then(r => recordRun(env, 'lastSocialPost', r)).catch(() => {}));
+      /* The Buyer list's morning read (buyerai.js, 2026-10-26): from an hour before the morning hour, three brands a tick. */
+      ctx.waitUntil(buyerAITick(env, buyerDeps()).then(r => { if (r && !r.skipped && !r.done) return recordRun(env, 'lastBuyerAI', r); }).catch(() => {}));
+      return;
+    }
+    if (event.cron === '0 * * * *') {
+      env = meterEnv(env); subReset(env);
+      ctx.waitUntil((async () => {
+        // AT OR AFTER the configured hour, never an exact match. An exact match has
+        // no way to recover from a single miss, and the misses are real: changing the
+        // send time from 9 to 7 between 7am and 8am lost a whole day silently,
+        // because 7 had already passed and 9 never came round again. A dropped cron
+        // tick or a transient failure did the same. Every later tick now retries, and
+        // dailyBriefs skips brands already posted for the date, so this cannot double
+        // post and costs one cheap SELECT per brand per hour once the hour is past.
+        //
+        // ORDER MATTERS, AND IT IS NOT THE ORDER OF IMPORTANCE.
+        // Everything below shares ONE subrequest budget. Before the budget was
+        // counted, this ran briefs then reports, and the briefs ate the whole
+        // allowance - so on the first Monday reports existed at all, all six were
+        // generated with no narrative and posted to nobody, while recording
+        // ok:true. Cheapest and most time-critical first, and every job below
+        // stops on its own when the budget runs low rather than being killed.
+        const hour = centralHour();
+        const bh = await briefHour(env);
+        const ran = {};
+        // Cheap, once ever, and it is the difference between the buttons
+        // appearing on this morning's drafts and appearing tomorrow.
+        await ensureSlackColumns(env).catch(() => {});
+        const upgraded = await upgradeCardsOnce(env).catch(e => ({ error: e.message }));
+        if (upgraded) ran.cardUpgrade = upgraded;
+        const handled = await handledOnce(env).catch(e => ({ error: e.message }));
+        if (handled) ran.handledUpgrade = handled;
+        const clientCards = await clientCardsOnce(env).catch(e => ({ error: e.message }));
+        if (clientCards) ran.clientCardsUpgrade = clientCards;
+        ran.delivery = await deliveryPass(env).catch(e => ({ error: e.message }));
+        if (hour >= bh) {
+          ran.briefs = await dailyBriefs(env).catch(e => ({ error: e.message }));
+          // Reports wait TWO hours behind the brief. They could share a tick now
+          // that both stop politely, but a weekly report is the biggest single
+          // unit of work here and it should not be the thing that gets deferred
+          // six times because six briefs went first. Monday drafts last Mon–Sun,
+          // the 1st drafts last month. Internal drafts only - the Send-to-client
+          // button is still the only path to a client channel.
+          if (hour >= bh + REPORT_HOUR_OFFSET) {
+            ran.reports = await reportsPass(env).catch(e => ({ error: e.message }));
+            /* The 11am fallback for brands that do not review first (2026-10-19). */
+            const fb = await reportFallbackPass(env).catch(e => ({ error: e.message }));
+            if (!fb?.skipped) ran.reportFallback = fb;
+          }
+          /* The morning card: one post per brand in its internal channel, after its brief (and Monday's weekly)
+             so it can say "client daily sent 5:12" (morningcard.js, 2026-10-13). */
+          ran.morningCard = await morningCardTick(env, cardDeps()).catch(e => ({ error: e.message }));
+          /* Trybe (trybe.js): once a Central day from 4am, every brand with a key is pulled, then its internal channel
+             hears about approved videos that sat 3 days (and Monday's rebook list). */
+          if (subCanAfford(80)) ran.trybe = await trybeTick(env, trybeDeps()).catch(e => ({ error: e.message }));
+          /* Cole's calendar blocks: once a Central day, open tasks whose block day passed move to the next one. */
+          if ((await getSetting(env, 'blockRollDay').catch(() => null)) !== centralDate() && subCanAfford(60)) {
+            ran.blocks = await blockRollTick(env).catch(e => ({ error: e.message }));
+            await putSetting(env, 'blockRollDay', centralDate()).catch(() => {});
+          }
+        }
+        /* Cole's task events: catch any he deleted that the Google push missed, and keep the push channels open. */
+        if (subCanAfford(30)) ran.blockSync = await blockSyncTick(env, blockDeps()).catch(e => ({ error: e.message }));
+        // Whatever budget survived goes to keeping the data fresh. This used to
+        // live entirely in the 03:30 nightly, which meant one invocation tried to
+        // sync every brand and got through one; daily_insights sat a day stale and
+        // the delivery check read the missing day as "spent nothing". Draining it
+        // an hour at a time across 24 ticks means a brand is never more than a few
+        // hours old, and no single tick has to be big.
+        /* Asana -> the Brand tab's test library: new tasks, AI angle tags, and the
+           result comment once a test has spent enough. Before the Meta sync so a
+           slow sync cannot starve it; it stops itself when the budget runs low. */
+        ran.goals = await unifyGoals(env).catch(e => ({ error: e.message }));
+        ran.acctAvg = await refreshAccountAvg(env).catch(e => ({ error: e.message }));
+        ran.monday = await mondayTick(env).catch(e => ({ error: e.message }));
+        ran.brandAsana = await brandAsanaTick(env, subCanAfford).catch(e => ({ error: e.message }));
+        ran.assets = await assetsTick(env, () => subCanAfford(60)).catch(e => ({ error: e.message }));
+        /* Ad covers in R2, one-creative keys and AI tags for every ad that spent lately (creative.js). */
+        ran.creative = await creativeTick(env, ids => adThumbnails(env, ids, LIVE_THUMBS), () => subCanAfford(80), { meta, perBrand: 120, tags: 150 }).catch(e => ({ error: e.message }));
+        /* New clients made from Locus: tell the team when the onboarding form is sent. */
+        ran.newClient = await newClientTick(env).catch(e => ({ error: e.message }));
+        /* Meta partner sweep first (metaaccess.js): assigns the team + Mobius Tools on what clients shared, so a new
+           client's ad account is visible to the auto-connect right after it. Small: ~30 reads an hour. */
+        /* No timed access checks (Cole 2026-10-15): the connect link's Done button, the onboarding ticks and Cole's
+           Check now run partnerSweep / Google match (connect.js onDone, /api/ask/connect/check). */
+        ran.newClientMeta = await autoConnectMeta(env).catch(e => ({ error: e.message }));
+
+        /* Saved dashboards with a Slack schedule (the hub, 2026-10-07). */
+        ran.dashboards = await dashboardTick(env).catch(e => ({ error: e.message }));
+        /* What moved yesterday, once a day per brand to its internal channel, only when something moved (moved.js). */
+        ran.moved = await movedTick(env, hubDeps()).catch(e => ({ error: e.message }));
+        /* The morning line as a Slack DM to each person who switched it on (morning.js, 2026-10-11). */
+        ran.morning = await morningTick(env, morningDeps()).catch(e => ({ error: e.message }));
+        /* Fireflies transcripts the webhook did not bring: read, extract, tell the Strategist channel (meetings.js). */
+        ran.meetings = await meetingsTick(env, meetingDeps()).catch(e => ({ error: e.message }));
+        /* Today's calls (Scale / Cut / Trim / Refresh) to each brand's internal channel, once a day from 8am (todaypost.js, 2026-10-13). */
+        ran.today = await todayTick(env, todayDeps()).catch(e => ({ error: e.message }));
+        /* Action items due today (and overdue, once a day): one line per owner per brand with Done buttons (actions.js, 2026-10-13). */
+        ran.actions = await actionTick(env, actionDeps()).catch(e => ({ error: e.message }));
+        /* Test minimums due off today, one line per brand under its morning card with a Take it off button (minoff.js, 2026-10-15). */
+        ran.minOff = await minOffTick(env, minOffDeps()).catch(e => ({ error: e.message }));
+        /* The team's daily check-in post in #daily-checkin, the no-plan nudge, and 24-hour review approvals (checkin.js, 2026-10-26). */
+        ran.checkin = await checkinTick(env, checkinDeps(ctx)).catch(e => ({ error: e.message }));
+        /* The Buyer list: ONE post a day in the buyer channel (buyerlist.js, 2026-10-26); the morning cards no longer carry the calls. */
+        ran.buyerPost = await buyerPostTick(env, buyerDeps()).catch(e => ({ error: e.message }));
+        /* The morning read (buyerai.js): every brand, three side by side, from the hour BEFORE the post hour, so the post
+           finds it done. Here because the 5-minute trigger has not fired since 2026-10-23 (lastSocialPost). */
+        ran.buyerAI = await buyerAITick(env, buyerDeps(), { perTick: 99 }).catch(e => ({ error: e.message }));
+        /* Drops and sales: an end date passed or the stock hit 0 = everything tagged goes off and is locked (drops.js). */
+        ran.drops = await dropsTick(env, { xfetch, listAccounts, getSetting, putSetting, centralDate, can: n => subCanAfford(n) }).catch(e => ({ error: e.message }));
+        /* Scheduled questions to the Strategist, posted to Slack (askschedule.js). */
+        ran.askSchedules = await scheduleTick(env, hubDeps()).catch(e => ({ error: e.message }));
+        /* The Monday account review per brand, Apply cards in the internal channel; off until settings.mondayReview = 'on' (review.js). */
+        ran.mondayReview = await reviewTick(env, { ...hubDeps(), briefHour }).catch(e => ({ error: e.message }));
+        /* Alerts: rules checked at their hour, posted at most once a Central day (alerts.js). */
+        ran.alerts = await alertTick(env, autoDeps()).catch(e => ({ error: e.message }));
+        /* The calendar: a client's new or moved date, the day before / a week out, Monday "still running?" (calendar.js). */
+        ran.calendar = await calendarTick(env, hubDeps()).catch(e => ({ error: e.message }));
+        /* Locus Social: each followed brand and topic pulled once a day, four a tick (social.js). */
+        ran.social = await socialTick(env, n => subCanAfford(n)).catch(e => ({ error: e.message }));
+        /* Locus Social posting: a catch-up for the 5-minute tick, then views / likes / comments once a day (socialpost.js). */
+        ran.socialPost = await socialPostTick(env, socialPostDeps()).catch(e => ({ error: e.message }));
+        ran.socialResults = await socialResultsTick(env, socialPostDeps()).catch(e => ({ error: e.message }));
+        /* Monday 8am brand local: "N of T posts planned this week" to the internal channel, only when short (socialpost.js). */
+        ran.socialNudge = await socialNudgeTick(env, socialPostDeps()).catch(e => ({ error: e.message }));
+        /* Is Locus itself working: every page's routes, connections and freshness, once a Central morning (smoke.js). */
+        ran.smoke = await smokeTick(env, smokeDeps()).catch(e => ({ error: e.message }));
+        /* The Slack index: catch up and walk back a year, a page budget at a time (slackindex.js). */
+        ran.slackIndex = await backfillTick(env, idxDeps()).then(r => ({ pages: r.pages, added: r.channels.reduce((s, c) => s + (c.added || 0), 0), errors: r.channels.filter(c => c.error).length })).catch(e => ({ error: e.message }));
+        ran.sync = await syncPass(env).catch(e => ({ error: e.message }));
+        // Ad-level brands the nightly could not finish because Meta rate-limited it.
+        const adRetry = await adRetryPass(env).catch(e => ({ error: e.message }));
+        if (adRetry) ran.adRetry = adRetry;
+        /* Last, on purpose: the photo library's untagged backlog gets whatever budget the hour left (assets.js tagBacklog). */
+        ran.assetBacklog = await tagBacklog(env, () => subCanAfford(120)).catch(e => ({ error: e.message }));
+        await recordRun(env, 'lastHourly', ran);
+      })());
+    } else {
+      env = meterEnv(env); subReset(env);
+      ctx.waitUntil(nightly(env));
+    }
+  },
+
+  /* Per-brand access wraps every request (brandguard.js). */
+  async fetch(request, env, ctx) {
+    /* STAGING ONLY (env.STAGING = "1", never set in production): run a scheduled tick on demand so a
+       copy of the database can be checked end to end. ?cron=hourly|nightly. Admin token required. */
+    if (env.STAGING === '1' && new URL(request.url).pathname === '/api/_tick') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const jobs = [];
+      const cron = new URL(request.url).searchParams.get('cron') === 'nightly' ? '30 3 * * *' : '0 * * * *';
+      await AH_APP.scheduled({ cron }, env, { waitUntil: p => jobs.push(p) });
+      const out = await Promise.allSettled(jobs);
+      const last = await env.DB.prepare(`SELECT key, value FROM settings WHERE key IN ('lastHourly', 'lastRun')`).all();
+      return json({ cron, settled: out.map(o => o.status === 'fulfilled' ? 'ok' : String(o.reason?.message || o.reason)), runs: last.results });
+    }
+    /* Claude Code's MCP door (mcp.js, 2026-11-01): its own token, every Locus call made as Cole, so it sits above the
+       brand guard (which keys off a session this token is not). */
+    if (new URL(request.url).pathname === '/mcp') return handleMcp(request, env, ctx, mcpDeps());
+    /* Phase 3: `?act=` carries a brand id. An old id (act_, asana_, demo_harborline, a slug) from a
+       saved link, a bookmark or an older client is resolved to its brand id ONCE here, before the
+       access guard and every handler, so nothing downstream sees an old id. */
+    try {
+      const u = new URL(request.url);
+      const raw = u.searchParams.get('act');
+      if (raw && raw !== 'all' && !isBrandId(raw)) {
+        const bid = await resolveBrandId(env, raw);
+        if (bid && bid !== raw) { u.searchParams.set('act', bid); request = new Request(u.toString(), request); }
+      }
+    } catch { /* an unreadable act stays as it was; the handler answers for it */ }
+    return guardBrands(request, env, sessionEmail, r => AH_APP.handle(r || request, env, ctx), CORS);
+  },
+
+  async handle(request, env, ctx) {
+    /* Metered here too. Nothing in the request path GATES on the budget - a
+       dashboard call must answer or fail honestly, never half-answer - but the
+       count is what makes an endpoint's real cost visible in /api/health
+       instead of being discovered when a page starts failing for one client
+       and not another. */
+    env = meterEnv(env); subReset(env);
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+
+    /* BUTTONS ON THE SLACK CARD. Every action the Daily Brief and Reports tabs
+       offer, available where the draft already is. Unauthenticated by design:
+       Slack signs the request and verifySlackSig is what proves it. */
+    /* Calendly: a strategy call booked or cancelled (signed with the key Locus chose, calendly.js). */
+    if (path === '/calendly/webhook' && request.method === 'POST') return handleCalendly(request, env, onCallBooked);
+    /* Stripe: the first retainer invoice was paid (signed with the endpoint secret, newclient.js). */
+    if (path === '/stripe/webhook' && request.method === 'POST') return handleStripeWebhook(request, env);
+    /* Fireflies: a call's transcript is ready (meetings.js; signed when FIREFLIES_WEBHOOK_SECRET is set). */
+    /* Google Calendar push: something changed on one of Cole's block calendars (blocks.js, checked by our own token). */
+    if (path === '/gcal/push' && request.method === 'POST') return handleGcalPush(request, env, ctx, blockDeps());
+    if (path === '/fireflies/webhook' && request.method === 'POST') return handleFirefliesHook(request, env, ctx, meetingDeps(), json);
+    if (path === '/slack/actions' && request.method === 'POST') {
+      await ensureSlackColumns(env).catch(() => {});
+      return handleSlackInteract(request, env, ctx);
+    }
+    /* THE STRATEGIST IN SLACK. Unauthenticated by design, like the buttons:
+       Slack signs the request. Subscribe the app to app_mention and
+       message.im with this URL as the Events Request URL. */
+    if (path === '/slack/events' && request.method === 'POST') return handleSlackEvent(request, env, ctx);
+    /* ASANA WEBHOOKS. Unauthenticated by design: Asana signs each call with the
+       secret from the handshake, and handleAsanaHook checks it. */
+    if (path === '/asana/hook' && request.method === 'POST') return handleAsanaHook(request, env, ctx);
+    /* The router asks which channels are the Strategist's: a brand's INTERNAL
+       team channel, as registered on its account. A boolean, nothing else. */
+    if (path === '/slack/owns') {
+      const ch = url.searchParams.get('channel') || '';
+      /* A new client's channel counts too while its welcome is still owed, so the join event reaches us. */
+      /* 2026-10-09: a brand's CLIENT channel and the Strategist channel too, so their messages reach the
+         Slack index. Reading only: handleSlackEvent answers only in a brand's internal channel. */
+      const row = /^[A-Z0-9]{5,20}$/.test(ch) ? (await brandByChannel(env, ch).catch(() => null)
+        || await env.DB.prepare(`SELECT 1 AS x FROM brand_accounts WHERE active = 1 AND slack_channel = ?1 LIMIT 1`).bind(ch).first().catch(() => null)
+        || await env.DB.prepare(`SELECT 1 AS x FROM brands WHERE status IN ('active', 'demo') AND client_channel = ?1 LIMIT 1`).bind(ch).first().catch(() => null)
+        || (ch === await getSetting(env, 'strategistChannel').catch(() => null) ? { x: 1 } : null)
+        || await env.DB.prepare(`SELECT 1 AS x FROM p_newclient WHERE slack_client = ?1 AND json_extract(steps_json, '$.slack_welcome') IS NULL LIMIT 1`).bind(ch).first().catch(() => null)
+        /* A group DM is ours (2026-10-14): an app_mention carries no channel_type, so the router cannot tell by itself. */
+        || (await isGroupDm(env, ch) ? { x: 1 } : null)
+        /* 2026-10-21: any other channel Locus has answered in, or one the access list names and has not turned off. */
+        || ((await getSetting(env, `locusChan:${ch}`).catch(() => null)) === '1' ? { x: 1 } : null)
+        || (await readAccess(env, getSetting).then(a => a.channels[ch] && !a.channels[ch].off ? { x: 1 } : null).catch(() => null))) : null;
+      return json({ owns: !!row });
+    }
+
+    /* ---- Atria (the ideas bot reads Atria ad links): Connect / status / Disconnect are admin,
+       the OAuth callback is public (the state it carries is the proof). See atria.js. ---- */
+    /* ---- Creator Discord join (trybe.js handleTrybeJoin): PUBLIC pages, Discord sign in + Trybe roster match ---- */
+    if (path.startsWith('/join/')) {
+      const r = await handleTrybeJoin(request, env, url, path, trybeDeps());
+      if (r) return r;
+    }
+    /* ---- Studio videos: PUBLIC mp4 (24 random hex id), Range-aware; see studio-video.js ---- */
+    if (path.startsWith('/studio-vid/')) {
+      const r = await serveVideo(request, env, path);
+      if (r) return r;
+    }
+    if (path.startsWith('/studio-ref/')) {
+      const r = await serveRef(request, env, path);
+      if (r) return r;
+    }
+    /* ---- What the Strategist makes (stratmake.js): images and files at /strat/<id>.<ext>, report pages at /r/<token>
+       and /r/<token>.pdf, /api/report-public (all public by unguessable id); /api/strat/* is admin inside. ---- */
+    if (path.startsWith('/strat/') || path.startsWith('/r/') || path === '/api/report-public' || path.startsWith('/api/strat/')) {
+      const r = await handleMake(request, env, url, path, json, isAdmin, { xfetch, slack: slackApi, getSetting, putSetting, safeJson, listAccounts });
+      if (r) return r;
+    }
+    /* ---- Frame.io V4 (Adobe sign-in): Connect / status / tree are admin, the callback is public; frame.js ---- */
+    if (path === '/frame/callback' || path.startsWith('/api/frame/')) {
+      const r = await handleFrame(request, env, url, path, json, isAdmin);
+      if (r) return r;
+    }
+    /* TikTok ACCOUNT HOLDER sign-in (creator/brand TikTok accounts, the "TikTok accounts" scope). TikTok's app form
+       requires this redirect once that scope is ticked; Locus does not use it yet, so it only says so. */
+    if (path === '/tiktok/account-callback' && request.method === 'GET') return new Response('<p style="font:16px system-ui;padding:40px">Locus does not connect TikTok accounts (organic posts) yet. You can close this tab.</p>', { headers: { 'Content-Type': 'text/html' } });
+    /* TikTok sign-in comes back here (public; the one-time state is the check). */
+    if (path === '/tiktok/callback' && request.method === 'GET') {
+      try { const r = await tiktokCallback(env, url); return new Response(`<p style="font:16px system-ui;padding:40px">TikTok is connected: ${r.advertisers.length} ad account${r.advertisers.length === 1 ? '' : 's'}. You can close this tab and go back to Locus.</p>`, { headers: { 'Content-Type': 'text/html' } }); }
+      catch (e) { return new Response(`<p style="font:16px system-ui;padding:40px">TikTok did not connect: ${String(e.message).replace(/</g, '&lt;')}</p>`, { status: 400, headers: { 'Content-Type': 'text/html' } }); }
+    }
+    /* Production v2 (prodwork.js): a card's file by a signed link (an <img> or <video> sends no header), and the review
+       link a client opens with no login (an unguessable token per card). */
+    if (path.startsWith('/api/production/f/') && request.method === 'GET') return prodFile(request, env, url, path.slice('/api/production/f/'.length), CORS);
+    /* The connect link (connect.js, 2026-10-15): public by an unguessable token per brand, no login. GET = what Locus
+       still cannot read for the brand; POST {key, value} or {key, skip} = the client finishes one item on the page. */
+    { const cm = /^\/api\/connect\/([a-f0-9]{20})$/.exec(path);
+      if (cm) {
+        const connectDeps = { adsInvite: googleAdsInvite, onDone: (key, b) => ctx.waitUntil(connectNow(env, key, b.id).catch(() => {})), tellTeam: async text => {
+          const t = (await connectTokenBrand(env, cm[1]).catch(() => null)); if (!t?.slack_channel) return;
+          await teamPost(env, cardDeps(), t.slack_channel, text, null, {}).catch(() => {}); } };
+        try {
+          if (request.method === 'GET') return json(await connectGet(env, cm[1]));
+          if (request.method === 'POST') return json(await connectPost(env, cm[1], await request.json().catch(() => ({})), connectDeps));
+        } catch (e) { return json({ error: e.message }, e.status || 400); }
+      } }
+    /* Site reviews (sitereview.js, 2026-11-05): a client approves a proposed site rebuild page by page. The token
+       routes are public; the rest check isAdmin (a client passes only where brandguard.js cleared it). */
+    if (path.startsWith('/api/site-review')) {
+      const r = await handleSiteReview(request, env, url, path, json, { isAdmin, sessionEmail, clientScope, slackPost, slackApi });
+      if (r) return r;
+    }
+    if (path.startsWith('/api/review/')) {
+      const r = await handleReviewLink(request, env, url, path, json, { ...actionDeps(), waitUntil: p => ctx.waitUntil(p), moveCard: prodMove, formatOf: prodFormat, readDoc: brandReadDoc });
+      if (r) return r;
+    }
+    /* Ad covers (creative.js): public by a signed ad id, cached by the browser for a year. */
+    if (path.startsWith('/cover/') && request.method === 'GET') return serveCover(env, path);
+    /* A Production picture for the review post in Slack (checkin.js, 2026-10-26): public, signed, no expiry. */
+    if (path.startsWith('/rv/') && request.method === 'GET') return serveReviewPic(env, path);
+    /* Locus Social covers and copied videos (social.js): public by an unguessable key. */
+    if (path.startsWith('/social-m/') && request.method === 'GET') return serveSocialMedia(env, path, request, CORS);
+    if (path.startsWith('/make-m/') && request.method === 'GET') return serveMakeMedia(env, path, request, CORS);
+    /* Locus Social posting: TikTok and Google send the person back here after the grant (socialpost.js). */
+    if ((path === '/social/tiktok/callback' || path === '/social/google/callback') && request.method === 'GET') return handleSocialPost(request, env, url, path, json, socialPostDeps());
+    /* Photo library thumbnails (assets.js): public by an unguessable Drive file id, like Studio images. */
+    if (path.startsWith('/assets-img/') && request.method === 'GET') {
+      /* A brand id (or an old act_ id in a link made before phase 3); the files stay under the brand's storage_prefix. */
+      const m = /^\/assets-img\/(act_\d+|brand_[a-z0-9_]+)\/([\w-]{15,})$/.exec(path);
+      if (!m || !env.MEDIA) return new Response('not found', { status: 404 });
+      const prefix = await storagePrefix(env, m[1]).catch(() => m[1]);
+      const obj = await env.MEDIA.get(`assets/${prefix}/${m[2]}.jpg`);
+      if (!obj) return new Response('not found', { status: 404 });
+      return new Response(obj.body, { headers: { 'Content-Type': obj.httpMetadata?.contentType || 'image/jpeg', 'Cache-Control': 'public, max-age=86400', ...CORS } });
+    }
+    if (path === '/atria/callback' || path.startsWith('/api/atria/')) {
+      const r = await handleAtria(request, env, url, path, json, isAdmin);
+      if (r) return r;
+    }
+    /* ---- Brand research for Locus's Brand tab, plus the onboarding link's help box ---- */
+    /* ---- The services agreement, signed inside the onboarding link (public, by token; contract.js) ---- */
+    if (path.startsWith('/api/sign/')) {
+      const r = await handleSign(request, env, path, json);
+      if (r) return r;
+    }
+    /* The client's "Message the team" button on the onboarding form (public, by onboarding token). */
+    if (path === '/api/onboard-message' && request.method === 'POST') {
+      const b = await request.json().catch(() => ({}));
+      const tok = String(b.token || '').replace(/[^a-f0-9]/g, '');
+      const msg = String(b.message || '').trim().slice(0, 1500);
+      if (!tok || !msg) return json({ error: 'Write a message first.' }, 400);
+      const o = await env.DB.prepare(`SELECT o.name, o.act_id, n.slack_internal, a.slack_channel, a.name AS acct FROM p_br_onboard o LEFT JOIN p_newclient n ON n.token = o.token LEFT JOIN brand_accounts a ON a.act_id = o.act_id WHERE o.token = ?1`).bind(tok).first().catch(() => null);
+      if (!o) return json({ error: 'This link is not valid.' }, 404);
+      const last = Number((await env.DB.prepare(`SELECT value FROM settings WHERE key = ?1`).bind(`obMsg:${tok}`).first().catch(() => null))?.value || 0);
+      if (Date.now() - last < 30000) return json({ error: 'Sent a moment ago. Give it a minute.' }, 429);
+      await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(`obMsg:${tok}`, String(Date.now())).run();
+      /* No internal channel yet: Cole's DM, never #mobius-newbiz (a client can write anything, money included).
+         Escaped, so a client cannot @channel our workspace or fake a link. */
+      const ch = o.slack_internal || o.slack_channel || COLE_SLACK;
+      const clean = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      await slackPost(env, ch, `<@${COLE_SLACK}> *${clean(o.acct || o.name)}* sent a message from their onboarding form${b.step ? ` (step: ${clean(String(b.step).slice(0, 60))})` : ''}:\n>${clean(msg).replace(/\n/g, '\n>')}`, null, { username: 'Locus' });
+      return json({ ok: true });
+    }
+    if (path === '/api/new-client/connect-meta' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      const r = await env.DB.prepare(`SELECT * FROM p_newclient WHERE id = ?1`).bind(String(b.id || '')).first();
+      const a = await env.DB.prepare(`SELECT act_id, name FROM accounts WHERE act_id = ?1`).bind(String(b.act || '')).first();
+      if (!r || !a) return json({ error: 'Unknown client or ad account.' }, 404);
+      const res = await connectMetaFor(env, r, a);
+      return json(res, res.ok ? 200 : 400);
+    }
+    /* Scenarios (2026-10-06): plain words -> calculator inputs for Locus's Scenarios tab.
+       Haiku, about a cent. Returns 1 to 4 scenarios as numbers plus one line of reading;
+       nothing is stored here, the browser fills the columns and the person decides. */
+    if (path === '/api/scenario-parse' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      const text = String(b.text || '').slice(0, 2000).trim();
+      if (!text) return json({ error: 'Describe the scenario first.' }, 400);
+      const kind = b.kind === 'roas' ? 'roas' : 'leads';
+      const ctx = b.context && typeof b.context === 'object' ? b.context : {};
+      const fields = kind === 'leads'
+        ? 'spend (dollars of lead-gen ad spend), cpl (dollars per lead), cvr (percent of leads that buy in the window, 0 to 100), aov (dollars per order), margin (percent contribution margin before ad spend, 0 to 100), target_roas (optional)'
+        : 'aov (dollars), margin (percent gross margin 0 to 100), mode ("roas" | "orders" | "revenue"), spend (dollars of ad spend), roas (number), orders (count), revenue (dollars goal), fulfillment (dollars per order), processing_pct (percent), fixed (dollars per month)';
+      const system = `You turn a marketer's plain-English what-if into calculator inputs. Output ONLY JSON: {"scenarios":[{"name":"...", ${kind === 'leads' ? '"spend":0,"cpl":0,"cvr":0,"aov":0,"margin":0,"target_roas":0' : '"aov":0,"margin":0,"mode":"roas","spend":0,"roas":0,"orders":0,"revenue":0,"fulfillment":0,"processing_pct":0,"fixed":0'}}], "reading":"one sentence"}.
+Fields: ${fields}. Rules: when the person gives a range or says "compare", make one scenario per case (max 4), named by what differs ("$2 a lead", "$4 a lead"). When a number is not given, use the brand context below, and if the context lacks it use a sensible default (leads: cpl 3, cvr 10, margin 55; roas: fulfillment 0, processing 3, fixed 0) and say so in "reading". Percentages are plain numbers (10 means 10%). Never invent revenue history. No prose outside the JSON.`;
+      const user = `Brand context: ${JSON.stringify(ctx)}\n\nWhat they said: ${text}`;
+      try {
+        const res = await xfetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+          body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 900, system, messages: [{ role: 'user', content: user }] }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) return json({ error: body.error?.message || `Claude HTTP ${res.status}` }, 502);
+        const raw = body.content.filter(x => x.type === 'text').map(x => x.text).join('\n');
+        const m = raw.match(/\{[\s\S]*\}/);
+        const out = m ? JSON.parse(m[0]) : null;
+        if (!out || !Array.isArray(out.scenarios)) return json({ error: 'Could not read that into numbers. Try saying the spend, the cost per lead and how many buy.' }, 422);
+        return json({ scenarios: out.scenarios.slice(0, 4), reading: String(out.reading || '') });
+      } catch (e) { return json({ error: e.message }, 502); }
+    }
+    if (path === '/api/new-client/meta-accounts') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      /* Meta ad accounts on no brand yet (accounts = Meta accounts since phase 3). */
+      const rows = (await env.DB.prepare(`SELECT act_id, name FROM accounts WHERE act_id LIKE 'act_%'
+          AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.kind = 'meta' AND c.external_id = accounts.act_id) ORDER BY name`).all()).results || [];
+      return json({ accounts: rows });
+    }
+    /* Run the "client shared Meta" check now instead of on the hour (admin). */
+    if (path === '/api/new-client/meta-now' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      /* Everything the hourly tick does for new clients: welcomes, form pings, Shopify, Meta. */
+      return json({ ok: true, tick: await newClientTick(env).catch(e => ({ error: e.message })), ...(await autoConnectMeta(env)) });
+    }
+    /* ---- New client: one button in Locus sets up Asana, the onboarding link, Drive and Slack (admin) ---- */
+    if (path.startsWith('/api/new-client')) {
+      const r = await handleNewClient(request, env, path, json, isAdmin, (rq, e) => sessionEmail(e, rq));
+      if (r) return r;
+    }
+    /* ---- Client logins (clients.js; who may open what is brandguard.js) ---- */
+    if (path.startsWith('/api/clients')) {
+      const r = await handleClients(request, env, path, json, { isAdmin, sessionEmail, mintSession });
+      if (r) return r;
+    }
+    /* ---- Brand tab x Asana: sync, tag, results (admin) ---- */
+    /* ---- The calendar (Lineup moved into Locus, 2026-10-09; calendar.js) ---- */
+    /* ---- Make in the app (make.js, 2026-10-20): breakdown + draft, four exits ---- */
+    if (path.startsWith('/api/make')) {
+      const r = await handleMakeApp(request, env, url, path, json, { ...meetingDeps(), waitUntil: p => ctx.waitUntil(p) });
+      if (r) return r;
+    }
+    /* ---- Locus Social, phase 1: Watch (social.js, 2026-10-19) ---- */
+    if (path.startsWith('/api/social')) {
+      /* Phase 2 (socialpost.js): accounts, the Week, the tray, posts, captions. Answers null for Watch's routes. */
+      const r2 = await handleSocialPost(request, env, url, path, json, { ...socialPostDeps(), waitUntil: p => ctx.waitUntil(p) });
+      if (r2) return r2;
+      const r = await handleSocial(request, env, url, path, json, { isAdmin, sessionEmail, waitUntil: p => ctx.waitUntil(p) });
+      if (r) return r;
+    }
+    if (path.startsWith('/api/calendar')) {
+      const r = await handleCalendar(request, env, url, path, json, isAdmin, sessionEmail);
+      if (r) return r;
+    }
+    /* ---- Client requests and approvals (requests.js, 2026-10-10) ---- */
+    if (path === '/api/requests' || path.startsWith('/api/requests/')) {
+      const r = await handleRequests(request, env, url, path, json, { isAdmin, sessionEmail, slackPost, slackApi, centralDate, teamOf: calendarTeam });
+      if (r) return r;
+    }
+    /* ---- Meeting notes: Fireflies transcripts into action items (meetings.js, 2026-10-13). Team only. ---- */
+    if (path === '/api/meetings' || path.startsWith('/api/meetings/')) {
+      const r = await handleMeetings(request, env, url, path, json, meetingDeps());
+      if (r) return r;
+    }
+    /* ---- The call screens: Monday, client, creative kickoff, shared on the call and typed live (callscreen.js, 2026-10-19). Team only. ---- */
+    if (path === '/api/calls' || path.startsWith('/api/calls/')) {
+      const r = await handleCalls(request, env, url, path, json, { ...actionDeps(), waitUntil: p => ctx.waitUntil(p), adsReport });
+      if (r) return r;
+    }
+    /* ---- Action items: the team's to-do list in Locus, not Asana (actions.js, 2026-10-13). Team only. ---- */
+    if (path === '/api/actions' || path.startsWith('/api/actions/')) {
+      const r = await handleActions(request, env, url, path, json, actionDeps());
+      if (r) return r;
+    }
+    /* ---- Cole's task events (blocks.js, 2026-11-03): lay old-style blocks out as events, open the push channels,
+       read each calendar once. Admin only; safe to run again. ---- */
+    if (path === '/api/blocks/setup' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const migrated = await blockMigrate(env);
+      const watch = await ensureWatches(env, blockDeps()).catch(e => ({ error: e.message }));
+      const sync = await blockSyncTick(env, blockDeps()).catch(e => ({ error: e.message }));
+      return json({ ok: true, migrated, watch, sync });
+    }
+    /* ---- The daily check-in (checkin.js, 2026-10-26): post today's day now, or post a card's review again. Admin only. ---- */
+    if ((path === '/api/checkin/day' || path === '/api/checkin/review' || path === '/api/checkin/delete') && request.method === 'POST') {
+      if (!(await isAdmin(request, env)) || clientScope(request)) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      /* Take test posts back: the bot's own messages (chat.delete) and files (files.delete). */
+      if (path === '/api/checkin/delete') {
+        const out = [];
+        for (const ts of (b.ts || []).slice(0, 50)) out.push((await slackApi(env, 'chat.delete', { channel: String(b.channel || ''), ts: String(ts) }))?.error || 'ok');
+        for (const f of (b.files || []).slice(0, 50)) out.push((await slackApi(env, 'files.delete', { file: String(f) }))?.error || 'ok');
+        return json({ out });
+      }
+      if (path === '/api/checkin/day') { const day = await ensureDay(env, checkinDeps(ctx), { force: true, date: b.date || centralDate() }); return json({ ok: true, channel: day.channel, ts: day.ts }); }
+      return json(await reviewPost(env, checkinDeps(ctx), String(b.id || ''), b.who || (await sessionEmail(env, request).catch(() => null)) || 'cole@go-mobius-digital.com', b.channel ? { channel: String(b.channel), preview: true } : {}));
+    }
+    /* ---- Production: the brief-to-live board over p_br_batch, mirrored to Asana (production.js, 2026-10-13). Team only. ---- */
+    if (path === '/api/production' || path.startsWith('/api/production/')) {
+      const r = await handleProduction(request, env, url, path, json, { ...actionDeps(), waitUntil: p => ctx.waitUntil(p),
+        /* A person moving a card to Review posts its ads to Cole as pictures (checkin.js). */
+        onReview: (env, id, who) => ctx.waitUntil(reviewPost(env, checkinDeps(ctx), id, who).then(r => console.log('review post: ' + JSON.stringify(r))).catch(e => console.log('review post: ' + e.message))) });
+      if (r) return r;
+    }
+    if (path.startsWith('/api/brand-asana')) {
+      /* A test judged from the page (Winner / Keep / Loser) strikes its late Production line on today's morning card. */
+      const judged = path === '/api/brand-asana/result' && request.method === 'POST' ? await request.clone().json().catch(() => null) : null;
+      const r = await handleBrandAsana(request, env, path, json, isAdmin);
+      if (r && judged?.id && r.ok) await cardProdDone(env, cardDeps(), judged.id).catch(() => {});
+      if (r) return r;
+    }
+    /* ---- The brand voice interview (public, token) + Locus's copy desk (admin) ---- */
+    if (path.startsWith('/api/voice')) {
+      const r = await handleVoice(request, env, ctx, path, json, isAdmin);
+      if (r) return r;
+    }
+    /* ---- Studio's thinking: briefs into batches, the art director (images are on the profit worker) ---- */
+    if (path.startsWith('/api/studio-ai/')) {
+      const r = await handleStudioAI(request, env, ctx, path, json, isAdmin);
+      if (r) return r;
+    }
+    if (path.startsWith('/api/research') || path === '/api/onboard-help') {
+      const r = await handleResearch(request, env, ctx, path, json, isAdmin);
+      if (r) return r;
+    }
+
+    /* ---- Edit in place on Ads > Meta / Google > Campaigns (2026-10-09) ----
+       Cole: "How do I actually make changes from within the dashboard?" GET /api/meta/live?act= = live status, budgets
+       and whether the token may write; POST /api/meta/write {act, kind, level, object, amount|min|cap|name, dry, expect}
+       runs metawrite.js's own propose + apply (one code path with the Strategist: brand check, Manage check, p_meta_write
+       for undo, the Change Log line as the person); POST /api/meta/undo {act, write} within 24h. POST /api/google/write
+       {act, kind: pause|resume|budget, object, amount, dry, expect} on google.js. Admin, and brandsFor limits. After a
+       Meta write the synced row (meta_campaigns / meta_adsets) takes the new value at once, so the screen agrees. */
+    if (path === '/api/meta/live' || path === '/api/meta/write' || path === '/api/meta/undo' || path === '/api/google/write') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const email = await sessionEmail(env, request).catch(() => null);
+      const only = await brandsFor(env, email).catch(() => null);
+      const body = request.method === 'POST' ? await request.json().catch(() => ({})) : {};
+      const act = await resolveBrandId(env, String((request.method === 'POST' ? body.act : url.searchParams.get('act')) || '')).catch(() => '');
+      if (!/^[\w-]{3,80}$/.test(act)) return json({ error: 'Pick a brand first.' }, 400);
+      if (only && !only.has(act)) return json({ error: 'You do not have access to this brand.' }, 403);
+      const md = { xfetch, listAccounts, getSetting, putSetting };
+      /* 2026-10-31: the admin key carries no name, so a write through it must say who is behind it ("Cole via Claude
+         chat"); the Change Log said "someone in Locus in Locus" for the 36 changes of 2026-10-27. */
+      const who = email || String(body.by || '').trim().slice(0, 80);
+      try {
+        if (path === '/api/meta/live') return json(await metaLive(env, md, act, { campaign: url.searchParams.get('campaign') || body.campaign || null }));
+        if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+        if (!who && path !== '/api/google/write') return json({ error: 'Say who is making this change: add "by" to the body, e.g. "Cole via Claude chat". The admin key carries no name.' }, 400);
+        if (path === '/api/google/write') return json(await adsCampaignWrite(env, act, body));
+        if (path === '/api/meta/undo') {
+          const r = await metaLocusUndo(env, md, { act, write: body.write }, { who });
+          if (r.ok && r.before && (r.level === 'campaign' || r.level === 'adset')) await syncedRow(r.level, r.object, r.before);
+          if (r.ok && r.after?.created) await env.DB.prepare(`UPDATE meta_adsets SET status = 'ARCHIVED' WHERE adset_id = ?1`).bind(String(r.after.created)).run().catch(() => {});
+          return json(r);
+        }
+        const r = await metaLocusWrite(env, md, { ...body, act }, { who });
+        if (r.ok && !r.dry && r.after && (r.level === 'campaign' || r.level === 'adset')) await syncedRow(r.level, r.object, r.after);
+        /* A Today's call made on the page counts on the morning card's calls line (all made = struck through). */
+        if (r.ok && !r.dry && r.object) await cardCallMade(env, cardDeps(), act, r.object).catch(() => {});
+        return json(r);
+      } catch (e) { return json({ error: e.message }, 502); }
+      async function syncedRow(level, id, vals) {
+        const t = level === 'campaign' ? 'meta_campaigns' : 'meta_adsets', k = level === 'campaign' ? 'campaign_id' : 'adset_id';
+        const map = { status: ['status', v => v], name: ['name', v => v], daily_budget: ['daily_budget', v => (+v > 0 ? +v / 100 : null)], lifetime_budget: ['lifetime_budget', v => (+v > 0 ? +v / 100 : null)], daily_min_spend_target: ['min_spend', v => (+v > 0 ? +v / 100 : null)] };
+        for (const [f, v] of Object.entries(vals || {})) {
+          const m = map[f]; if (!m || (level === 'adset' && f === 'lifetime_budget')) continue;
+          await env.DB.prepare(`UPDATE ${t} SET ${m[0]} = ?2 WHERE ${k} = ?1`).bind(String(id), m[1](v)).run().catch(() => {});
+        }
+      }
+    }
+    /* ---- Drops and sales (2026-10-31, src/drops.js): when one ends or sells out, every Meta ad set and ad carrying its tag
+       is paused and locked, so nothing suggests turning it back on. Team only, brandsFor limits. */
+    {
+      const r = await handleDrops(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, resolveBrandId, clientScope, md: { xfetch, listAccounts, getSetting, putSetting, centralDate } });
+      if (r) return r;
+    }
+    /* ---- Launch to Meta (2026-10-10, src/launch.js): an approved Studio ad or a creator asset becomes a PAUSED
+       Meta ad through metawrite meta_create_ad, named "<test> <letter> | <Format>", tied to its test. Admin + brandsFor. */
+    {
+      const r = await handleLaunch(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, resolveBrandId, md: { xfetch, listAccounts, getSetting, putSetting,
+        /* a batch on Meta moves its Production card to Live (and the Asana task with it) */
+        moveCard: (e, id, who) => prodMove(e, actionDeps(), { id, to: 'live' }, who) } });
+      if (r) return r;
+    }
+    /* ---- Ads > Trybe (2026-11-05, src/trybe.js): approved creator videos that never ran, the live ones on Triple Whale
+       numbers, the creators to rebook. One Trybe key per brand. A client reads Live and Creators for its own brand. */
+    {
+      const r = await handleTrybe(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, resolveBrandId, isClient: r => !!clientScope(r), deps: trybeDeps() });
+      if (r) return r;
+    }
+    /* ---- Lucky's creator app (2026-11-05, src/lucky.js): read it live and act through its own staff code. */
+    {
+      const r = await handleLucky(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, isClient: r => !!clientScope(r) });
+      if (r) return r;
+    }
+    /* ---- The Buyer list (2026-10-26, src/buyerlist.js): every brand's ad calls, test minimums due off and cards ready to
+       launch in one list, with shared Done / Skip state (p_buyer_state). Team only. */
+    {
+      const r = await handleBuyer(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, resolveBrandId, isClient: r => !!clientScope(r), deps: buyerDeps() });
+      if (r) return r;
+    }
+    /* ---- The client posts, previewed (2026-10-19): the six-line daily from the brand's latest brief and the weekly in
+       its new shape from the latest weekly report, as text; ?post=1 posts ONE preview message to the Strategist channel
+       (settings.strategistChannel), never to a client. Admin only. */
+    if (path === '/api/client-post/preview' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      if (clientScope(request)) return json({ error: 'forbidden' }, 403);
+      const acct = await acctOf(env, url.searchParams.get('act') || '');
+      if (!acct) return json({ error: 'unknown account' }, 404);
+      const out = { brand: acct.name };
+      const brow = await env.DB.prepare(`SELECT date, text FROM briefs WHERE act_id = ?1 AND text IS NOT NULL ORDER BY (status = 'sent') DESC, date DESC LIMIT 1`).bind(acct.act_id).first().catch(() => null);
+      if (brow) { const data = await briefData(env, acct, brow.date).catch(() => null); out.daily = { date: brow.date, text: await clientDailyFor(env, acct, brow.date, brow.text, data), thread: clientDailyThreadFor(acct, brow.date, data) }; }
+      const rrow = await env.DB.prepare(`SELECT * FROM reports WHERE act_id = ?1 AND period = 'weekly' ORDER BY period_start DESC LIMIT 1`).bind(acct.act_id).first().catch(() => null);
+      if (rrow) out.weekly = { start: rrow.period_start, status: rrow.status, text: await clientReportText(env, acct, rrow, safeJson(rrow.data_json, null)) };
+      if (url.searchParams.get('post') === '1') {
+        const ch = await getSetting(env, 'strategistChannel');
+        if (!ch) return json({ ...out, error: 'no strategistChannel set' }, 400);
+        /* Each post exactly as the client sees it, one message each, with one small label line on top. */
+        out.posted = [];
+        for (const k of ['daily', 'weekly']) {
+          if (!out[k]) continue;
+          const p = await slackPost(env, ch, `_Preview: ${acct.name} ${k}, exactly as the client sees it_\n\n${out[k].text}`, null, { username: 'Locus' });
+          const link = p?.ts ? await slackApi(env, 'chat.getPermalink', { channel: p.channel || ch, message_ts: p.ts }).catch(() => null) : null;
+          if (k === 'daily' && out.daily.thread && p?.ts) await slackPost(env, ch, out.daily.thread, null, { username: 'Locus', thread_ts: p.ts }).catch(() => {});
+          out.posted.push({ kind: k, ts: p?.ts || null, link: link?.permalink || null });
+        }
+      }
+      return json(out);
+    }
+    /* ---- Export > Send to Slack (Locus share.js, 2026-10-09) ----
+       A picture of one Locus card into the brand's OWN internal (slack_channel) or client (brief_channel) channel.
+       The channel is looked up here from the brand; the browser never names one. Admin, and a person limited to
+       some brands can only post for those. GET = which channels exist (names from Slack); POST = send. */
+    if (path === '/api/share/slack') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const body = request.method === 'POST' ? await request.json().catch(() => ({})) : {};
+      /* 2026-10-19 (the reporting audit): nothing but the one daily post from Cole reaches a client channel. */
+      if (request.method === 'POST' && body.to === 'client') return json({ error: 'Client channels only get the daily update from Cole. Send this to the internal channel, or paste the picture yourself.' }, 400);
+      const email = await sessionEmail(env, request).catch(() => null);
+      const only = await brandsFor(env, email).catch(() => null);
+      const act = String((request.method === 'POST' ? body.act : url.searchParams.get('act')) || '');
+      if (!/^[\w-]{3,80}$/.test(act)) return json({ error: 'Pick a brand first.' }, 400);
+      if (only && !only.has(act)) return json({ error: 'You do not have access to this brand.' }, 403);
+      const a = await env.DB.prepare(`SELECT act_id, name, slack_channel, brief_channel FROM brand_accounts WHERE act_id = ?1`).bind(act).first();
+      if (!a) return json({ error: 'No such brand.' }, 404);
+      const chans = { internal: a.slack_channel || null, client: null };
+      if (request.method === 'GET') {
+        const out = { brand: a.name };
+        for (const k of ['internal', 'client']) {
+          const id = chans[k]; if (!id) { out[k] = null; continue; }
+          const i = await slackApi(env, 'conversations.info', { channel: id }).catch(() => null);
+          out[k] = i?.channel?.is_archived ? null : { id, name: i?.ok ? i.channel?.name || null : null };
+        }
+        return json(out);
+      }
+      if (request.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+      const to = body.to === 'client' ? 'client' : 'internal';
+      const channel = chans[to];
+      if (!channel) return json({ error: `${a.name} has no ${to} channel set. Set it in Brand settings, Slack and sending.` }, 400);
+      const b64 = String(body.png || '');
+      if (!b64 || b64.length > 14e6) return json({ error: 'The picture is missing or too big.' }, 400);
+      let bytes;
+      try { const bin = atob(b64); bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); }
+      catch { return json({ error: 'The picture could not be read.' }, 400); }
+      if (bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4E || bytes[3] !== 0x47) return json({ error: 'That is not a PNG.' }, 400);
+      /* Slack text: escape &, <, > so a typed line can never become a mention or a link; no em dashes. */
+      const sl = (s, n) => String(s || '').replace(/[\u2014\u2013]/g, ', ').replace(/[\r\n]+/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').trim().slice(0, n);
+      const title = sl(body.title, 140) || 'Locus';
+      const filename = (String(body.filename || '').toLowerCase().replace(/[^a-z0-9.-]+/g, '-').replace(/^-+/, '').slice(0, 140) || 'locus') .replace(/(\.png)?$/, '.png');
+      const link = /^https:\/\/tools\.go-mobius-digital\.com\/profit\/[^\s<>|]*$/.test(String(body.link || '')) ? String(body.link) : '';
+      const by = email ? email.split('@')[0].replace(/^./, c => c.toUpperCase()) : null;
+      const comment = [sl(body.text, 500), `*${title}*${body.page ? ` · ${sl(body.page, 60)}` : ''} · ${sl(a.name, 80)}${body.dates ? ` · ${sl(body.dates, 120)}` : ''}`,
+        to === 'internal' && link ? `<${link}|Open it in Locus>${by ? ` · shared by ${sl(by, 40)}` : ''}` : (by && to === 'internal' ? `Shared by ${sl(by, 40)}` : '')].filter(Boolean).join('\n');
+      const up = await slackApi(env, 'files.getUploadURLExternal', { filename, length: bytes.length });
+      if (!up?.ok) return json({ error: `Slack would not take the picture: ${up?.error || 'no answer'}` }, 502);
+      const put = await xfetch(up.upload_url, { method: 'POST', body: bytes });
+      if (!put.ok) return json({ error: `The upload to Slack failed (HTTP ${put.status}).` }, 502);
+      const done = await slackApi(env, 'files.completeUploadExternal', { files: [{ id: up.file_id, title }], channel_id: channel, initial_comment: comment });
+      if (!done?.ok) return json({ error: `Slack did not post it: ${done?.error || 'no answer'}${done?.error === 'not_in_channel' ? '. Add the Mobius Digital app to that channel.' : ''}` }, 502);
+      const info = await slackApi(env, 'conversations.info', { channel }).catch(() => null);
+      return json({ ok: true, to, name: info?.ok ? info.channel?.name || null : null });
+    }
+
+    /* ---- the Strategist, in Locus ---- */
+    if (path.startsWith('/api/ask')) {
+      /* A client login (the brand edition, 2026-10-10) asks the SAME engine in its client mode (clients.js clientAsk):
+         pinned to its brand, reading Locus through its own sign-in, $2 a day. It may also follow and Stop its own answer.
+         Every other /api/ask route (settings, memory, skills, findings, schedules, the review) stays the team's. */
+      if (clientScope(request)) {
+        if (path === '/api/ask' && request.method === 'POST') {
+          const r = await clientAsk(env, request, await request.json().catch(() => ({})), { strategist });
+          return json(r, r.status || (r.error ? 400 : 200));
+        }
+        if (path === '/api/ask/progress' && request.method === 'GET') {
+          const id = String(url.searchParams.get('id') || '');
+          if (!(await clientOwnsRun(env, request, id))) return json({ steps: [], done: true });
+          const p = safeJson(await getSetting(env, `askRun:${id}`), null) || { steps: [], done: true };
+          return json({ steps: p.steps || [], stop: !!p.stop, done: !!p.done });
+        }
+        if (path === '/api/ask/stop' && request.method === 'POST') {
+          const id = String((await request.json().catch(() => ({}))).id || '');
+          if (!(await clientOwnsRun(env, request, id))) return json({ ok: false });
+          const cur = safeJson(await getSetting(env, `askRun:${id}`), null);
+          if (cur) await putSetting(env, `askRun:${id}`, JSON.stringify({ ...cur, stop: true }));
+          return json({ ok: !!cur });
+        }
+        return json({ error: 'The assistant settings are for the Mobius team.' }, 403);
+      }
+      /* Scheduled questions (askschedule.js): admin-checked inside. */
+      const sched = await handleSchedules(request, env, path, json, hubDeps());
+      if (sched) return sched;
+      /* The Monday account review: switch, state, a dry-run preview for one brand (review.js). Admin-checked inside. */
+      const rev = await handleReview(request, env, path, json, { ...hubDeps(), briefHour });
+      if (rev) return rev;
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const { engine, h } = strategist();
+      const body = request.method === 'GET' ? {} : await request.json().catch(() => ({}));
+      if (path === '/api/ask' && request.method === 'POST') {
+        const findings = await engine.openFindings(env, h()).catch(() => []);
+        /* Per-brand access: a limited person's question carries their brands, and the Strategist is told to
+           stay inside them (brandguard.js filters the JSON; this covers the words of the answer). */
+        const only = await brandsFor(env, await sessionEmail(env, request)).catch(() => null);
+        let q = body.question;
+        if (only) { const { results: nm } = await env.DB.prepare(`SELECT act_id, name FROM brand_accounts`).all(); const names = (nm || []).filter(x => only.has(x.act_id)).map(x => x.name); q = `[ACCESS RULE: this person may only see ${names.join(', ')}. Read, mention, compare or total no other brand; if asked about one, say they do not have access.] ${q}`; }
+        /* runId: the chat polls /api/ask/progress with it for the live steps and can Stop the answer.
+           auth + who: locus_get / locus_write act as this person, and the usage log says who asked. */
+        const r = await engine.answerWeb(env, q, body.history, h(), { findings: findings.slice(0, 6), screen: body.screen || null,
+          runId: /^[a-z0-9]{6,16}$/.test(String(body.runId || '')) ? body.runId : null,
+          auth: request.headers.get('Authorization') || '', call: askCaller(env, request.headers.get('Authorization') || '', ctx).call, who: await sessionEmail(env, request).catch(() => null) || 'admin' });
+        const auth = request.headers.get('Authorization') || '';
+        const tok = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+        const sess = tok && !(env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) ? await verifySession(env, tok) : null;
+        const owner = (env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) || String(sess?.email || '').toLowerCase() === String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase();
+        return json({ ...r, isOwner: owner });
+      }
+      /* ---- the Viktor-grade pass (2026-10-09): live steps, Stop, and the Strategist settings screen ---- */
+      if (path === '/api/ask/progress') {
+        const id = String(url.searchParams.get('id') || '');
+        return json(safeJson(await getSetting(env, `askRun:${id}`), null) || { steps: [], done: true });
+      }
+      if (path === '/api/ask/stop' && request.method === 'POST') {
+        const id = String(body.id || '');
+        const cur = safeJson(await getSetting(env, `askRun:${id}`), null);
+        if (cur) await putSetting(env, `askRun:${id}`, JSON.stringify({ ...cur, stop: true }));
+        return json({ ok: !!cur });
+      }
+      if (path === '/api/ask/settings') {
+        if (request.method === 'PUT') {
+          if (body.model !== undefined) { if (!STRAT_PRESETS[body.model]) return json({ error: 'model is smart, quick or deep' }, 400); await putSetting(env, 'strategistModel', body.model); }
+          if (body.instructions !== undefined) await putSetting(env, 'strategistInstructions', String(body.instructions || '').slice(0, 4000));
+          if (body.indexChannels !== undefined) { await putSetting(env, 'strategistIndexChannels', String(body.indexChannels || '').slice(0, 2000)); forgetChannelCache(); }
+        }
+        return json({ model: (await getSetting(env, 'strategistModel')) || 'smart', presets: STRAT_PRESETS,
+          instructions: (await getSetting(env, 'strategistInstructions')) || '', indexChannels: (await getSetting(env, 'strategistIndexChannels')) || '',
+          channel: await getSetting(env, 'strategistChannel') });
+      }
+      /* WHO MAY USE LOCUS IN SLACK (slackaccess.js). Anyone on the team reads it; only Cole changes it. */
+      if (path === '/api/ask/slack-access') {
+        const me = String(await sessionEmail(env, request).catch(() => '') || '').toLowerCase();
+        const owner = me ? me === String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase() : await isAdmin(request, env);
+        let access = await readAccess(env, getSetting);
+        if (request.method === 'PUT') {
+          if (!owner) return json({ error: 'Only Cole changes who can use Locus.' }, 403);
+          const at = new Date().toISOString();
+          if (body.person) {
+            const id = String(body.person.id || '');
+            if (body.person.remove) delete access.people[id];
+            else access.people[id] = { ...(access.people[id] || {}), name: body.person.name, level: body.person.level, brands: body.person.brands || [], by: me || 'admin', at };
+          }
+          if (body.channel) {
+            const id = String(body.channel.id || '');
+            if (body.channel.remove) delete access.channels[id];
+            else access.channels[id] = { ...(access.channels[id] || {}), name: body.channel.name, brand: body.channel.brand || null, off: !!body.channel.off, by: me || 'admin', at };
+            await putSetting(env, `locusChan:${id}`, body.channel.off || body.channel.remove ? '0' : '1');
+          }
+          access = await writeAccess(env, putSetting, access);
+        }
+        const { results: brands } = await env.DB.prepare(`SELECT id, name FROM brands WHERE status IN ('active', 'demo') ORDER BY name`).all();
+        return json({ ...access, owner, brands: brands || [], cole: 'U06C37MDWD7' });
+      }
+      /* Correct or remove one of Locus's OWN messages in any channel, shared ones included (2026-10-21: its first
+         #lucky-email answer had a wrong price and a long prompt). Cole or the admin key only; Slack itself refuses
+         an app editing anyone else's message, and we check it is ours first. */
+      if (path === '/api/ask/own-message' && request.method === 'POST') {
+        const me = String(await sessionEmail(env, request).catch(() => '') || '').toLowerCase();
+        const owner = me ? me === String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase() : (env.ADMIN_TOKEN && request.headers.get('Authorization') === 'Bearer ' + env.ADMIN_TOKEN);
+        if (!owner) return json({ error: 'Only Cole can do this.' }, 403);
+        const ch = String(body.channel || ''), ts = String(body.ts || '');
+        const r = await slackApi(env, 'conversations.replies', { channel: ch, ts, latest: ts, inclusive: true, limit: 1 });
+        const msg = (r?.messages || []).find(m => m.ts === ts);
+        const who = await slackApi(env, 'auth.test', {});
+        if (!msg) return json({ error: `Slack: ${r?.error || 'message not found'}` }, 404);
+        if (!(msg.bot_id && msg.bot_id === who.bot_id) && msg.user !== who.user_id) return json({ error: 'That is not one of Locus\'s own messages.' }, 400);
+        const out = body.delete ? await slackApi(env, 'chat.delete', { channel: ch, ts })
+          : await slackApi(env, 'chat.update', { channel: ch, ts, text: String(body.text || '').replace(/—/g, ',').slice(0, 3900), blocks: [] });
+        return json(out.ok ? { ok: true, was: msg.text?.slice(0, 200) } : { error: `Slack: ${out.error}` }, out.ok ? 200 : 400);
+      }
+      /* People to add: a name search over our workspace, or the members of one channel (Slack Connect people
+         only show up there). Channels: every channel the app is in, with whether outsiders are in it. */
+      if (path === '/api/ask/slack-people') {
+        const ch = String(url.searchParams.get('channel') || '');
+        const q = String(url.searchParams.get('q') || '').toLowerCase().trim();
+        let ids = [];
+        if (/^[CG][A-Z0-9]{5,20}$/.test(ch)) {
+          const r = await slackApi(env, 'conversations.members', { channel: ch, limit: 200 });
+          if (!r?.ok) return json({ error: `Slack: ${r?.error || 'no answer'}. Add the Mobius Digital app to that channel first.` }, 400);
+          ids = (r.members || []).slice(0, 40);
+        } else if (q.length >= 2) {
+          const r = await slackApi(env, 'users.list', { limit: 400 });
+          ids = (r?.members || []).filter(u => !u.deleted && !u.is_bot && `${u.real_name || ''} ${u.name || ''} ${u.profile?.email || ''}`.toLowerCase().includes(q)).map(u => u.id).slice(0, 25);
+        }
+        /* whoIs keeps users.info a few minutes in the isolate, so each person is one Slack read. */
+        const deps = accessDeps();
+        const rows = await Promise.all(ids.map(id => whoIs(env, deps, id).then(g => ({ id, g })).catch(() => null)));
+        return json({ people: rows.filter(p => p && p.g.role !== 'bot').map(p => ({ id: p.id, name: p.g.name || p.id, role: p.g.role })) });
+      }
+      if (path === '/api/ask/slack-channels') {
+        const out = [];
+        let cursor = '';
+        for (let i = 0; i < 4; i++) {
+          const r = await slackApi(env, 'conversations.list', { types: 'public_channel,private_channel', exclude_archived: true, limit: 500, cursor: cursor || undefined });
+          if (!r?.ok) return json({ error: `Slack: ${r?.error || 'no answer'}` }, 400);
+          for (const c of r.channels || []) if (c.is_member) out.push({ id: c.id, name: c.name, shared: !!(c.is_ext_shared || c.is_shared || c.is_pending_ext_shared), private: !!c.is_private });
+          cursor = r.response_metadata?.next_cursor || '';
+          if (!cursor) break;
+        }
+        return json({ channels: out.sort((a, b) => a.name.localeCompare(b.name)) });
+      }
+      if (path === '/api/ask/memory') {
+        if (request.method === 'POST') return json(await stratRemember(env, { scope: String(body.scope || 'agency'), topic: body.topic, text: body.text, until: body.until || null, source: 'added in Locus', by: await sessionEmail(env, request).catch(() => null) }));
+        if (request.method === 'PUT') return json(await editFact(env, String(body.id || ''), { text: body.text, topic: body.topic, until: body.until }));
+        if (request.method === 'DELETE') return json(await stratForget(env, { id: String(url.searchParams.get('id') || '') }));
+        const { results: brands } = await env.DB.prepare(`SELECT id, name FROM brands WHERE status IN ('active', 'demo') ORDER BY name`).all();
+        return json({ facts: await factsList(env, url.searchParams.get('scope') || null), brands: brands || [] });
+      }
+      if (path === '/api/ask/skills') {
+        if (request.method === 'PUT') return json(await saveSkill(env, { name: body.name, description: body.description, body: body.body, by: await sessionEmail(env, request).catch(() => null) }));
+        if (request.method === 'DELETE') return json(await deleteSkill(env, String(url.searchParams.get('id') || '')));
+        return json({ skills: await skillsList(env, { all: true }) });
+      }
+      /* Run one of the Strategist's data tools directly (store_sql, web_lookup, match_ads_to_board): the admin key only, for checks. */
+      if (path === '/api/ask/tool' && request.method === 'POST') {
+        if (!env.ADMIN_TOKEN || request.headers.get('Authorization') !== 'Bearer ' + env.ADMIN_TOKEN) return json({ error: 'Admin key only.' }, 403);
+        const tdeps = { listAccounts, xfetch, slack: slackApi, getSetting, putSetting };
+        const tool = [...dataTools(tdeps), ...extraTools(tdeps), ...studioMakeTools(strategistDeps())].find(t => t.def.name === body.name);
+        if (!tool) return json({ error: 'No such tool.' }, 400);
+        /* channel + user (+ thread): run it as though asked in that Slack conversation (make_canvas, studio_make). */
+        const sctx = body.channel ? { surface: 'slack', channel: body.channel, thread: body.thread || null, ev: { user: body.user || null } } : { surface: 'web' };
+        return json(await tool.run(env, body.input || {}, { ...sctx, screen: body.act ? { act_id: body.act } : null }));
+      }
+      /* Re-run or push an ideas thread (ideas.js adminIdea): the admin key only. */
+      if (path === '/api/ask/idea' && request.method === 'POST') {
+        if (!env.ADMIN_TOKEN || request.headers.get('Authorization') !== 'Bearer ' + env.ADMIN_TOKEN) return json({ error: 'Admin key only.' }, 403);
+        return json(await adminIdea(env, body || {}));
+      }
+      if (path === '/api/ask/usage') return json(await usageSummary(env, Math.min(90, Number(url.searchParams.get('days')) || 30)));
+      /* Access checks: Meta permissions per ad account, the app in each brand channel; grant Manage to itself (metaaccess.js). */
+      /* Connect links for every live brand: what is missing and the link to send (connect.js). */
+      if (path === '/api/ask/connect') return json(await connectOverview(env, 'https://tools.go-mobius-digital.com'));
+      /* Check now (Cole's button): every look at once, for one brand or all. */
+      if (path === '/api/ask/connect/check') return json(await connectNow(env, 'all', body.act || null));
+      if (path === '/api/ask/access' && request.method === 'POST' && (body.sweep || body.dry)) return json(await partnerSweep(env, idxDeps(), { dry: !!body.dry }));
+      if (path === '/api/ask/access') return json(request.method === 'POST' ? await grantSelf(env, idxDeps(), { act: body.act || null }) : await accessReport(env, idxDeps()));
+      if (path === '/api/ask/index') {
+        if (request.method === 'POST') return json(await backfillTick(env, idxDeps()));
+        return json(await indexStatus(env));
+      }
+      if (path === '/api/ask/reports') return json({ reports: await engine.reportsList(env, h()) });
+      if (path === '/api/ask/findings') return json({ findings: await engine.openFindings(env, h()),
+        briefing: safeJson(await getSetting(env, engine.keys.lastBriefing), null), memory: await engine.memory(env, h()), brief: await engine.getBrief(env, h()),
+        channel: await getSetting(env, 'strategistChannel'), playbook: await engine.getPlaybook(env, h()), pending: await engine.pendingList(env, h()) });
+      if (path === '/api/ask/finding' && request.method === 'POST') {
+        if (!body.key) return json({ error: 'key required' }, 400);
+        return json(await engine.setFindingState(env, String(body.key), String(body.state || 'done')));
+      }
+      if (path === '/api/ask/forget' && request.method === 'POST') {
+        const key = body.kind === 'watch' ? engine.keys.watches : engine.keys.notes;
+        const list = safeJson(await getSetting(env, key), []) || [];
+        const kept = body.kind === 'watch' ? list.map(w => w.id === body.id ? { ...w, active: false } : w) : list.filter((n, i) => i !== Number(body.index));
+        await putSetting(env, key, JSON.stringify(kept));
+        return json({ ok: true });
+      }
+      if (path === '/api/ask/brief' && request.method === 'PUT') { await putSetting(env, engine.keys.brief, String(body.text || '').slice(0, 4000)); return json({ ok: true }); }
+      if (path === '/api/ask/playbook' && request.method === 'PUT') { await putSetting(env, engine.keys.playbook, String(body.text || '').slice(0, 8000)); return json({ ok: true }); }
+      if (path === '/api/ask/apply' && request.method === 'POST') return json(await engine.applyProposal(env, String(body.id || ''), h(), { cancel: !!body.cancel, ctx: { ...askCaller(env, request.headers.get('Authorization') || '', ctx), who: await sessionEmail(env, request).catch(() => null) } }));
+      if (path === '/api/ask/channel' && request.method === 'PUT') { await putSetting(env, 'strategistChannel', String(body.channel || '').trim()); return json({ ok: true }); }
+      if (path === '/api/ask/run' && request.method === 'POST') return json(await strategistNightly(env));
+      if (path === '/api/ask/briefing' && request.method === 'POST') return json({ text: await strategistBriefing(env, true) });
+      return json({ error: 'not found' }, 404);
+    }
+
+    /* COVER IMAGES ON A CLIENT LINK. A shared ad set is minted WITHOUT its
+       images now - downloading up to forty covers from Meta before the link
+       could be copied was the whole of the wait Cole felt - so the client's
+       page asks for them here by share token, and only for ads that snapshot
+       contains. They cache in ad_creative on first view; every later open is
+       instant. Same rule as ad-video below: the token authorises its own ads
+       and nothing else. */
+    /* COVERS ON A CREATOR LINK (Ambassadors, profit/worker/src/amb.js). The slug
+       authorises exactly the Meta ads shown as proof on that brand's LIVE page,
+       and nothing else - the same rule as a share token. */
+    if (path === '/api/ad-creatives' && url.searchParams.get('angles')) {
+      const slug = url.searchParams.get('angles');
+      if (!/^[a-z0-9-]{1,50}$/.test(slug)) return json({ error: 'bad link' }, 400);
+      const { results } = await env.DB.prepare(
+        `SELECT p.ad_id FROM p_amb_proof p JOIN p_amb_brand b ON b.act_id = p.act_id
+          WHERE b.slug = ?1 AND b.live = 1 AND p.kind = 'meta' AND p.shown = 1`,
+      ).bind(slug).all().catch(() => ({ results: [] }));
+      const allowed = new Set((results || []).map(r => r.ad_id));
+      for (const id of await anglesBoardAds(env, slug)) allowed.add(id);
+      const ids = (url.searchParams.get('ads') || '').split(',').map(x => x.trim()).filter(id => allowed.has(id)).slice(0, 40);
+      if (!ids.length) return json({ assets: {} });
+      let assets = {};
+      try { assets = await adThumbnails(env, ids, LIVE_THUMBS); } catch (e) { return json({ assets: {}, error: e.message }); }
+      // A creator link never carries money or internal names: covers and copy only.
+      const slim = {};
+      for (const [k, v] of Object.entries(assets)) slim[k] = { thumb: v.thumb || null, media_type: v.media_type || null, headline: v.headline || null, body: v.body || null };
+      return json({ assets: slim });
+    }
+
+    if (path === '/api/ad-creatives' && url.searchParams.get('share')) {
+      const tok = url.searchParams.get('share');
+      if (!/^[a-f0-9]{16,}$/.test(tok)) return json({ error: 'bad token' }, 400);
+      const row = await env.DB.prepare(`SELECT act_id, data_json FROM p_ad_share WHERE token = ?1`).bind(tok).first();
+      if (!row) return json({ error: 'this link is no longer valid' }, 404);
+      const allowed = new Set((safeJson(row.data_json, {}).ads || []).map(a => a.ad_id));
+      const asked = (url.searchParams.get('ads') || '').split(',').map(x => x.trim()).filter(id => allowed.has(id)).slice(0, 40);
+      /* Only ads that really are the link's brand's (2026-10-14 audit: the snapshot is written by the browser, so its
+         ad list is not proof on its own). */
+      const ids = asked.length ? ((await env.DB.prepare(`SELECT ad_id FROM ads WHERE act_id IN ${metaOf(1)} AND ad_id IN (${asked.map((_, i) => '?' + (i + 2)).join(',')})`).bind(await resolveBrandId(env, row.act_id), ...asked).all().catch(() => ({ results: [] }))).results || []).map(r => r.ad_id) : [];
+      if (!ids.length) return json({ assets: {} });
+      let assets = {};
+      try { assets = await adThumbnails(env, ids, LIVE_THUMBS); } catch (e) { return json({ assets: {}, error: e.message }); }
+      return json({ assets });
+    }
+
+    /* A playable mp4 for one ad. Two ways in, and no third:
+ - a signed-in team member (session/admin), for the Reports tab;
+ - `?report=<archive token>`, for the client's link, which only ever
+         resolves an ad that IS in one of that client's sent reports.
+       Returns the URL rather than streaming it, so the browser talks straight
+       to the CDN and seeking/range requests work properly. */
+    /* ---- YOUR ADS (2026-10-03): the client's own page of every ad we ran for them.
+       locus.go-mobius-digital.com/yourads/?t=<the brand's report token> (the same stable token as their
+       report archive). Public by token, like the archive; only that brand's ads, newest first, no money.
+       /thumb serves one ad's image (cached creative), ?dl=1 as a download. ---- */
+    let yam;
+    if ((yam = path.match(/^\/api\/your-ads\/([a-f0-9]{16,})(\/thumb)?$/)) && request.method === 'GET') {
+      const actId = await resolveBrandId(env, safeJson(await getSetting(env, 'reportTokens'), {})?.[yam[1]]?.act_id);
+      if (!actId) return json({ error: 'This link is not valid. Ask your Mobius contact for a new one.' }, 404);
+      if (yam[2]) {
+        const adId = url.searchParams.get('ad') || '';
+        const own = /^\d+$/.test(adId) && await env.DB.prepare(`SELECT 1 FROM ads WHERE act_id IN ${metaOf(1)} AND ad_id = ?2`).bind(actId, adId).first().catch(() => null);
+        if (!own) return new Response('not found', { status: 404, headers: CORS });
+        const c = (await adThumbnails(env, [adId], LIVE_THUMBS).catch(() => ({})))[adId];
+        const mm = /^data:([^;]+);base64,(.+)$/.exec(c?.thumb || '');
+        if (!mm) return new Response('no image', { status: 404, headers: CORS });
+        const bytes = Uint8Array.from(atob(mm[2]), ch => ch.charCodeAt(0));
+        const ext = (mm[1].split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+        return new Response(bytes, { headers: { ...CORS, 'Content-Type': mm[1], 'Cache-Control': 'public, max-age=86400',
+          ...(url.searchParams.get('dl') ? { 'Content-Disposition': `attachment; filename="ad-${adId}.${ext}"` } : {}) } });
+      }
+      const acct = await env.DB.prepare(`SELECT name FROM brand_accounts WHERE act_id = ?1`).bind(actId).first();
+      const since = new Date(Date.now() - 400 * 864e5).toISOString().slice(0, 10);
+      const recent = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+      const { results } = await env.DB.prepare(`SELECT d.ad_id, a.name, a.media_type, MIN(d.date) AS first, MAX(d.date) AS last
+          FROM ad_daily d JOIN ads a ON a.act_id = d.act_id AND a.ad_id = d.ad_id
+          WHERE d.act_id IN ${metaOf(1)} AND d.date >= ?2 AND d.spend > 0 GROUP BY d.ad_id ORDER BY first DESC, last DESC LIMIT 400`).bind(actId, since).all();
+      /* Our ad names carry test numbers and format tags ("326-5 | Still"); the client reads what is left. */
+      const label = n => {
+        let t = String(n || '').replace(/^\s*(?:[A-Za-z]{2,4}_)?#?\d{1,4}(?:[-.]\s*\d+)?\s*[-:|.]?\s*/, '').split('|').map(x => x.trim()).filter(Boolean)[0] || '';
+        /* Creator uploads arrive as file names: CalebSchroeder_FairwayPalms_..._20260925_trybe=dcac0b10 */
+        t = t.replace(/(?:^|[_\s-])(?:trybe|utm_\w+|id)\s*[=:]\s*\w+/gi, '').replace(/(?:^|[_\s-])20\d{6}(?=$|[_\s-])/g, '').replace(/\.(mp4|mov|jpe?g|png|webp)$/i, '')
+          .replace(/_+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\s{2,}/g, ' ').trim();
+        /* A bare format tag ("Still", "UGC") says nothing to a client: the page names it by type. */
+        return /^(still|static|ugc|video|image|carousel|gif|reel|story)$/i.test(t) ? '' : t;
+      };
+      return json({ brand: acct?.name || '', ads: (results || []).map(r => ({ id: r.ad_id, name: label(r.name), type: r.media_type || null, from: r.first, to: r.last, live: r.last >= recent })) });
+    }
+    /* Locus: the link to a brand's Your ads page (admin). */
+    if (path === '/api/your-ads-link' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const act = url.searchParams.get('act') || '';
+      if (!isBrandId(act)) return json({ error: 'act is required' }, 400);
+      return json({ url: `https://locus.go-mobius-digital.com/yourads/?t=${await reportToken(env, act)}` });
+    }
+    if (path === '/api/ad-video') {
+      const adId = url.searchParams.get('ad');
+      const repTok = url.searchParams.get('report');
+      if (!adId) return json({ error: 'ad is required' }, 400);
+      const adsTok = url.searchParams.get('ads');
+      let hint = {};
+      if (repTok) {
+        const row = await adInSentReport(env, repTok, adId);
+        if (!row) return json({ error: 'not found in this report' }, 404);
+        hint = { video_id: row.video_id, page_id: row.page_id };
+      } else if (adsTok) {
+        /* A shared creative snapshot authorises playback for the ads IT
+           contains and nothing else - the same rule as a report archive token.
+           Anything looser turns this into an open proxy for arbitrary Meta
+           video ids, which is the one thing this endpoint must never be. */
+        if (!/^[a-f0-9]{16,}$/.test(adsTok)) return json({ error: 'bad token' }, 400);
+        const row = await env.DB.prepare(`SELECT act_id, data_json FROM p_ad_share WHERE token = ?1`).bind(adsTok).first();
+        if (!row) return json({ error: 'this link is no longer valid' }, 404);
+        const hit = (safeJson(row.data_json, {}).ads || []).find(a => a.ad_id === adId);
+        if (!hit) return json({ error: 'not in this set of ads' }, 404);
+        /* The ad must be the link's brand's, and the video is read from the ad itself, never from the stored snapshot
+           (which the browser wrote: a video id there could be anyone's). */
+        const own = await env.DB.prepare(`SELECT 1 FROM ads WHERE act_id IN ${metaOf(1)} AND ad_id = ?2`).bind(await resolveBrandId(env, row.act_id), adId).first().catch(() => null);
+        if (!own) return json({ error: 'not in this set of ads' }, 404);
+        hint = {};
+      } else if (url.searchParams.get('yours')) {
+        /* The client's own Your ads page plays only that brand's ads. */
+        const actId = await resolveBrandId(env, safeJson(await getSetting(env, 'reportTokens'), {})?.[url.searchParams.get('yours')]?.act_id);
+        const own = actId && await env.DB.prepare(`SELECT 1 FROM ads WHERE act_id IN ${metaOf(1)} AND ad_id = ?2`).bind(actId, adId).first().catch(() => null);
+        if (!own) return json({ error: 'not on this page' }, 404);
+      } else if (url.searchParams.get('angles')) {
+        // A creator link plays only the ads it shows as proof (see ad-creatives above).
+        const slug = url.searchParams.get('angles');
+        const ok = /^[a-z0-9-]{1,50}$/.test(slug) && await env.DB.prepare(
+          `SELECT 1 FROM p_amb_proof p JOIN p_amb_brand b ON b.act_id = p.act_id
+            WHERE b.slug = ?1 AND b.live = 1 AND p.kind = 'meta' AND p.shown = 1 AND p.ad_id = ?2 LIMIT 1`,
+        ).bind(slug, adId).first().catch(() => null);
+        if (!ok && !(await anglesBoardAds(env, slug)).includes(adId)) return json({ error: 'not on this page' }, 404);
+      } else if (!(await isAdmin(request, env))) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      /* The old message here was one flat "no playable video for this ad" for
+         five different causes - no video, no page, no token, a stale token, a
+         refusal from Meta - which is why a card that plainly WAS a video read
+         as though the ad had none. `adVideoSource` now says which. */
+      /* A PARTNERSHIP AD WILL NEVER YIELD AN MP4, SO STOP PAYING TO FIND OUT.
+         Resolving one costs four or five sequential Meta round trips - the
+         creative, the page-token map, the video, a token refresh, then the
+         preview - and for a creator's page every one of them is doomed by
+         construction. Cole's first click took seconds. The verdict is cached
+         per ad and re-checked weekly; only the partnership case short-circuits,
+         because an mp4 URL is signed and short-lived and must stay live. */
+      const cachedPrev = await env.DB.prepare(
+        `SELECT url, partnership, fetched_at FROM ad_preview WHERE ad_id = ?1`,
+      ).bind(adId).first().catch(() => null);
+      const previewFresh = cachedPrev?.fetched_at
+        && Date.now() - Date.parse(cachedPrev.fetched_at) < AD_PREVIEW_TTL_DAYS * 86400e3;
+      /* `?mode=preview` (Locus Creative, 2026-10-09): Cole wants Meta's own preview on Play,
+         not the mp4 (the file is slow to start). One cached D1 read, else one Meta call per
+         format; falls through to the file only when Meta has no preview. */
+      if (url.searchParams.get('mode') === 'preview') {
+        if (cachedPrev?.url && previewFresh) return json({ src: null, preview: cachedPrev.url, partnership: !!cachedPrev.partnership, cached: true });
+        const pv = (await adPreviewLinks(env, [adId]).catch(() => ({})))[adId] || null;
+        if (pv) {
+          await env.DB.prepare(
+            `INSERT INTO ad_preview (ad_id, url, partnership, page_id, fetched_at) VALUES (?1, ?2, ?3, NULL, ?4)
+             ON CONFLICT(ad_id) DO UPDATE SET url = excluded.url, fetched_at = excluded.fetched_at`,
+          ).bind(adId, pv, cachedPrev?.partnership ? 1 : 0, new Date().toISOString()).run().catch(() => {});
+          return json({ src: null, preview: pv, partnership: !!cachedPrev?.partnership });
+        }
+      }
+      if (cachedPrev?.partnership && cachedPrev.url && previewFresh) {
+        return json({ src: null, preview: cachedPrev.url, partnership: true, cached: true,
+          reason: PARTNERSHIP_REASON });
+      }
+      const { src, reason, partnership, page_id } = await adVideoSource(env, adId, hint);
+      if (!src) {
+        /* AN AD WE CANNOT FETCH IS NOT AN AD YOU CANNOT SEE.
+           Meta's `/previews` iframe renders the real creative - video included - 
+           with NO login and NO page token, which is exactly the case a
+           partnership ad falls into. It is what the client-facing reports have
+           always used, so this is proven machinery rather than a new idea.
+           Returning 200 with a null src (rather than the old flat 404) is what
+           lets the card show the ad instead of an apology. */
+        const preview = (await adPreviewLinks(env, [adId]).catch(() => ({})))[adId] || null;
+        if (preview) {
+          // Remember it, so the next click on a partnership ad costs one D1 read
+          // instead of five Meta calls.
+          await env.DB.prepare(
+            `INSERT INTO ad_preview (ad_id, url, partnership, page_id, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(ad_id) DO UPDATE SET url = excluded.url, partnership = excluded.partnership,
+               page_id = excluded.page_id, fetched_at = excluded.fetched_at`,
+          ).bind(adId, preview, partnership ? 1 : 0, page_id ?? null, new Date().toISOString()).run().catch(() => {});
+          return json({ src: null, preview, reason, partnership: !!partnership, page_id: page_id ?? null });
+        }
+        return json({ error: reason || 'This ad has no video to play.' }, 404);
+      }
+      // Deliberately uncached: the signed URL is short-lived, and a cached one
+      // that has expired plays as a broken video rather than an honest retry.
+      return json({ src });
+    }
+
+
+    /* Locus Agency settings > Slack and sending: "Preview this morning's card" for one brand. Nothing is posted. */
+    if (path === '/api/morning-card/preview' && request.method === 'GET') {
+      if (!(await isAdmin(request, env)) || clientScope(request)) return json({ error: 'unauthorized' }, 401);
+      try { return json(await previewCard(env, cardDeps(), String(url.searchParams.get('act') || ''))); }
+      catch (e) { return json({ error: e.message }, e.status || 500); }
+    }
+    if (path === '/api/brief-time' && (request.method === 'GET' || request.method === 'PUT')) {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      if (request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        const h = +b.hour;
+        if (!Number.isInteger(h) || h < 0 || h > 23) return json({ error: 'hour must be a whole number from 0 to 23' }, 400);
+        await putSetting(env, 'morningHour', String(h));
+        await putSetting(env, 'briefHour', String(h));   // kept in step for anything still reading the old key
+      }
+      return json({ hour: await briefHour(env), tz: BRIEF_TZ, now_hour: centralHour() });
+    }
+
+    /* GIVE AN EXISTING DRAFT ITS BUTTONS, WITHOUT REWRITING IT.
+       Renders `briefCard` from the stored row - no Claude, no re-pull, not
+       one word or figure changes - and rewrites the message that is already
+       in the channel. `mode:'repost'` deletes and posts fresh instead, for a
+       message chat.update refuses (Slack will not convert some old posts).
+       `act:'all'` walks every active brand for that date, which is how a
+       morning's worth of drafts gets upgraded in one call. */
+    if (path === '/api/brief-card' && request.method === 'POST') {
+      /* ADMIN, OR A ONE-TIME KEY. This is the same trick the Triple Whale field
+         probe used: a random value dropped into the settings table by hand,
+         spent once, then deleted. It exists so a job that has to run RIGHT NOW
+         can run without anyone reading out - or rotating - a live admin token.
+         The key is checked before the body is even parsed, and it can only ever
+         reach this one endpoint. */
+      const key = url.searchParams.get('key');
+      const want = key ? await getSetting(env, 'cardKey') : null;
+      if (!(want && key === want) && !(await isAdmin(request, env))) {
+        return json({ error: 'unauthorized' }, 401);
+      }
+      const b = await request.json().catch(() => ({}));
+      /* `kind:'report'` redraws the weekly/monthly notices instead of the daily
+         briefs. Same rule: rendered from the stored row, so nothing is written
+         again and no number moves - only the message in Slack. */
+      /* START FRESH FROM ONE DAY. Every unsent day keeps being carried into
+         the next brief - that is the catch-up working as designed, and it is
+         why 6 September opened "covering 9/4, 9/5 and 9/6" at 3,167 characters.
+         Cole, 2026-09-07: "ignore the other ones I didn't send over the past few
+         days, mark them not sent, and only do yesterday from now on."
+
+         So: mark every older DRAFT as skipped (which is what tells the catch-up
+         the day was dealt with), rebuild the target day so it covers that day
+         alone, and repost the card. Skipped is reversible - pressing Write it
+         again on any of those dates drafts it afresh. Nothing sent is touched. */
+      if (b.kind === 'reset') {
+        const accts = !b.act || b.act === 'all'
+          ? await listAccounts(env, true)
+          : [await acctOf(env, b.act)].filter(Boolean);
+        const out = [];
+        for (const acct of accts) {
+          const date = b.date || addDays(localDate(acct.tz), -1);
+          const sk = await env.DB.prepare(
+            `UPDATE briefs SET status = 'skipped' WHERE act_id = ?1 AND date < ?2 AND status = 'draft'`,
+          ).bind(acct.act_id, date).run().catch(() => null);
+          const r = await makeBrief(env, acct, date);
+          if (r.error) { out.push({ name: acct.name, date, error: r.error }); continue; }
+          const prior = await env.DB.prepare(`SELECT slack_ts, slack_channel, status FROM briefs WHERE act_id = ?1 AND date = ?2`)
+            .bind(acct.act_id, date).first().catch(() => null);
+          if (prior?.status === 'sent') { out.push({ name: acct.name, date, skipped: 'already sent to the client' }); continue; }
+          await upsertBrief(env, acct.act_id, date, draftStatus(acct), null, r.text, r.data, { health: r.health ?? null, steer: null });
+          const row = await env.DB.prepare(`SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2`)
+            .bind(acct.act_id, date).first();
+          const card = briefCard(acct, date, row);
+          const ch = prior?.slack_channel || acct.slack_channel;
+          if (!ch) { out.push({ name: acct.name, date, skipped: 'no internal channel set' }); continue; }
+          if (prior?.slack_ts) await slackApi(env, 'chat.delete', { channel: ch, ts: prior.slack_ts }).catch(() => {});
+          const posted = await slackPost(env, ch, card.text, card.blocks, { username: 'Locus', icon: ':memo:' })
+            .catch(e => ({ error: e.message }));
+          if (posted?.ts) {
+            await env.DB.prepare(`UPDATE briefs SET slack_ts = ?3, slack_channel = ?4 WHERE act_id = ?1 AND date = ?2`)
+              .bind(acct.act_id, date, posted.ts, posted.channel || ch).run().catch(() => {});
+          }
+          out.push({ name: acct.name, date, marked_not_sent: sk?.meta?.changes ?? 0,
+            length: r.text.length, reposted: !!posted?.ts, error: posted?.error });
+        }
+        return json({ ok: true, results: out });
+      }
+      /* REWRITE IN PLACE: rebuild the day's brief (fresh numbers + narrative)
+         and redraw its existing Slack card. Unlike 'reset' it marks nothing
+         skipped and never touches a brief already sent to the client. */
+      if (b.kind === 'rewrite') {
+        const accts = !b.act || b.act === 'all'
+          ? await listAccounts(env, true)
+          : [await acctOf(env, b.act)].filter(Boolean);
+        const out = [];
+        for (const acct of accts) {
+          const date = b.date || addDays(localDate(BRIEF_TZ), -1);
+          const prior = await env.DB.prepare(`SELECT status, slack_ts FROM briefs WHERE act_id = ?1 AND date = ?2`)
+            .bind(acct.act_id, date).first().catch(() => null);
+          if (!prior) { out.push({ name: acct.name, date, skipped: 'no brief for that day' }); continue; }
+          if (prior.status === 'sent' || prior.status === 'skipped') { out.push({ name: acct.name, date, skipped: prior.status }); continue; }
+          const r = await makeBrief(env, acct, date).catch(e => ({ error: e.message }));
+          if (r.error) { out.push({ name: acct.name, date, error: r.error }); continue; }
+          await upsertBrief(env, acct.act_id, date, prior.status, null, r.text, r.data, { health: r.health ?? null, steer: null });
+          const card = prior.slack_ts ? await slackSyncBrief(env, acct, date).then(() => 'updated').catch(e => e.message) : 'no card';
+          const d = r.data?.days?.find(x => x.date === date)?.a || {};
+          out.push({ name: acct.name, date, status: prior.status, card, attr: d.attr_source,
+            meta: [d.meta_purchases, d.meta_roas], google: [d.google_purchases, d.google_roas], narrative_error: r.narrative_error });
+        }
+        return json({ ok: true, results: out });
+      }
+      /* EDIT A SENT BRIEF IN THE CLIENT CHANNEL. Rebuilds the day, finds the
+         message we posted as Cole (its ts is not stored, so it is matched by
+         its opening line in the channel history) and chat.updates it with the
+         user token that posted it. `dry: true` reports the match and the new
+         text without touching anything. */
+      if (b.kind === 'client-edit') {
+        const acct = await acctOf(env, b.act);
+        if (!acct || !b.date) return json({ error: 'act and date required' }, 400);
+        const row = await env.DB.prepare(`SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, b.date).first();
+        if (row?.status !== 'sent' || !row.channel) return json({ error: 'not a sent brief', status: row?.status }, 400);
+        if (!env.SLACK_USER_TOKEN) return json({ error: 'no user token' }, 500);
+        // A post sent since 2026-10-21 has its ts on record: edit that one, no history matching.
+        if (typeof b.text === 'string' && b.text.trim() && !b.dry && (await clientPostOf(env, acct.act_id, b.date))?.ts) {
+          const r = await editClientPost(env, acct, b.date, b.text);
+          return r.ok ? json({ ...r, updated: true }) : json({ error: r.error }, 500);
+        }
+        const ut = (method, body) => xfetch(`https://slack.com/api/${method}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${env.SLACK_USER_TOKEN}`, 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(body),
+        }).then(r => r.json());
+        const oldest = String(Math.floor(new Date(row.posted_at).getTime() / 1000) - 7200);
+        // The user token has no history scope; the bot reads, the user token edits.
+        const hist = await slackApi(env, 'conversations.history', { channel: row.channel, oldest, limit: 100 });
+        if (!hist.ok) return json({ error: `history: ${hist.error}` }, 500);
+        const head = s => String(s || '').split('\n').slice(0, 3).join('\n').trim();
+        const want = head(row.text);
+        const msg = (hist.messages || []).find(m => head(m.text) === want)
+          || (hist.messages || []).find(m => String(m.text || '').includes(want.split('\n')[0]));
+        if (!msg) return json({ error: 'could not find the sent message', looked_at: (hist.messages || []).length, want });
+        /* `text` = an exact, already-reviewed replacement (e.g. only the
+           narrative swapped, the sender's own edits kept). Then nothing is
+           rebuilt and the stored numbers are left as sent. */
+        if (typeof b.text === 'string' && b.text.trim()) {
+          if (b.dry) return json({ ok: true, dry: true, ts: msg.ts, old: msg.text, new: b.text });
+          const u = await ut('chat.update', { channel: row.channel, ts: msg.ts, text: b.text });
+          if (!u.ok) return json({ error: `update: ${u.error}` }, 500);
+          await env.DB.prepare(`UPDATE briefs SET text = ?3 WHERE act_id = ?1 AND date = ?2`).bind(acct.act_id, b.date, b.text).run();
+          await slackSyncBrief(env, acct, b.date).catch(() => {});
+          return json({ ok: true, ts: msg.ts, updated: true });
+        }
+        const r = await makeBrief(env, acct, b.date).catch(e => ({ error: e.message }));
+        if (r.error) return json({ error: r.error }, 500);
+        if (b.dry) return json({ ok: true, dry: true, ts: msg.ts, old: msg.text, new: r.text });
+        const u = await ut('chat.update', { channel: row.channel, ts: msg.ts, text: r.text });
+        if (!u.ok) return json({ error: `update: ${u.error}` }, 500);
+        await upsertBrief(env, acct.act_id, b.date, 'sent', row.channel, r.text, r.data, { health: r.health ?? null });
+        await slackSyncBrief(env, acct, b.date).catch(() => {});
+        return json({ ok: true, ts: msg.ts, updated: true });
+      }
+      if (b.kind === 'report') {
+        const accts = !b.act || b.act === 'all'
+          ? await listAccounts(env, true)
+          : [await acctOf(env, b.act)].filter(Boolean);
+        const out = [];
+        for (const acct of accts) {
+          const row = await env.DB.prepare(
+            `SELECT * FROM reports WHERE act_id = ?1 AND status = 'draft' AND slack_ts IS NOT NULL
+             ORDER BY period_start DESC LIMIT 1`,
+          ).bind(acct.act_id).first().catch(() => null);
+          if (!row) { out.push({ name: acct.name, skipped: 'no drafted report with a card' }); continue; }
+          const card = await reportCard(env, acct, row);
+          if (b.mode === 'repost') {
+            /* Delete and post again, rather than edit in place. An edited
+               message keeps its original position in the channel, which is
+               right for a correction and wrong when the point is to see the
+               thing fresh at the bottom. Cole asked for the latter. */
+            await slackApi(env, 'chat.delete', { channel: row.slack_channel, ts: row.slack_ts }).catch(() => {});
+            const posted = await slackPost(env, row.slack_channel, card.text, card.blocks,
+              { username: 'Locus', icon: ':clipboard:' }).catch(e => ({ error: e.message }));
+            if (posted?.ts) {
+              await env.DB.prepare(
+                `UPDATE reports SET slack_ts = ?4, slack_channel = ?5 WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+              ).bind(acct.act_id, row.period, row.period_start, posted.ts, posted.channel || row.slack_channel).run().catch(() => {});
+              out.push({ name: acct.name, period: row.period, start: row.period_start, reposted: true });
+            } else out.push({ name: acct.name, error: posted?.error || 'post failed' });
+            continue;
+          }
+          const u = await slackUpdate(env, row.slack_channel, row.slack_ts, card.text, card.blocks);
+          out.push({ name: acct.name, period: row.period, start: row.period_start, ...(u.ok ? { updated: true } : { error: u.error }) });
+        }
+        return json({ ok: true, results: out });
+      }
+      const list = !b.act || b.act === 'all'
+        ? await listAccounts(env, true)
+        : [await acctOf(env, b.act)].filter(Boolean);
+      if (!list.length) return json({ error: 'unknown account' }, 404);
+      const out = [];
+      for (const acct of list) {
+        const date = b.date || addDays(localDate(acct.tz), -1);
+        const row = await env.DB.prepare(`SELECT * FROM briefs WHERE act_id = ?1 AND date = ?2`)
+          .bind(acct.act_id, date).first().catch(() => null);
+        if (!row) { out.push({ name: acct.name, date, skipped: 'no brief for that day' }); continue; }
+        const card = briefCard(acct, date, row);
+        // Where the message already is: what we stored, else go and find it.
+        let where = row.slack_ts && row.slack_channel ? { ts: row.slack_ts, channel: row.slack_channel } : null;
+        if (!where) {
+          const found = await findDraftMessage(env, acct, date);
+          if (found?.error) { out.push({ name: acct.name, date, error: found.error }); continue; }
+          where = found;
+        }
+        try {
+          let ts = where?.ts, channel = where?.channel || acct.slack_channel;
+          if (where && b.mode !== 'repost') {
+            const u = await slackUpdate(env, channel, ts, card.text, card.blocks);
+            if (!u.ok) throw new Error(u.error || 'chat.update failed');
+            out.push({ name: acct.name, date, updated: true, ts });
+          } else {
+            if (where) await slackApi(env, 'chat.delete', { channel, ts }).catch(() => {});
+            if (!channel) { out.push({ name: acct.name, date, skipped: 'no internal channel set' }); continue; }
+            const posted = await slackPost(env, channel, card.text, card.blocks,
+              { username: 'Locus', icon: ':memo:' });
+            ts = posted.ts; channel = posted.channel || channel;
+            out.push({ name: acct.name, date, reposted: true, replaced: !!where, ts });
+          }
+          await env.DB.prepare(`UPDATE briefs SET slack_ts = ?3, slack_channel = ?4 WHERE act_id = ?1 AND date = ?2`)
+            .bind(acct.act_id, date, ts, channel).run().catch(() => {});
+        } catch (e) { out.push({ name: acct.name, date, error: e.message }); }
+      }
+      return json({ ok: true, results: out });
+    }
+    if (path === '/health') {
+      const last = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'lastRun'`).first().catch(() => null);
+      return json({ ok: true, lastRun: safeJson(last?.value, null), hasMetaToken: !!env.META_TOKEN, hasAnthropicKey: !!env.ANTHROPIC_API_KEY, hasSlackToken: !!env.SLACK_BOT_TOKEN, hasTwKey: !!env.TW_API_KEY });
+    }
+    /* WHAT THE SCHEDULE ACTUALLY DID. Everything below already existed in the
+       settings table and none of it was on screen anywhere, which is the real
+       reason four days of failures went unnoticed. Admin-gated: it names
+       brands and errors. */
+    /* Connections (2026-10-07): every integration, agency-wide and per brand, with its state and
+       the fix. Read by Locus Settings > Connections and by the Strategist's integrations view. */
+    if (path === '/api/integrations' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      return json(await integrationsReport(env, { brand: url.searchParams.get('brand') || null }));
+    }
+    /* THE READ (Locus hub, 2026-10-07): the three lines at the top of a screen, plus the
+       leaks and the one focus. The screen SENDS the numbers it is showing, so the read can
+       never cite a figure that is not on the page. Cached an hour per exact set of facts
+       (settings `read:<hash>`); made on open, never on a cron. Sonnet tier, about a cent. */
+    /* Right now (checknow.js) and the alerts (alerts.js): GET /api/daycheck/now, /api/alerts*. Admin-checked inside. */
+    if (path === '/api/daycheck/now' || path.startsWith('/api/alerts')) {
+      const r = await handleAlerts(request, env, path, json, autoDeps());
+      if (r) return r;
+    }
+    /* The agency command center (command.js): Asana overdue / stuck per brand, new clients being set up, alerts fired. */
+    if (path === '/api/command/work') {
+      const r = await handleCommand(request, env, path, json, isAdmin, async rq => brandsFor(env, await sessionEmail(env, rq).catch(() => null)));
+      if (r) return r;
+    }
+    /* Agency economics (owner only) and team workload (team): agency.js. Clients are refused (not on CLIENT_RULES). */
+    if (/^\/api\/agency\//.test(path)) {
+      const r = await handleAgency(request, env, path, json, { isAdmin, sessionEmail, brandsFor, mintSession });
+      if (r) return r;
+    }
+    if (path === '/api/daycheck' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      return json(await dayCheckVerdict(env, await request.json().catch(() => ({}))));
+    }
+    if (path === '/api/read' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      return json(await screenRead(env, b));
+    }
+    /* Locus v2: pull Meta campaign and ad set names now (all brands, or ?act=). */
+    if (path === '/api/meta-structure-sync' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const want = url.searchParams.get('act') || 'all';
+      /* Per META ad account (act_id = the Meta id); `?act=` names the brand. */
+      const accts = (await metaSyncRows(env)).filter(a => want === 'all' || a.brand_id === want);
+      const out = [];
+      for (const a of accts) out.push({ name: a.name, meta: a.act_id, ...(await syncMetaStructure(env, a, true).catch(e => ({ error: e.message }))) });
+      return json({ ok: true, brands: out });
+    }
+    /* Post one saved dashboard to its Slack channel now (the hub, 2026-10-07). */
+    if (path === '/api/dashboard-post' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      const row = await env.DB.prepare(`SELECT * FROM p_dashboard WHERE id = ?1`).bind(String(b.id || '')).first().catch(() => null);
+      if (!row) return json({ error: 'No dashboard with that id.' }, 404);
+      if (b.channel && /^[CG][A-Z0-9]{6,}$/.test(String(b.channel))) row.channel = String(b.channel);
+      try { return json(await postDashboard(env, row)); } catch (e) { return json({ error: e.message }, 400); }
+    }
+    /* The market on a day (market.js): Pulse outages, Breezeway's Meta score, what advertisers said
+       online (Claude + web search, once per date, cached). Same gate as /api/read: any signed-in member.
+       ?date=YYYY-MM-DD, default yesterday Central. */
+    /* Was it a bad day on Meta? (market.js metaDay): the Day check screen. Asks the online chatter for yesterday once. */
+    if (path === '/api/metaday' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      await chatterFor(env, addDays(centralDate(), -1)).catch(() => null);
+      return json(await metaDay(env, { days: Math.min(60, Math.max(1, +url.searchParams.get('days') || 30)) }));
+    }
+    /* Platform status, public like the old Pulse feed (it only repeats the platforms' own public status pages). */
+    if (path === '/api/pulse/status' && request.method === 'GET') return json(await pulseStatus(env));
+    if (path === '/api/pulse/import' && request.method === 'POST') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      return json(await pulseImport(env, await request.json().catch(() => ({}))));
+    }
+    if (path === '/api/market' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const date = url.searchParams.get('date') || '';
+      if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: 'date looks like 2026-10-08' }, 400);
+      return json(await marketFor(env, date || addDays(centralDate(), -1)));
+    }
+    /* What the Yesterday post would say right now, per brand, without posting (moved.js). */
+    if (path === '/api/moved-preview' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      return json(await movedPreview(env, hubDeps()));
+    }
+    /* Klaviyo, read live by the brand's own key, for the Email and SMS screen. */
+    /* 2026-10-09: + what=daily|flow|templates|audiences|attentive (from/to/id), and POST /api/klaviyo/write
+       (klaviyowrite.js: flow status, draft, schedule, unschedule, cancel, duplicate; logged with who did it). */
+    if (path === '/api/klaviyo' || path === '/api/klaviyo/write') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const email = await sessionEmail(env, request).catch(() => null);
+      const only = await brandsFor(env, email).catch(() => null);
+      if (path === '/api/klaviyo/write' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        if (only && !only.has(String(body.act || ''))) return json({ error: 'You do not have access to this brand.' }, 403);
+        try { const r = await klaviyoWriteRoute(env, body, email || 'admin token'); return json(r.body, r.status); }
+        catch (e) { return json({ error: e.message }, 502); }
+      }
+      if (request.method !== 'GET') return json({ error: 'GET' }, 405);
+      const act = url.searchParams.get('act') || '';
+      if (only && !only.has(act)) return json({ error: 'You do not have access to this brand.' }, 403);
+      const q = k => url.searchParams.get(k) || undefined;
+      if (url.searchParams.get('what') === 'can') return json(await klaviyoCan(env, act).catch(e => ({ error: e.message })));
+      try { return json(await klaviyoView(env, act, url.searchParams.get('what') || 'overview', p => ctx.waitUntil(p), { id: q('id'), from: q('from'), to: q('to'), kind: q('kind') })); }
+      catch (e) { return json({ error: e.message }, 502); }
+    }
+    /* Google read directly (google.js): GA4 website analytics, Search Console, Google Ads. */
+    if (path.startsWith('/api/tiktok/')) {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      try {
+        if (path === '/api/tiktok/status') return json(await tiktokStatus(env));
+        if (path === '/api/tiktok/start' && request.method === 'POST') return json(await tiktokStart(env, url.origin));
+        if (path === '/api/tiktok/report') return json(await tiktokReport(env, url.searchParams.get('act') || '', url.searchParams.get('from') || '', url.searchParams.get('to') || ''));
+      } catch (e) { return json({ error: e.message }, 502); }
+      return json({ error: 'unknown tiktok route' }, 404);
+    }
+    /* The photo library (assets.js). */
+    if (path.startsWith('/api/assets')) {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const act = url.searchParams.get('act') || '';
+      if (!isBrandId(act)) return json({ error: 'act is required' }, 400);
+      try {
+        if (path === '/api/assets/sync' && request.method === 'POST') { const s1 = await syncAssets(env, act); const t1 = s1.error ? null : await tagAssets(env, act, Math.min(+url.searchParams.get('tag') || 30, 60)); return json({ sync: s1, tag: t1 }); }
+        if (path === '/api/assets/folders' && request.method === 'PUT') { const b = await request.json().catch(() => ({})); const folders = (Array.isArray(b.folders) ? b.folders : String(b.folders || '').split(/[\s,]+/)).filter(Boolean).slice(0, 10);
+          await env.DB.prepare(`INSERT INTO p_br_doc (act_id, line_id, key, data_json, status, source, updated_at) VALUES (?1, '', 'assets', ?2, 'approved', 'staff', datetime('now')) ON CONFLICT(act_id, line_id, key) DO UPDATE SET data_json = excluded.data_json, updated_at = excluded.updated_at`).bind(act, JSON.stringify({ folders })).run(); return json({ ok: true, folders }); }
+        if (path === '/api/assets') return json(await listAssets(env, act, { q: url.searchParams.get('q'), people: url.searchParams.get('people'), setting: url.searchParams.get('setting'), source: url.searchParams.get('source'), limit: url.searchParams.get('limit') }));
+        /* Studio "From the library" (2026-10-08): one image at Studio size; the browser shrinks and uploads it like a picked file. */
+        if (path === '/api/assets/file' && request.method === 'GET') { const f = await assetFile(env, act, url.searchParams.get('id') || ''); return new Response(f.buf, { headers: { 'Content-Type': f.type, 'Cache-Control': 'private, max-age=3600', ...CORS } }); }
+        if (path === '/api/assets/remove' && request.method === 'POST') { const b = await request.json().catch(() => ({})); return json(await removeLook(env, act, String(b.id || ''))); }
+      } catch (e) { return json({ error: e.message }, 502); }
+      return json({ error: 'unknown assets route' }, 404);
+    }
+    /* Products > Stock and Drops for a client login, read only (stock.js supplyClient, 2026-10-10): ONE brand, costs,
+       suppliers, order money, notes and Asana stripped. brandguard clears the client for its own brand; checked again here. */
+    if (path === '/api/supply/client' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const act = url.searchParams.get('act') || '', what = url.searchParams.get('what') === 'brands' ? 'brands' : 'state';
+      if (!act || act === 'all') return json({ error: 'Pick one brand.' }, 400);
+      const cs = clientScope(request);
+      if (cs && !cs.ids.has(act)) return json({ error: 'You do not have access to that brand.' }, 403);
+      try {
+        const { supplyClient } = await import('./stock.js');
+        const r = await supplyClient(env, act, what);
+        return r && r.status && r.error ? json({ error: r.error }, r.status) : json(r);
+      } catch (e) { return json({ error: e.message }, 502); }
+    }
+    /* Stock writes from the Strategist's actions and from a client login's own brand (stock.js handleSupplyProxy):
+       forwarded to the Supply worker with SUPPLY_TOKEN. A client (brandguard cleared it for a route on CLIENT_RULES)
+       is pinned to the Supply brand of its own Locus brand and named in X-Actor. */
+    if (path.startsWith('/api/supply/')) {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const { handleSupplyProxy } = await import('./stock.js');
+      return handleSupplyProxy(request, env, path, url, json, await sessionEmail(env, request).catch(() => ''), clientScope(request));
+    }
+    /* The leak finder (2026-10-13, src/leaks.js): where each brand loses money, ranked, with the fix; Apply adds a
+       negative keyword in Google Ads. Admin (clients for their own brand through brandguard) + brandsFor. */
+    {
+      const r = await handleLeaks(request, env, url, path, json, { isAdmin, sessionEmail, brandsFor, resolveBrandId, isClient: r => !!clientScope(r),
+        deps: () => ({ getSetting, putSetting, xfetch, mintSession, canAfford: n => subCanAfford(n) }) });
+      if (r) return r;
+    }
+    if (path.startsWith('/api/google/')) {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const act = url.searchParams.get('act') || '';
+      const q = k => url.searchParams.get(k) || '';
+      try {
+        if (path === '/api/google/probe') return json(await googleProbe(env));
+        if (path === '/api/google/ads-accounts') return json(await adsAccounts(env));
+        if (path === '/api/google/enable-apis' && request.method === 'POST') return json(await enableApis(env));
+        if (path === '/api/google/match' && request.method === 'POST') return json(await googleMatch(env));
+        if (path === '/api/google/link' && request.method === 'PUT') { const b = await request.json().catch(() => ({})); return json(await googleSetLink(env, await resolveBrandId(env, String(b.act || '')), b)); }
+        if (path === '/api/google/link') return json(await googleLink(env, act));
+        if (path === '/api/google/website') return json(await websiteReport(env, act, q('from'), q('to'), q('pfrom'), q('pto')));
+        /* One channel, source, landing page, device or new/returning, drilled (Store > Website rows). */
+        if (path === '/api/google/website-drill') return json(await websiteDrill(env, act, q('from'), q('to'), q('pfrom'), q('pto'), q('kind'), q('value')));
+        if (path === '/api/google/search') {
+          const a = await env.DB.prepare(`SELECT name, tw_shop FROM brand_accounts WHERE act_id = ?1`).bind(act).first();
+          const words = [a?.name, (a?.tw_shop || '').split('.')[0]].filter(Boolean).flatMap(x => [x, ...String(x).split(/[\s-]+/)]).filter(w => w.length > 3 && !/golf|club|the/i.test(w) || w === a?.name);
+          return json(await searchReport(env, act, q('from'), q('to'), q('pfrom'), q('pto'), words));
+        }
+        if (path === '/api/google/ads') return json(await adsReport(env, act, q('from'), q('to')));
+        /* Google Ads top 20 ads by spend (search ad headlines + descriptions) and Performance Max asset groups, Google's own conversions */
+        if (path === '/api/google/ads-ads') return json(await adsAds(env, act, q('from'), q('to')));
+        /* Google Ads top 50 search terms by spend for the window */
+        if (path === '/api/google/ads-terms') return json(await adsTerms(env, act, q('from'), q('to')));
+        /* Google Ads change history in plain words (who, what, old to new), last 30 days only */
+        if (path === '/api/google/ads-changes') return json(await adsChanges(env, act, q('from'), q('to')));
+      } catch (e) { return json({ error: e.message }, 502); }
+      return json({ error: 'unknown google route' }, 404);
+    }
+    /* Microsoft Clarity (clarity.js): the Behaviour card on Store > Website. GET = the report (cached; Clarity allows
+       10 reads a project a day), PUT {act, token?, project?} = connect / set the project id for links, DELETE = forget. */
+    if (path === '/api/clarity') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const only = await brandsFor(env, await sessionEmail(env, request).catch(() => null)).catch(() => null);
+      const b = request.method === 'GET' ? {} : await request.json().catch(() => ({}));
+      const act = String(url.searchParams.get('act') || b.act || '');
+      if (!act) return json({ error: 'act is required' }, 400);
+      if (only && !only.has(act)) return json({ error: 'You do not have access to this brand.' }, 403);
+      try {
+        if (request.method === 'GET') return json(await clarityReport(env, act, { fresh: url.searchParams.get('fresh') === '1' }));
+        if (request.method === 'PUT') return json(b.token ? await storeClarity(env, act, b.token, b.project) : await setClarityProject(env, act, b.project));
+        if (request.method === 'DELETE') { await forgetClarity(env, act); return json({ ok: true }); }
+      } catch (e) { return json({ error: e.message }, e.status === 429 ? 429 : 400); }
+      return json({ error: 'GET, PUT or DELETE' }, 405);
+    }
+    /* Post-purchase survey (survey.js, 2026-10-10): Fairing or KnoCommerce answers vs Triple Whale for the same orders,
+       the "How customers say they found you" card on Store > Customers. GET = the report (syncs at most every 6 hours;
+       clients may read their own brand, CLIENT_RULES), PUT {act, question_id} = pin the question, DELETE ?provider= = forget. */
+    if (path === '/api/survey') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const only = await brandsFor(env, await sessionEmail(env, request).catch(() => null)).catch(() => null);
+      const b = request.method === 'GET' || request.method === 'DELETE' ? {} : await request.json().catch(() => ({}));
+      const acct = await acctOf(env, String(url.searchParams.get('act') || b.act || ''));
+      if (!acct) return json({ error: 'act is required' }, 400);
+      if (only && !only.has(acct.act_id)) return json({ error: 'You do not have access to this brand.' }, 403);
+      try {
+        if (request.method === 'GET') return json(await surveyReport(env, acct.act_id, { from: url.searchParams.get('from'), to: url.searchParams.get('to'), fresh: url.searchParams.get('fresh') === '1' }));
+        if (request.method === 'PUT') return json(await setSurveyQuestion(env, acct.act_id, b.question_id));
+        if (request.method === 'DELETE') { await forgetSurvey(env, acct.act_id, ['fairing', 'knocommerce'].includes(url.searchParams.get('provider')) ? url.searchParams.get('provider') : null); return json({ ok: true }); }
+      } catch (e) { return json({ error: e.message }, 400); }
+      return json({ error: 'GET, PUT or DELETE' }, 405);
+    }
+    /* Older brands' Drive folder / Frame project links, pasted from the Connections page. */
+    if (path === '/api/brand-links' && request.method === 'PUT') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const b = await request.json().catch(() => ({}));
+      const acct = await acctOf(env, String(b.act || ''));
+      if (!acct) return json({ error: 'unknown account' }, 404);
+      /* Phase 5: every id pasted here is a CONNECTION on the brand (brands.js connSet); only the Klaviyo
+         private key is kept beside it in p_br_doc. */
+      const links = {};
+      for (const k of ['drive', 'frame']) if (b[k] !== undefined) { const v = String(b[k] || '').trim(); if (v && !/^https?:\/\//.test(v)) return json({ error: `${k} must be a full link (https://...)` }, 400); links[k] = v; }
+      /* A Meta ad account onto this brand (SpeedIn once its account is shared). Only one Locus can see and no
+         other brand has; the brand's first Meta account becomes its primary. */
+      if (b.meta !== undefined && String(b.meta || '').trim()) {
+        const id = 'act_' + String(b.meta).replace(/\D/g, '');
+        const seen = await env.DB.prepare(`SELECT name FROM accounts WHERE act_id = ?1`).bind(id).first();
+        if (!seen) return json({ error: `Locus cannot see ${id}. Share it with the Mobius business in Meta, then press Find on Meta in Settings > Clients.` }, 400);
+        const hasMeta = await env.DB.prepare(`SELECT 1 FROM connections WHERE brand_id = ?1 AND kind = 'meta'`).bind(acct.act_id).first();
+        try { await addConnection(env, acct.act_id, { kind: 'meta', external_id: id, label: seen.name, is_primary: hasMeta ? 0 : 1 }); }
+        catch (e) { return json({ error: e.message }, 400); }
+        const rows = (await brandMetaRows(env, acct.act_id)).filter(r => r.act_id === id && !r.last_sync_insights);
+        if (rows.length) ctx.waitUntil(syncAccount(env, rows[0]).catch(() => {}));
+      }
+      /* The Klaviyo private key: verified against the account before it is kept, never echoed back. */
+      let klaviyo = null;
+      if (b.klaviyo_key !== undefined) {
+        if (!String(b.klaviyo_key || '').trim()) await klaviyoForget(env, acct.act_id);
+        else { try { klaviyo = await klaviyoStore(env, acct.act_id, b.klaviyo_key); } catch (e) { return json({ error: e.message }, 400); } }
+      }
+      /* Microsoft Clarity's project API token (clarity.js), checked by one real read before it is kept. */
+      if (b.clarity_token !== undefined) {
+        if (!String(b.clarity_token || '').trim()) await forgetClarity(env, acct.act_id);
+        else { try { await storeClarity(env, acct.act_id, b.clarity_token); } catch (e) { return json({ error: e.message }, 400); } }
+      }
+      /* Post-purchase survey keys (survey.js): Fairing's secret token, KnoCommerce's client_id:client_secret; each checked by one real call, never echoed.
+         `survey_key` (the Integrations box) is either: a colon between two parts = KnoCommerce, else Fairing. */
+      if (b.survey_key !== undefined) { const v = String(b.survey_key || '').trim(); if (/^[^:\s]+:[^:\s]+$/.test(v)) b.kno_key = v; else b.fairing_key = v; }
+      for (const [k, store, prov] of [['fairing_key', storeFairing, 'fairing'], ['kno_key', storeKno, 'knocommerce']]) {
+        if (b[k] === undefined) continue;
+        if (!String(b[k] || '').trim()) await forgetSurvey(env, acct.act_id, prov);
+        else { try { await store(env, acct.act_id, b[k]); } catch (e) { return json({ error: e.message }, 400); } }
+      }
+      /* The Triple Whale shop domain, the same column Settings > Brands writes. */
+      if (b.tw_shop !== undefined) {
+        const v = String(b.tw_shop || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        if (v && !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(v)) return json({ error: 'The store domain looks like brand.myshopify.com' }, 400);
+        /* A connection on the brand since phase 3. */
+        try { await setTripleWhale(env, acct.act_id, v || null); } catch (e) { return json({ error: e.message }, 400); }
+      }
+      /* Google ids (google.js): GA4 property, Search Console property, Google Ads customer. */
+      if (b.ga4 !== undefined || b.gsc !== undefined || b.google_ads !== undefined) {
+        const g = {}; if (b.ga4 !== undefined) { const v = String(b.ga4 || '').replace(/\D/g, ''); if (b.ga4 && !v) return json({ error: 'The GA4 property ID is a number, like 312345678.' }, 400); g.ga4 = v; }
+        if (b.gsc !== undefined) { const v = String(b.gsc || '').trim(); if (v && !/^(sc-domain:|https?:\/\/)/.test(v)) return json({ error: 'Paste the Search Console property as it shows: sc-domain:brand.com or https://www.brand.com/' }, 400); g.gsc = v; }
+        if (b.google_ads !== undefined) { const v = String(b.google_ads || '').replace(/\D/g, ''); if (v && v.length !== 10) return json({ error: 'The Google Ads customer ID has 10 digits.' }, 400); g.ads = v; }
+        await googleSetLink(env, acct.act_id, g);
+      }
+      if (b.tiktok_id !== undefined) await setTiktokLink(env, acct.act_id, b.tiktok_id);
+      /* The brand's email tool (2026-10-09): Klaviyo (the default, so the key is removed) or Attentive. */
+      if (b.email_tool !== undefined) {
+        const t = String(b.email_tool || '').toLowerCase();
+        if (t && !['klaviyo', 'attentive'].includes(t)) return json({ error: 'email_tool is klaviyo or attentive' }, 400);
+        if (t === 'attentive') await putSetting(env, `emailTool:${acct.act_id}`, 'attentive');
+        else await env.DB.prepare(`DELETE FROM settings WHERE key = ?1`).bind(`emailTool:${acct.act_id}`).run();
+      }
+      for (const [k, v] of Object.entries(links)) { try { await connSet(env, acct.act_id, k, v); } catch (e) { return json({ error: e.message }, 400); } }
+      const next = { drive: (await connGet(env, acct.act_id, 'drive'))?.external_id, frame: (await connGet(env, acct.act_id, 'frame'))?.external_id };
+      return json({ ok: true, links: next, ...(klaviyo ? { klaviyo: { company: klaviyo.company, account_id: klaviyo.account_id } } : {}) });
+    }
+    /* The daily smoke check (smoke.js): GET /api/smoke, POST /api/smoke/run {dry, brand}, PUT /api/smoke {check, quiet}. Admin. */
+    if (path.startsWith('/api/smoke')) {
+      const r = await handleSmoke(request, env, path, json, smokeDeps());
+      if (r) return r;
+    }
+    if (path === '/api/schedule-health' && request.method === 'GET') {
+      if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+      const stale = (await env.DB.prepare(
+        `SELECT a.name, a.act_id, MAX(d.date) AS latest
+           FROM brand_accounts a LEFT JOIN daily_insights d ON d.act_id IN (SELECT external_id FROM connections WHERE brand_id = a.act_id AND kind = 'meta')
+          WHERE a.active = 1 GROUP BY a.act_id ORDER BY latest`,
+      ).all().catch(() => ({ results: [] }))).results;
+      return json({
+        subrequest_limit: SUB_LIMIT,
+        plan: SUB_LIMIT > SUB_LIMIT_FREE ? 'paid' : 'free',
+        brief_hour: await briefHour(env),
+        report_hour: (await briefHour(env)) + REPORT_HOUR_OFFSET,
+        central_hour: centralHour(),
+        hourly: safeJson(await getSetting(env, 'lastHourly'), null),
+        nightly: safeJson(await getSetting(env, 'lastRun'), null),
+        briefs: safeJson(await getSetting(env, 'lastBriefRun'), null),
+        reports: safeJson(await getSetting(env, 'lastReportRun'), null),
+        data_freshness: stale,
+      });
+    }
+    if (path === '/' ) return Response.redirect(DASHBOARD_URL, 302);
+
+    if (path === '/api/google-login' && request.method === 'POST') {
+      const { credential, invite } = await request.json().catch(() => ({}));
+      const r = await googleLogin(env, credential, invite);
+      return r.error ? json({ error: r.error }, r.status) : json(r);
+    }
+
+    /* Read-only client share links - token in the URL is the auth. */
+    let sm;
+    if ((sm = path.match(/^\/api\/share\/([A-Za-z0-9-]{16,})$/)) && request.method === 'GET') {
+      try {
+        const tokens = safeJson(await getSetting(env, 'shareTokens'), {});
+        const t = tokens[sm[1]];
+        if (!t) return json({ error: 'This share link is no longer valid.' }, 404);
+        const acct = await acctOf(env, t.act_id);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        acct.budgets = safeJson(acct.budgets_json, {});
+        const ov = await accountOverview(env, acct, { attr: false });   // retired link: left exactly as it was
+        const from = addDays(localDate(acct.tz), -180);
+        const { results: rows } = await env.DB.prepare(
+          `SELECT date, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(clicks) AS clicks, SUM(link_clicks) AS link_clicks, SUM(purchases) AS purchases, SUM(revenue) AS revenue, SUM(video_views) AS video_views FROM daily_insights
+           WHERE act_id IN ${metaOf(1)} AND date >= ?2 GROUP BY date ORDER BY date`,
+        ).bind(acct.act_id, from).all();
+        const events = await seriesEvents(env, acct.act_id, addDays(localDate(acct.tz), -180));
+        return json({ share: true, account: { name: acct.name, currency: acct.currency, tz: acct.tz },
+          rows, events, mtd: ov.mtd, today: ov.today, today_spend: ov.today_spend,
+          l7: ov.l7, target_cpa: ov.target_cpa, target_roas: ov.target_roas });
+      } catch (e) { return json({ error: e.message }, 500); }
+    }
+
+      /* DIAGNOSTIC, TEMPORARY (2026-08-30) - delete with settings key twDiagKey.
+       Dumps every metric Triple Whale returns for a shop: id, human title and the
+       value for the window, INCLUDING the ones TW_KEEP drops on the way into
+       tw_daily. Added to settle which field is the Google ROAS on the Triple Whale
+       dashboard, because ga_ROAS (Google Ads' OWN reported figure) is not it.
+       Gated on a random one-time key in the settings table rather than the admin
+       token, so investigating this could never require rotating a live secret. */
+    if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+
+    /* Who will a client-facing send appear to come from? Reports the identity
+       behind SLACK_USER_TOKEN without exposing the token, so the answer is a
+       name rather than an assumption. Read-only and admin-gated. */
+    if (path === '/api/slack-identity' && request.method === 'GET') {
+      if (!env.SLACK_USER_TOKEN) return json({ configured: false });
+      const r = await xfetch('https://slack.com/api/auth.test', {
+        headers: { Authorization: `Bearer ${env.SLACK_USER_TOKEN}` },
+      }).then(x => x.json()).catch(e => ({ ok: false, error: e.message }));
+      // Cache the user id while we have it: the Slack buttons use it to decide
+      // who may put a message in front of a client.
+      if (r?.ok && r.user_id) await putSetting(env, 'slackOwnerId', r.user_id).catch(() => {});
+      return json({ configured: true, ok: !!r.ok, user: r.user || null, team: r.team || null, error: r.error || null });
+    }
+
+    /* Backfill attribution on demand - the nightly pass only covers 7 days,
+       and a new brand or a longer look-back needs more than that. */
+    /* What one Triple Whale journey order actually carries (fields, not numbers): used once to
+       decide what the customers table can hold. Admin only, one page, nothing stored. */
+    if (path === '/api/tw-probe') {
+      const act = url.searchParams.get('act');
+      const a = await acctOf(env, act || '');
+      if (!a?.tw_shop) return json({ error: 'no shop' }, 404);
+      const day = url.searchParams.get('date') || addDays(localDate(a.tz), -3);
+      const body = await twJourneys(env, a.tw_shop, day, day, 1);
+      const rows = body.ordersWithJourneys || [];
+      const o = rows[0] || null;
+      const shape = v => v == null ? null : Array.isArray(v) ? `array(${v.length})${v.length ? ':' + shape(v[0]) : ''}` : typeof v === 'object' ? '{' + Object.keys(v).join(',') + '}' : typeof v;
+      return json({ day, count: body.count, orders: rows.length, top_keys: Object.keys(body), order_keys: o ? Object.keys(o) : [], order_shape: o ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, k === 'attribution' ? 'attribution' : shape(v)])) : null,
+        sample: o ? Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'attribution').map(([k, v]) => [k, typeof v === 'string' ? v.slice(0, 120) : Array.isArray(v) ? v.slice(0, 2) : v])) : null });
+    }
+    /* Pull customer history now instead of waiting a month of nights: N slices of 14 days for one
+       brand (or all). Admin. */
+    if (path === '/api/tw-touch-backfill' && request.method === 'POST') {
+      const act = url.searchParams.get('act'); const slices = Math.min(+url.searchParams.get('slices') || 4, 30);
+      const a = await acctOf(env, act);
+      if (!a) return json({ error: 'unknown account' }, 404);
+      return json(await backfillTwTouches(env, a, slices).catch(e => ({ error: e.message })));
+    }
+    if (path === '/api/tw-orders-backfill' && request.method === 'POST') {
+      const act = url.searchParams.get('act');
+      const slices = Math.min(+url.searchParams.get('slices') || 4, 40);
+      const list = act && act !== 'all'
+        ? [await acctOf(env, act)].filter(Boolean)
+        : await listAccounts(env, true);
+      const out = [];
+      for (const a of list) out.push(await backfillTwOrders(env, a, slices).catch(e => ({ name: a.name, error: e.message })));
+      return json({ ok: true, results: out });
+    }
+    if (path === '/api/tw-attr-sync' && request.method === 'POST') {
+      const act = url.searchParams.get('act');
+      const days = Math.min(+url.searchParams.get('days') || 30, TW_ATTR_HISTORY_DAYS);
+      const list = act && act !== 'all'
+        ? [await acctOf(env, act)].filter(Boolean)
+        : await listAccounts(env, true);
+      const out = [];
+      for (const a of list) out.push(await syncTwAttribution(env, a, days).catch(e => ({ name: a.name, error: e.message })));
+      return json({ ok: true, results: out });
+    }
+
+    /* View-only accounts read everything and change nothing. GET-only is the
+       entire rule - simple enough to hold in your head and to explain to the
+       person it applies to. Anyone not listed in settings.userRoles is an admin,
+       so this is inert until a role is actually assigned. */
+    const who = await sessionEmail(env, request);
+    if (request.method !== 'GET' && (await roleFor(env, who)) === 'viewer') {
+      return json({ error: 'Your account has view-only access, so this cannot be changed. Ask an admin on your team.' }, 403);
+    }
+
+    /* ---- Team: who can sign in, and at what level ----
+       `allowedEmails` (who may sign in from outside the Mobius domain) and
+       `userRoles` (what they can do) were both settings with NO interface at
+       all - an outside collaborator meant hand-editing D1, and every person who
+       could sign in was a full admin who could press Send to client. */
+    if (path === '/api/team' && request.method === 'GET') {
+      const [ae, ur] = await Promise.all([
+        env.DB.prepare(`SELECT value FROM settings WHERE key = 'allowedEmails'`).first().catch(() => null),
+        env.DB.prepare(`SELECT value FROM settings WHERE key = 'userRoles'`).first().catch(() => null),
+      ]);
+      const extra = (safeJson(ae?.value, []) || []).map(e => String(e).toLowerCase());
+      const roles = safeJson(ur?.value, {}) || {};
+      const ub = safeJson((await env.DB.prepare(`SELECT value FROM settings WHERE key = 'userBrands'`).first().catch(() => null))?.value, {}) || {};
+      // Everyone we know about: invited guests, anyone with an explicit role, anyone with a brand list.
+      const emails = [...new Set([...extra, ...Object.keys(roles).map(e => e.toLowerCase()), ...Object.keys(ub).map(e => e.toLowerCase())])].sort();
+      const owner = String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase();
+      return json({
+        domain: ALLOWED_DOMAIN, you: who, owner, can_set_brands: !who || String(who).toLowerCase() === owner,
+        members: emails.map(e => ({ email: e, role: roles[e] === 'viewer' ? 'viewer' : 'admin', guest: extra.includes(e), brands: Array.isArray(ub[e]) ? ub[e] : [] })),
+      });
+    }
+    if (path === '/api/team' && request.method === 'PUT') {
+      const b = await request.json().catch(() => ({}));
+      const email = String(b.email || '').trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: 'That does not look like an email address' }, 400);
+      const role = b.role === 'viewer' ? 'viewer' : 'admin';
+      const [ae, ur] = await Promise.all([
+        env.DB.prepare(`SELECT value FROM settings WHERE key = 'allowedEmails'`).first().catch(() => null),
+        env.DB.prepare(`SELECT value FROM settings WHERE key = 'userRoles'`).first().catch(() => null),
+      ]);
+      let extra = (safeJson(ae?.value, []) || []).map(e => String(e).toLowerCase());
+      const roles = safeJson(ur?.value, {}) || {};
+      const onDomain = email.endsWith('@' + ALLOWED_DOMAIN);
+      if (b.remove) {
+        // Never let someone remove their own access and lock themselves out.
+        if (who && email === String(who).toLowerCase()) return json({ error: 'You cannot remove your own access.' }, 400);
+        extra = extra.filter(e => e !== email);
+        delete roles[email];
+      } else {
+        if (!onDomain && !extra.includes(email)) extra.push(email);   // domain accounts need no invite
+        if (role === 'viewer') roles[email] = 'viewer'; else delete roles[email];
+      }
+      /* Per-brand access (brandguard.js): only the owner sets who sees which brands, so nobody can widen
+         their own. [] = every brand; the entry also keeps a domain teammate on the list. */
+      const ubRow = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'userBrands'`).first().catch(() => null);
+      const ub = safeJson(ubRow?.value, {}) || {};
+      const owner = String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase();
+      if (b.remove) delete ub[email];
+      else if (Array.isArray(b.brands)) {
+        if (who && String(who).toLowerCase() !== owner) return json({ error: 'Only Cole can change which brands someone sees.' }, 403);
+        if (email === owner) return json({ error: 'The owner always sees every brand.' }, 400);
+        /* Brand ids (old act_ ids from an older screen are resolved to theirs). */
+        ub[email] = (await Promise.all(b.brands.map(x => resolveBrandId(env, String(x))))).filter(isBrandId);
+      } else if (!(email in ub)) ub[email] = [];
+      await putSetting(env, 'allowedEmails', JSON.stringify(extra));
+      await putSetting(env, 'userRoles', JSON.stringify(roles));
+      await putSetting(env, 'userBrands', JSON.stringify(ub));
+      return json({ ok: true, email, role, guest: extra.includes(email), brands: ub[email] || [] });
+    }
+
+    /* Per-person preferences (2026-10-11, prefs.js): the morning DM switch and the nudge card's snoozes and dones. */
+    if (path === '/api/me/prefs' || path === '/api/me/morning') {
+      const cs = clientScope(request);
+      const who = cs ? cs.email : (await sessionEmail(env, request)) || ((await isAdmin(request, env)) ? 'admin' : null);
+      if (path === '/api/me/morning') return handleMorning(request, env, path, url, who && who !== 'admin' ? who : (await sessionEmail(env, request)), morningDeps(), json);
+      return handlePrefs(request, env, path, who, json);
+    }
+    if (path === '/api/me') {
+      const sess = await verifySession(env, (request.headers.get('Authorization') || '').slice(7));
+      /* role: owner | team | client (2026-10-09). The profit and ledger workers delegate here, so a client
+         must say so: they refuse role 'client' outside the client allowlist. */
+      const cs = clientScope(request);
+      if (cs) { await touchClient(env, cs.email, 'seen').catch(() => {}); return json({ email: cs.email, exp: sess?.exp || null, master: false, role: 'client', client: await meClient(env, cs.email) }); }
+      const owner = !sess || String(sess.email || '').toLowerCase() === String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase();
+      return json({ email: sess?.email || null, exp: sess?.exp || null, master: !sess, role: owner ? 'owner' : 'team' });
+    }
+
+    try {
+      /* ---- accounts ---- */
+      /* ---- brands and their connections (brands.js, the brand-first rebuild) ---- */
+      if (path === '/api/brands' && request.method === 'GET') {
+        return json({ brands: await listBrands(env), kinds: BRAND_KINDS });
+      }
+      if (path === '/api/brands' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        try { return json({ ok: true, brand: await createBrand(env, b) }); }
+        catch (e) { return json({ error: e.message }, 400); }
+      }
+      if (path === '/api/brands/connect' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        try { return json({ ok: true, ...(await addConnection(env, b.brand, b)) }); }
+        catch (e) { return json({ error: e.message }, 400); }
+      }
+      if (path === '/api/accounts' && request.method === 'GET') {
+        // lastDiscover rides along so the Clients card can say the scan is
+        // automatic and when it last ran, rather than implying a manual step.
+        const ld = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'lastDiscover'`).first().catch(() => null);
+        return json({ accounts: await listAccounts(env), meta_available: await metaAvailable(env), lastDiscover: safeJson(ld?.value, null) });
+      }
+      let m;
+      /* The brand settings editor. Phase 3: writes the BRAND (brands row; the Triple Whale shop is its
+         connection). Old act_ ids in the path still resolve. */
+      if ((m = path.match(/^\/api\/accounts\/(act_\d+|asana_\d+|brand_[a-z0-9_]+|demo_[a-z0-9_]+)$/)) && request.method === 'PUT') {
+        const body = await request.json();
+        let cur = await acctOf(env, m[1]);
+        /* "Add a brand" from a Meta ad account no brand has yet: make the brand, attach the account as
+           its primary Meta connection, then save the settings below onto it. */
+        if (!cur && /^act_\d+$/.test(m[1]) && body.active) {
+          const row = await env.DB.prepare(`SELECT name, tz, currency FROM accounts WHERE act_id = ?1`).bind(m[1]).first();
+          if (!row) return json({ error: 'Locus cannot see that ad account. Find it on Meta first.' }, 404);
+          const nb = await createBrand(env, { name: body.name || row.name, tz: row.tz, currency: row.currency });
+          await addConnection(env, nb.id, { kind: 'meta', external_id: m[1], label: row.name, is_primary: 1 });
+          cur = await acctOf(env, nb.id);
+        }
+        if (!cur) return json({ error: 'unknown account' }, 404);
+        const numOrKeep = (v, keep) => v === '' ? null : (v ?? keep);
+        /* active (0/1) became status; a demo brand stays a demo unless it is switched on. */
+        const status = body.active == null ? cur.status
+          : body.active ? 'active' : cur.status === 'demo' ? 'demo' : 'paused';
+        await env.DB.prepare(
+          `UPDATE brands SET status = ?2, name = ?3, monthly_budget = ?4, budgets_json = ?5, tz = ?6,
+             target_cpa = ?7, target_roas = ?8, internal_channel = ?9, goals_json = ?10, brief_enabled = ?11,
+             client_channel = ?12, updated_at = datetime('now') WHERE id = ?1`,
+        ).bind(cur.act_id,
+          status,
+          body.name ?? cur.name,
+          numOrKeep(body.monthly_budget, cur.monthly_budget),
+          body.budgets ? JSON.stringify(body.budgets) : cur.budgets_json,
+          body.tz ?? cur.tz,
+          numOrKeep(body.target_cpa, cur.target_cpa),
+          numOrKeep(body.target_roas, cur.target_roas),
+          numOrKeep(body.slack_channel, cur.slack_channel),
+          body.goals ? JSON.stringify(body.goals) : cur.goals_json,
+          body.brief_enabled != null ? (body.brief_enabled ? 1 : 0) : cur.brief_enabled,
+          numOrKeep(body.brief_channel, cur.brief_channel),
+        ).run();
+        if (body.tw_shop !== undefined) {
+          const shop = numOrKeep(body.tw_shop, cur.tw_shop);
+          if ((shop || null) !== (cur.tw_shop || null)) {
+            try { await setTripleWhale(env, cur.act_id, shop); } catch (e) { return json({ error: e.message }, 400); }
+          }
+        }
+        // First activation → kick off a backfill in the background, for each of the brand's
+        // Meta ad accounts that has never synced.
+        if (body.active && !cur.active) {
+          const rows = (await brandMetaRows(env, cur.act_id)).filter(r => !r.last_sync_insights);
+          if (rows.length) ctx.waitUntil((async () => { for (const r of rows) await syncAccount(env, r); })());
+        }
+        return json({ ok: true });
+      }
+      /* WHY CAN'T IT SEE MY AD ACCOUNTS? Answer it with facts instead of guesses.
+         Reports what META_TOKEN actually is, which scopes it carries, which
+         businesses it can see, and what each ad-account edge returned - errors
+         included, verbatim. Cole hit an empty picker and no amount of UI copy
+         could say whether the cause was a missing scope, a system user with no
+         business role, or simply no assets granted. */
+      if (path === '/api/meta-business' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        const id = String(b.id || '').trim().replace(/\D/g, '');
+        if (id) {
+          // Prove it before storing: a wrong id would otherwise fail silently
+          // inside discovery and look exactly like no id at all.
+          let name;
+          try { name = (await meta(env, id, { fields: 'name' }))?.name; }
+          catch (e) { return json({ error: `Meta will not read business ${id}: ${e.message}` }, 400); }
+          await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('metaBusinessId', ?1)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(id).run();
+          return json({ ok: true, id, name });
+        }
+        await env.DB.prepare(`DELETE FROM settings WHERE key = 'metaBusinessId'`).run();
+        return json({ ok: true, id: null });
+      }
+
+      if (path === '/api/meta-access' && request.method === 'GET') {
+        const out = { token: null, scopes: [], businesses: [], edges: {}, direct: null, errors: [] };
+        try {
+          const d = await meta(env, 'debug_token', { input_token: env.META_TOKEN });
+          const t = d.data || {};
+          out.token = { type: t.type || null, app_id: t.app_id || null, expires_at: t.expires_at || 0,
+            never_expires: t.expires_at === 0, valid: !!t.is_valid };
+          out.scopes = t.scopes || [];
+        } catch (e) { out.errors.push({ at: 'debug_token', error: e.message }); }
+        let seed = [];
+        try { seed = await metaAll(env, 'me/adaccounts', { fields: 'id', limit: 200 }); out.direct = seed.length; }
+        catch (e) { out.errors.push({ at: 'me/adaccounts', error: e.message }); }
+        let bs = [];
+        try { bs = await businessesFor(env, seed); }
+        catch (e) { out.errors.push({ at: 'businessesFor', error: e.message }); }
+        out.businesses = bs.map(b => ({ id: b.id, name: b.name }));
+        for (const b of bs) {
+          for (const edge of ['owned_ad_accounts', 'client_ad_accounts']) {
+            try { out.edges[`${b.name || b.id} · ${edge}`] = (await metaAll(env, `${b.id}/${edge}`, { fields: 'id' }, 5)).length; }
+            catch (e) { out.edges[`${b.name || b.id} · ${edge}`] = `error: ${e.message}`; }
+          }
+        }
+        // The one-line verdict, so the UI never has to interpret the above.
+        const need = ['business_management', 'ads_read'].filter(s => !out.scopes.includes(s));
+        const owned = Object.entries(out.edges).reduce((n, [, v]) => n + (typeof v === 'number' ? v : 0), 0);
+        out.verdict = out.errors.length && !out.direct ? 'The Meta token is not working at all.'
+          : need.length ? `The token is missing the ${need.join(' and ')} permission${need.length > 1 ? 's' : ''}, so it can only see ad accounts assigned to it one by one.`
+          : !out.businesses.length ? 'No Business Manager could be reached, so only individually-assigned ad accounts are visible.'
+          : owned > out.direct ? `Reading your portfolio directly - ${owned} ad accounts against ${out.direct} assigned individually, so new ones appear on their own.`
+          : owned === 0 ? 'The portfolios reachable here are your CLIENTS’ own - their ad accounts are shared with you rather than owned by you, and Meta will not let a system user list another business’s assets. Set your own Business Portfolio ID below and Locus can read everything shared with you, including future clients.'
+          : `Reading your portfolio (${out.businesses.map(b => b.name).join(', ')}). Every ad account in it, now and in future, is picked up automatically.`;
+        out.needsBusinessId = owned === 0;
+        return json(out);
+      }
+
+      if (path === '/api/discover' && request.method === 'POST') {
+        const d = await discoverAccounts(env);
+        return json({ ok: true, ...d, accounts: await listAccounts(env), meta_available: await metaAvailable(env) });
+      }
+
+      /* ---- sync ---- */
+      if (path === '/api/sync' && request.method === 'POST') {
+        const act = url.searchParams.get('act');
+        const days = url.searchParams.get('days') ? +url.searchParams.get('days') : undefined;
+        if (act) {
+          const acct = await acctOf(env, act);
+          if (!acct) return json({ error: 'unknown account' }, 404);
+          /* The Meta sync runs per Meta ad account of the brand. */
+          const rows = await brandMetaRows(env, acct.act_id);
+          if (!rows.length) return json({ ok: true, result: { act_id: acct.act_id, name: acct.name, error: 'No Meta ad account connected for this brand.' } });
+          const results = [];
+          for (const r of rows) results.push(await syncAccount(env, r, days));
+          return json({ ok: true, result: results[0], results });
+        }
+        ctx.waitUntil(nightly(env));
+        return json({ ok: true, queued: true }, 202);
+      }
+
+      /* ---- data ---- */
+      if (path === '/api/overview') return json({ accounts: await overview(env) });
+
+      if (path === '/api/series') {
+        const act = url.searchParams.get('act');
+        const days = Math.min(+url.searchParams.get('days') || 90, 400);
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const from = addDays(localDate(acct.tz), -days);
+        const { results: metaRows } = await env.DB.prepare(
+          `SELECT * FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date >= ?2 ORDER BY date`,
+        ).bind(acct.act_id, from).all();
+        // Meta tab (Averages): purchases/revenue are Triple Whale's, null on a day TW has not synced.
+        const rows = attributeRows(sumByDate(metaRows).map(r => ({ ...r, act_id: acct.act_id })), await twMetaDaily(env, acct.act_id, from, localDate(acct.tz)));
+        return json({ account: { act_id: acct.act_id, name: acct.name, currency: acct.currency, tz: acct.tz, today: localDate(acct.tz) },
+          attribution: `triple_whale:${BRIEF_ATTR_MODEL}`, rows, events: await seriesEvents(env, acct.act_id, from) });
+      }
+
+      /* ONE LOCAL DAY, LIVE, WITH ITS HOURS. Two facts about the summary
+         endpoint, both measured on 2026-09-12 against Meta's own dated spend:
+           1. A bare-date period comes back shifted ONE DAY EARLY - asking for
+              09-12..09-12 returns the day Meta calls 09-11. (Bare dates read as
+              UTC midnight, which is the previous evening in every US shop.) The
+              daily sync inherits this harmlessly: its chart points carry the
+              right calendar day and it simply never lands today. Here we want
+              today, so we ask for date + 1. Do NOT "fix" this inside twSummary
+              or the sync would start writing a partial today into tw_daily.
+           2. A single-day period returns charts keyed by HOUR (x = 0..23), one
+              point per hour that had activity. That is the only hourly view of
+              blended revenue and spend anywhere in this stack.
+         The daily sync deliberately ends at yesterday, so Locus asks here for
+         today (and for any single day's hours) on demand and stamps as_of. */
+      if (path === '/api/tw-day') {
+        const act = url.searchParams.get('act');
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        if (!acct.tw_shop) return json({ error: 'no Triple Whale shop set' }, 400);
+        const today = localDate(acct.tz);
+        const want = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('date') || '') ? url.searchParams.get('date') : today;
+        if (want > today) return json({ error: 'that day has not happened yet' }, 400);
+        /* Speed (2026-10-26): Locus asks this once per brand for every Today view, the top-bar chip and the overview.
+           The live Triple Whale answer is kept 60 seconds per brand and day in this isolate (in-flight calls share);
+           `as_of` still says when it was read. A failed read is never kept. */
+        const twKey = `${acct.act_id}|${acct.tw_shop}|${want}`;
+        const twHit = TW_DAY_MEMO.get(twKey);
+        if (twHit && Date.now() - twHit.at < 60e3) { const b = await twHit.p.catch(() => null); if (b) return json(b); }
+        const twP = (async () => {
+        const ask = addDays(want, await twShift(env, acct.tw_shop)); // see twShift: measured daily
+        const { map, raw } = await twSummary(env, acct.tw_shop, ask, ask);
+        const HOURLY = ['netSales', 'totalSales', 'totalNetTaxes', 'blendedAds', 'newCustomerSales', 'fb_ads_spend', 'ga_adCost', 'orders'];
+        const hours = {};
+        let maxX = -1;
+        if (Array.isArray(raw?.metrics)) for (const m of raw.metrics) {
+          const id = m.metricId ?? m.id;
+          if (!HOURLY.includes(id) || !Array.isArray(m.charts?.current)) continue;
+          const arr = Array(24).fill(0);
+          for (const p of m.charts.current) { const x = +p.x; if (x >= 0 && x <= 23) { arr[x] += +p.y || 0; if (x > maxX) maxX = x; } }
+          hours[id] = arr;
+        }
+        // A finished day is 24 hours; today is the hours that have happened.
+        const len = want === today ? Math.max(1, maxX + 1) : 24;
+        for (const k of Object.keys(hours)) hours[k] = hours[k].slice(0, len);
+        return { date: want, as_of: new Date().toISOString(), map, hours, hours_len: len };
+        })();
+        const twEntry = { at: Date.now(), p: twP };
+        TW_DAY_MEMO.set(twKey, twEntry);
+        twP.catch(() => { if (TW_DAY_MEMO.get(twKey) === twEntry) TW_DAY_MEMO.delete(twKey); });
+        if (TW_DAY_MEMO.size > 200) for (const [k, v] of TW_DAY_MEMO) if (Date.now() - v.at > 60e3) TW_DAY_MEMO.delete(k);
+        return json(await twP);
+      }
+
+      if (path === '/api/pacing') {
+        const act = url.searchParams.get('act');
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        if (!acct.meta_act) return json({ error: 'No Meta ad account connected for this brand.' }, 400);
+        return json(await hourlyPacing(env, acct));
+      }
+
+      /* Live creative browser. Same rows the weekly report draws, but for any
+         window and any sort, and it fetches the creative asset only for the
+         handful of ads actually shown - one batched Meta call per view. */
+      /* Creative assets for a named set of ads, fetched AFTER the cards paint.
+         Splitting this out is what makes sorting and filtering feel instant:
+         the numbers are one D1 query, and the images arrive when they arrive. */
+      /* Creative analytics (creative.js): placement / age x gender for one ad, and run the pass now. */
+      if (path === '/api/ad-breakdown') {
+        const ad = url.searchParams.get('ad'), from = url.searchParams.get('from'), to = url.searchParams.get('to');
+        if (!/^\d{6,25}$/.test(ad || '') || !/^\d{4}-\d\d-\d\d$/.test(from || '') || !/^\d{4}-\d\d-\d\d$/.test(to || '')) return json({ error: 'ad, from and to are required' }, 400);
+        return json(await adSplit(env, meta, ad, from, to));
+      }
+      if (path === '/api/ad-original') {
+        const ad = url.searchParams.get('ad');
+        if (!/^\d{6,25}$/.test(ad || '')) return json({ error: 'ad is required' }, 400);
+        return adOriginal(env, meta, ad);
+      }
+      if (path === '/api/creative-tick' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        if (b.tags_only) return json(await tagTick(env, Math.min(+b.limit || 40, 200), () => true, b.act || null));
+        if (b.keys_only) return json(await keyTick(env, meta, () => true, Math.min(+b.limit || 600, 3000)));
+        return json(await creativeTick(env, ids => adThumbnails(env, ids, LIVE_THUMBS), () => true, { perBrand: Math.min(+b.per_brand || 60, 300), tags: Math.min(+b.tags || 60, 200), meta }));
+      }
+      if (path === '/api/ad-creatives') {
+        const ids = (url.searchParams.get('ads') || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 40);
+        if (!ids.length) return json({ assets: {} });
+        let assets = {};
+        /* LIVE limits, not the report's. This response is JSON to a browser,
+           not an image inlined into one D1 row, so the only ceiling that matters
+           is what a single card is worth keeping. */
+        try { assets = await adThumbnails(env, ids, LIVE_THUMBS); } catch (e) { return json({ assets: {}, error: e.message }); }
+        return json({ assets });
+      }
+
+      /* BACKFILL `ads.media_type` FOR A WHOLE ACCOUNT.
+         The format shown on a creative card is meant to be simply what Meta
+         says the ad IS: video, static or carousel, no naming convention, no
+         inference. It was not, for most ads, and the reason was never the
+         display logic: `media_type` is only written as a side effect of
+         `adThumbnails`, which resolves TEN ads per page view because it also
+         downloads their images. Party Patch had 1,049 of 1,085 ads with the
+         column still NULL, so nearly every card fell back to the delivery-data
+         guess (video plays or not) and a CAROUSEL could never appear at all -
+         not on a card, and not in the type filter, which only lists types it
+         can actually see. Cole: "if it's a carousel then it puts carousel, it
+         doesn't need a naming convention, it just says what it is".
+
+         Type is cheap where images are not: it is one field on the creative, so
+         50 ads resolve in ONE call instead of 50. This walks the account in
+         chunks and writes the column properly. `?act=` one account, `?act=all`
+         every active one. It is a button, not a cron - the account is at the
+         free-plan trigger limit, and a full account is a handful of calls. */
+      if (path === '/api/ads-type-backfill') {
+        const act = url.searchParams.get('act');
+        const cap = Math.min(Math.max(+url.searchParams.get('limit') || 600, 50), 2000);
+        const brandList = act && act !== 'all'
+          ? [await acctOf(env, act)].filter(Boolean)
+          : null;
+        if (brandList && !brandList.length) return json({ error: 'unknown account' }, 404);
+        /* The ads edge is per META ad account: walk each brand's Meta accounts (act_id = the Meta id). */
+        const accts = brandList ? (await Promise.all(brandList.map(b => brandMetaRows(env, b.act_id)))).flat() : await metaSyncRows(env);
+        if (!accts.length) return json({ error: 'No Meta ad account connected for this brand.' }, 404);
+        /* NO NESTED SUBFIELD BRACES. Asking for
+           `object_story_spec{link_data{child_attachments}}` makes Meta reject the
+           whole call, and the first version of this endpoint did exactly that:
+           every chunk failed, the splitter walked each one down to single ads,
+           and it reported 200 "unresolvable" without a word about why. Request
+           the two specs WHOLE, the way the per-ad creative fetch above already
+           does, and read into them here. */
+        const CREATIVE_FIELDS = 'id,creative{object_type,video_id,object_story_spec,asset_feed_spec}';
+        const typeOf = c => {
+          const kids = c?.object_story_spec?.link_data?.child_attachments;
+          const isCarousel = (Array.isArray(kids) && kids.length > 1)
+            || c?.object_type === 'CAROUSEL'
+            || !!c?.asset_feed_spec?.additional_data?.multi_share_end_card;
+          if (isCarousel) return 'carousel';
+          const isVideo = !!(c?.video_id || c?.object_type === 'VIDEO'
+            || c?.object_story_spec?.video_data
+            || (Array.isArray(c?.asset_feed_spec?.videos) && c.asset_feed_spec.videos.length));
+          return isVideo ? 'video' : 'image';
+        };
+        /* One deleted or permission-blocked ad fails the WHOLE batched call, so
+           a failed chunk is split rather than abandoned. A single ad that still
+           fails is skipped and counted, never retried forever. */
+        /* WALK THE ACCOUNT'S ads EDGE, do not ask for ads by id.
+           `?ids=a,b,c` is DEPRECATED IN GRAPH v26+ and simply errors, which is
+           what the first version of this did: every chunk failed, the splitter
+           walked each one down to a single ad, and it reported 200 ads
+           "unresolvable" without a word about why. The account edge returns the
+           creative alongside each ad and pages properly, so a whole account
+           costs a handful of calls rather than one per ad.
+           Keep the FIRST error: a silent 0-resolved run is indistinguishable
+           from "every ad was deleted", which is exactly how that bug survived a
+           full run without saying anything. */
+        let firstErr = null;
+        const out = [];
+        for (const acct of accts) {
+          const { results } = await env.DB.prepare(
+            `SELECT ad_id FROM ads WHERE act_id = ?1 AND media_type IS NULL`,
+          ).bind(acct.act_id).all();
+          const need = new Set((results || []).map(r => r.ad_id));
+          const target = need.size;
+          let wrote = 0, seen = 0, pages = 0, after = null;
+          /* PAGE SIZE IS ADAPTIVE because `asset_feed_spec` is unbounded: an
+             Advantage+ creative carries every text and image variant, so 100 ads
+             of it makes Meta answer "Please reduce the amount of data you're
+             asking for" (and sometimes just "An unknown error occurred"). That
+             is a RESPONSE SIZE limit, not a rate limit, so retrying the same
+             call forever cannot work and a fixed small page would triple the
+             calls on the accounts that do not need it. Start at 50, halve on
+             failure, and recover upward after a clean page. */
+          let size = 50;
+          const maxPages = Math.ceil(cap / 10) + 10;
+          while (need.size && pages < maxPages) {
+            let page;
+            try {
+              page = await meta(env, `${acct.act_id}/ads`, { fields: CREATIVE_FIELDS, limit: size, after });
+            } catch (e) {
+              if (size > 5) { size = Math.max(5, Math.floor(size / 2)); pages++; continue; }
+              if (!firstErr) firstErr = e.message || String(e);
+              break;
+            }
+            if (size < 50) size = Math.min(50, size * 2);
+            pages++;
+            const data = page?.data || [];
+            if (!data.length) break;
+            const stmts = [];
+            for (const ad of data) {
+              seen++;
+              if (!ad?.id || !need.has(ad.id) || !ad.creative) continue;
+              stmts.push(env.DB.prepare(`UPDATE ads SET media_type = ?2 WHERE ad_id = ?1`).bind(ad.id, typeOf(ad.creative)));
+              need.delete(ad.id);
+            }
+            if (stmts.length) { await env.DB.batch(stmts); wrote += stmts.length; }
+            after = page?.paging?.cursors?.after || null;
+            if (!page?.paging?.next || !after) break;
+          }
+          /* Anything still in `need` was never returned by the edge, which for a
+             live account means the ad is deleted. It keeps the fallback guess. */
+          const missed = target - wrote;
+          const left = await env.DB.prepare(
+            `SELECT COUNT(*) AS n FROM ads WHERE act_id = ?1 AND media_type IS NULL`,
+          ).bind(acct.act_id).first();
+          const mix = await env.DB.prepare(
+            `SELECT media_type AS t, COUNT(*) AS n FROM ads WHERE act_id = ?1 AND media_type IS NOT NULL GROUP BY t`,
+          ).bind(acct.act_id).all();
+          out.push({
+            account: acct.name, act_id: acct.act_id,
+            resolved: wrote, unresolvable: missed, pages, scanned: seen, still_null: left?.n ?? null,
+            mix: Object.fromEntries((mix.results || []).map(r => [r.t, r.n])),
+          });
+        }
+        return json({ ok: true, accounts: out, error: firstErr });
+      }
+
+      if (path === '/api/ads') {
+        const act = url.searchParams.get('act');
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const today = localDate(acct.tz), yday = addDays(today, -1);
+        const ymd = v => /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null;
+        let to = ymd(url.searchParams.get('to')) || yday;
+        if (to > yday) to = yday;                        // today is never complete
+        const days = Math.min(Math.max(+url.searchParams.get('days') || 30, 1), 400);
+        const from = ymd(url.searchParams.get('from')) || addDays(to, -(days - 1));
+        const t0 = Date.now();
+        /* `mult` and `min_spend` come from the threshold control in the
+           Creative toolbar. mult=0 is a real value - "rank every ad that
+           spent" - so it is parsed with a null check, never a truthiness one. */
+        const numParam = k => {
+          const v = url.searchParams.get(k);
+          return v == null || v === '' || !isFinite(+v) ? null : Math.max(0, +v);
+        };
+        const r = await adRows(env, acct, from > to ? to : from, to, {
+          sort: url.searchParams.get('sort'),
+          format: url.searchParams.get('format'),
+          limit: url.searchParams.get('limit'),
+          attr: url.searchParams.get('attr'),
+          mult: numParam('mult'),
+          minSpend: numParam('min_spend'),
+        });
+        // Assets for the shown ads only. Never fatal - the numbers are the point
+        // and a card with no image still answers the question.
+        const t1 = Date.now();
+        /* CREATIVE IS NO LONGER FETCHED HERE unless asked for. It was the whole
+           reason filtering felt slow: an unseen ad costs a creative call plus a
+           video-cover call against Meta, so one dropdown click could be sixteen
+           sequential round trips before a single number appeared. The cards do
+           not need the image to be correct - they need it to be fast - so the
+           rows come back immediately and the images are fetched separately and
+           patched in. `?assets=1` keeps the old one-shot behaviour for any
+           caller that genuinely wants both together. */
+        let assets = {};
+        if (url.searchParams.get('assets') === '1') {
+          try { assets = await adThumbnails(env, r.ads.map(a => a.ad_id), LIVE_THUMBS); } catch { /* numbers still stand */ }
+          for (const a of r.ads) Object.assign(a, assets[a.ad_id] || {});
+        } else {
+          // Anything already cached is free, so send that much with the rows.
+          try {
+            const ids = r.ads.map(a => a.ad_id);
+            const q = ids.map((_, i) => `?${i + 1}`).join(',');
+            const { results } = await env.DB.prepare(
+              `SELECT ad_id, json FROM ad_creative WHERE ad_id IN (${q})`).bind(...ids).all();
+            for (const row of results || []) {
+              const v = safeJson(row.json, null);
+              const a = r.ads.find(x => x.ad_id === row.ad_id);
+              if (v && a) Object.assign(a, v);
+            }
+          } catch { /* the numbers stand without it */ }
+        }
+        /* MARK PARTNERSHIP ADS ON THE CARD, not only when you press play.
+           The cached creative already carries `page_id`, and the page-token map
+           is a settings read, so knowing whether a creative sits on OUR page or
+           a creator's costs nothing here. Before this, the only way to find out
+           was to click play and read the apology - and the pill said "Hozzle
+           and Hack" (the name the team typed) with nothing to say the ad was a
+           partnership at all. An ad whose creative has never been cached simply
+           has no page_id yet and stays unmarked rather than guessed at. */
+        try {
+          const ours = new Set(Object.keys(await pageTokens(env).catch(() => ({}))));
+          if (ours.size) for (const a of r.ads) {
+            if (a.page_id && !ours.has(String(a.page_id))) a.partnership = true;
+          }
+        } catch { /* the numbers stand without it */ }
+
+        const t2 = Date.now();
+        // Timings ride along permanently. "It feels slow" is not actionable;
+        // "creative took 4.1s of 4.3s" says exactly what to fix.
+        return json({ account: { act_id: acct.act_id, name: acct.name, currency: acct.currency },
+          from, to, ...r, timing: { rows_ms: t1 - t0, creative_ms: t2 - t1, total_ms: t2 - t0 } });
+      }
+
+      if (path === '/api/creative') {
+        // from/to come from the shared period control; `window` remains for any
+        // caller that still asks in days.
+        var _cvFrom = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('from') || '') ? url.searchParams.get('from') : null;
+        var _cvTo = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('to') || '') ? url.searchParams.get('to') : null;
+        const act = url.searchParams.get('act');
+        const freshDays = Math.min(+url.searchParams.get('fresh') || 14, 60);
+        const windowDays = Math.min(+url.searchParams.get('window') || 14, 30);
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        let backfill = null;
+        /* The ad-level walk is per META ad account of the brand (act_id = the Meta id). */
+        for (const ma of await brandMetaRows(env, acct.act_id)) {
+          if (!ma.ads_backfill_done) { const bf = await syncAdDaily(env, ma, { maxSlices: 3 }); if (!backfill || backfill.done) backfill = bf; }
+          else if ((ma.ads_metrics_version || 0) < ADS_METRICS_VERSION) ctx.waitUntil(syncAdDaily(env, ma, { maxSlices: 3 }).catch(() => {}));  // new metric columns still filling
+          else {
+            const missing = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ads WHERE act_id = ?1 AND created_time IS NULL`).bind(ma.act_id).first();
+            if (missing?.n > 0) ctx.waitUntil(syncAdMeta(env, ma).catch(() => {}));  // heal ages for pre-history ads
+          }
+        }
+        const r = await creative(env, acct, freshDays, windowDays,
+          _cvFrom && _cvTo ? { from: _cvFrom, to: _cvTo } : null);
+        if (backfill && !backfill.done) r.backfill = backfill;   // progress or error for the banner
+        return json(r);
+      }
+
+      /* The Meta-only client share link was retired 2026-08-27. Clients get
+         blended reporting - the profit worker's ?perf, ?plan and ?reports links -
+         and a Meta-attributed view was the one surface that contradicted it.
+         GET /api/share/:token above still answers for any link already handed
+         out, but nothing mints new ones and no page renders them. */
+      if (path === '/api/settings' && request.method === 'GET') {
+        return json({
+          slackChannel: await getSetting(env, 'slackChannel'),
+          /* A client send goes out under Cole's own name, so by default only he
+             may press the Send button on a Slack card. A team that should have
+             it flips this to 'anyone'. */
+          slackSendWho: (await getSetting(env, 'slackSendWho')) === 'anyone' ? 'anyone' : 'owner',
+          slackInteractive: !!env.SLACK_SIGNING_SECRET,
+          paceAlertPct: +(await getSetting(env, 'paceAlertPct')) || 0.15,
+          /* What moved yesterday, posted to each brand's internal channel (moved.js). On unless 'off'. */
+          movedPost: (await getSetting(env, 'movedPost')) !== 'off',
+          marketHandles: (await getSetting(env, 'marketHandles')) || '',
+          /* The "what advertisers said online" check on Home > Yesterday (market.js). On unless 'off'. */
+          marketChatter: (await getSetting(env, 'marketChatter')) !== 'off',
+          /* The seasonal rail item (Black Friday): its label and whether it shows (auto = in season). */
+          seasonTab: seasonTabOf(await getSetting(env, 'seasonTab')),
+          /* 2026-10-12: one agency channel for every daily draft (blank = each brand's internal channel), and
+             whether a client with a Locus login gets the short daily or the whole brief. */
+          dailyBriefsChannel: (await getSetting(env, 'dailyBriefsChannel')) || '',
+          briefClientStyle: (await getSetting(env, 'briefClientStyle')) === 'full' ? 'full' : 'short',
+          /* The 8am "Today's calls" post to each brand's internal channel (todaypost.js). On unless 'off'. */
+          todayPost: (await getSetting(env, 'todayPost')) !== 'off',
+          /* Action item reminders to Slack the morning they are due (actions.js). On unless 'off'. */
+          actionRemind: (await getSetting(env, 'actionRemind')) !== 'off',
+          /* The daily "test minimum due off" line under each morning card (minoff.js). On unless 'off'. */
+          minOffPost: await minOffOn(env),
+          /* The Buyer list (buyerlist.js): the owner shown on the page, its one daily post and where it goes. */
+          ...(await buyerSettings(env)),
+          /* 2026-10-13: one hour for every morning post (Central) and the morning card's switch (morningcard.js). */
+          morningHour: await morningHour(env),
+          morningCard: await cardOn(env),
+          /* Why the last daily draft could not post in the agency channel, if one could not (draftBrief). */
+          dailyBriefsError: safeJson(await getSetting(env, 'dailyBriefsError'), null),
+          hasSlackToken: !!env.SLACK_BOT_TOKEN,
+          hasTwKey: !!env.TW_API_KEY,
+        });
+      }
+      if (path === '/api/settings' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        if ('slackChannel' in b) await putSetting(env, 'slackChannel', b.slackChannel || '');
+        if ('slackSendWho' in b) await putSetting(env, 'slackSendWho', b.slackSendWho === 'anyone' ? 'anyone' : 'owner');
+        if ('paceAlertPct' in b) await putSetting(env, 'paceAlertPct', String(+b.paceAlertPct || 0.15));
+        if ('movedPost' in b) await putSetting(env, 'movedPost', b.movedPost ? 'on' : 'off');
+        if ('marketHandles' in b) await putSetting(env, 'marketHandles', String(b.marketHandles || '').slice(0, 400));
+        if ('marketChatter' in b) await putSetting(env, 'marketChatter', b.marketChatter ? 'on' : 'off');
+        if ('seasonTab' in b) await putSetting(env, 'seasonTab', JSON.stringify(seasonTabOf(b.seasonTab)));
+        if ('dailyBriefsChannel' in b) await putSetting(env, 'dailyBriefsChannel', /^[CG][A-Z0-9]{6,}$/.test(String(b.dailyBriefsChannel || '')) ? String(b.dailyBriefsChannel) : '');
+        if ('briefClientStyle' in b) await putSetting(env, 'briefClientStyle', b.briefClientStyle === 'full' ? 'full' : 'short');
+        if ('todayPost' in b) await putSetting(env, 'todayPost', b.todayPost ? 'on' : 'off');
+        if ('actionRemind' in b) await putSetting(env, 'actionRemind', b.actionRemind ? 'on' : 'off');
+        if ('minOffPost' in b) await putSetting(env, 'minOffPost', b.minOffPost ? 'on' : 'off');
+        if ('buyerPost' in b) await putSetting(env, 'buyerPost', b.buyerPost ? 'on' : 'off');
+        if ('buyerOwner' in b && String(b.buyerOwner || '').trim()) await putSetting(env, 'buyerOwner', String(b.buyerOwner).trim().slice(0, 40));
+        if ('buyerChannel' in b) await putSetting(env, 'buyerChannel', /^[CG][A-Z0-9]{6,}$/.test(String(b.buyerChannel || '')) ? String(b.buyerChannel) : '');
+        if ('morningCard' in b) await putSetting(env, 'morningCard', b.morningCard ? 'on' : 'off');
+        if ('morningHour' in b) {
+          const h = +b.morningHour;
+          if (!Number.isInteger(h) || h < 0 || h > 23) return json({ error: 'The hour is a whole number from 0 to 23.' }, 400);
+          await putSetting(env, 'morningHour', String(h)); await putSetting(env, 'briefHour', String(h));
+        }
+        return json({ ok: true });
+      }
+      if (path === '/api/slack-channels') {
+        if (!env.SLACK_BOT_TOKEN) return json({ error: 'SLACK_BOT_TOKEN secret is not set' }, 400);
+        const out = [];
+        let cursor;
+        do {
+          const u = new URL('https://slack.com/api/conversations.list');
+          u.searchParams.set('limit', '200');
+          u.searchParams.set('exclude_archived', 'true');
+          u.searchParams.set('types', 'public_channel,private_channel');
+          if (cursor) u.searchParams.set('cursor', cursor);
+          const r = await xfetch(u, { headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } });
+          const j = await r.json().catch(() => ({}));
+          if (!j.ok) return json({ error: `Slack: ${j.error || r.status}` }, 400);
+          out.push(...j.channels.map(c => ({ id: c.id, name: c.name, member: !!c.is_member })));
+          cursor = j.response_metadata?.next_cursor;
+        } while (cursor);
+        out.sort((a, b) => (b.member - a.member) || a.name.localeCompare(b.name));
+        return json({ channels: out });
+      }
+      if (path === '/api/slack-test' && request.method === 'POST') {
+        if (!env.SLACK_BOT_TOKEN) return json({ error: 'SLACK_BOT_TOKEN secret is not set - see worker README' }, 400);
+        const channel = await getSetting(env, 'slackChannel');
+        if (!channel) return json({ error: 'Set a Slack channel ID first' }, 400);
+        await slackPost(env, channel, 'Account Health is wired up ✓ - nightly budget-pace alerts will post here.');
+        return json({ ok: true });
+      }
+
+      if (path === '/api/insights') {
+        const act = url.searchParams.get('act');
+        const from = url.searchParams.get('from') || '2000-01-01';
+        const to = url.searchParams.get('to') || '2999-12-31';
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM daily_insights WHERE act_id IN ${metaOf(1)} AND date BETWEEN ?2 AND ?3 ORDER BY date`,
+        ).bind(act, from, to).all();
+        /* One row per day for the brand (its Meta accounts summed), act_id = the brand. */
+        return json({ rows: sumByDate(results).map(r => ({ ...r, act_id: act })) });
+      }
+
+      if (path === '/api/activities' && request.method === 'GET') {
+        await ensureClientWhy(env);
+        const act = url.searchParams.get('act');
+        const from = url.searchParams.get('from') || '2000-01-01';
+        const to = url.searchParams.get('to') || '2999-12-31T23:59:59';
+        const limit = Math.min(+url.searchParams.get('limit') || 500, 2000);
+        const all = !act || act === 'all';
+        /* activities is Meta's (filed by Meta account); each row comes back with act_id = its BRAND and
+           meta_act = the Meta account it came from. */
+        const COLS = `a.id, b.id AS act_id, a.act_id AS meta_act, a.event_time, a.event_type, a.translated, a.actor, a.object_type, a.object_id,
+             a.object_name, a.extra_json, a.category, a.summary, a.reason, a.suggested_reason, a.note, a.confirmed, a.manual, a.created_at, a.client_why, b.name AS account_name`;
+        const { results } = await env.DB.prepare(all
+          ? `SELECT ${COLS} FROM activities a JOIN connections c ON c.kind = 'meta' AND c.external_id = a.act_id JOIN brands b ON b.id = c.brand_id
+             WHERE b.status = 'active' AND a.event_time BETWEEN ?1 AND ?2 ORDER BY a.event_time DESC LIMIT ?3`
+          : `SELECT ${COLS} FROM activities a JOIN connections c ON c.kind = 'meta' AND c.external_id = a.act_id JOIN brands b ON b.id = c.brand_id
+             WHERE c.brand_id = ?4 AND a.event_time BETWEEN ?1 AND ?2 ORDER BY a.event_time DESC LIMIT ?3`,
+        ).bind(...(all ? [from, to, limit] : [from, to, limit, act])).all();
+        return json({ rows: results });
+      }
+      /* AD UPDATES (2026-11-07, Cole: "the change log, but way better, for the client"). One brand's changes with a
+         client-facing why, newest first, for Ads > Updates and the brand's own login. A change shows ONLY when someone
+         wrote its client why (activities.client_why), never from the team's `reason` (those are notes like "slug was
+         misspelled; Cole 11-02"): buying-call writes carry it (meta_write `client_why`); a change made by hand gets it
+         in Meta > Changes > Add why; Meta's own automatic edits never show. Before/after come from p_meta_write (Locus's
+         Meta writes, joined by the "Write mw_..." note) and p_ext_write (Google, TikTok). */
+      if (path === '/api/ad-updates' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        if (!act || act === 'all') return json({ error: 'Pick one brand.' }, 400);
+        const to = url.searchParams.get('to') || '2999-12-31T23:59:59';
+        const from = url.searchParams.get('from') || new Date(Date.now() - 45 * 864e5).toISOString().slice(0, 10);
+        await ensureClientWhy(env);
+        const { results: acts } = await env.DB.prepare(
+          `SELECT a.id, a.event_time, a.event_type, a.actor, a.object_type, a.object_id, a.object_name, a.category, a.summary, a.client_why AS reason, a.note, a.manual
+             FROM activities a JOIN connections c ON c.kind = 'meta' AND c.external_id = a.act_id
+            WHERE c.brand_id = ?1 AND a.event_time BETWEEN ?2 AND ?3 AND a.confirmed <> -1 AND TRIM(COALESCE(a.client_why, '')) <> ''
+            ORDER BY a.event_time DESC LIMIT 400`).bind(act, from, to).all();
+        const ids = [...new Set(acts.map(r => (String(r.note || '').match(/\b(mw_[0-9a-f]+)/) || [])[1]).filter(Boolean))];
+        const W = new Map();
+        for (let i = 0; i < ids.length; i += 50) {
+          const ch = ids.slice(i, i + 50);
+          const { results } = await env.DB.prepare(`SELECT id, level, object, name, action, field, before, after, undone FROM p_meta_write WHERE id IN (${ch.map(() => '?').join(',')})`).bind(...ch).all().catch(() => ({ results: [] }));
+          for (const w of results) W.set(w.id, w);
+        }
+        const X = new Map();
+        const { results: ext } = await env.DB.prepare(`SELECT id, platform, object, name, action, before, after, undone, at FROM p_ext_write WHERE brand = ?1 AND at BETWEEN ?2 AND ?3`).bind(act, from, to).all().catch(() => ({ results: [] }));
+        for (const w of ext) X.set(`${w.object}|${String(w.at).slice(0, 16)}`, w);
+        const J = s => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
+        const plat = r => /^google/i.test(r.event_type || '') || /^GOOGLE/.test(r.object_type || '') ? 'google' : /^tiktok/i.test(r.event_type || '') || /^TIKTOK/.test(r.object_type || '') ? 'tiktok' : /trybe/i.test(r.event_type || '') ? 'trybe' : 'meta';
+        const lvl = t => { const s = String(t || '').toUpperCase(); return /ADSET|AD_SET|ADGROUP|AD_GROUP/.test(s) ? 'adset' : /CAMPAIGN/.test(s) ? 'campaign' : /(^|_)AD$/.test(s) ? 'ad' : 'account'; };
+        const seen = new Set(), changes = [];
+        for (const r of acts) {
+          const mw = W.get((String(r.note || '').match(/\b(mw_[0-9a-f]+)/) || [])[1]);
+          if (mw && mw.undone) continue;                    // undone in Locus: it did not happen
+          const p = plat(r), xw = p !== 'meta' ? X.get(`${r.object_id}|${String(r.event_time).slice(0, 16)}`) : null;
+          if (xw && xw.undone) continue;
+          /* Meta's own log brings a second row for a Locus write; once both are confirmed, keep one per object per minute */
+          const k = `${r.object_id}|${String(r.event_time).slice(0, 16)}|${r.category}`;
+          if (seen.has(k)) continue; seen.add(k);
+          changes.push({ id: r.id, at: r.event_time, platform: p, level: mw ? mw.level : lvl(r.object_type), object_id: r.object_id, name: (mw && mw.name) || r.object_name || (xw && xw.name) || '',
+            category: r.category, action: mw ? mw.action : xw ? xw.action : null, field: mw ? mw.field : null, summary: r.summary, why: r.reason,
+            before: J(mw ? mw.before : xw ? xw.before : null), after: J(mw ? mw.after : xw ? xw.after : null) });
+        }
+        return json({ act, from, to, changes });
+      }
+      if (path === '/api/activities/bulk-confirm' && request.method === 'POST') {
+        const { ids } = await request.json().catch(() => ({}));
+        if (!Array.isArray(ids) || !ids.length) return json({ error: 'ids required' }, 400);
+        let n = 0;
+        for (let i = 0; i < ids.length && i < 4000; i += 50) {
+          const chunk = ids.slice(i, i + 50);
+          const r = await env.DB.prepare(
+            `UPDATE activities SET confirmed = 1 WHERE confirmed = 0 AND id IN (${chunk.map(() => '?').join(',')})`,
+          ).bind(...chunk).run();
+          n += r.meta?.changes ?? 0;
+        }
+        return json({ ok: true, confirmed: n });
+      }
+      /* PUT too (2026-11-07): Claude Code's locus_post writes POST / PUT / DELETE only, and the buying call fills in each
+         change's client-facing why here after the fact. Same fields, same row. */
+      if ((m = path.match(/^\/api\/activities\/(.+)$/)) && (request.method === 'PATCH' || request.method === 'PUT')) {
+        const body = await request.json();
+        await ensureClientWhy(env);
+        // confirmed: 1 = confirmed deliberate, 0 = untouched, -1 = dismissed (noise; excluded from summaries)
+        const confirmed = body.dismissed != null ? (body.dismissed ? -1 : 0)
+          : body.confirmed == null ? null : (body.confirmed ? 1 : 0);
+        await env.DB.prepare(
+          `UPDATE activities SET reason = COALESCE(?2, reason), note = COALESCE(?3, note),
+             confirmed = COALESCE(?4, confirmed), category = COALESCE(?5, category),
+             client_why = CASE WHEN ?6 IS NULL THEN client_why WHEN TRIM(?6) = '' THEN NULL ELSE ?6 END WHERE id = ?1`,
+        ).bind(decodeURIComponent(m[1]), body.reason ?? null, body.note ?? null,
+          confirmed, body.category ?? null, body.client_why == null ? null : String(body.client_why).slice(0, 600)).run();
+        return json({ ok: true });
+      }
+      if (path === '/api/activities' && request.method === 'POST') {   // manual entry
+        const b = await request.json();
+        const id = `manual:${crypto.randomUUID()}`;
+        /* The Change Log is Meta's table: a manual entry for a brand is filed under its primary Meta account. */
+        const ba = await acctOf(env, b.act_id).catch(() => null);
+        const metaAct = ba ? ba.meta_act : (/^act_\d+$/.test(String(b.act_id || '')) ? b.act_id : null);
+        if (!metaAct) return json({ error: 'No Meta ad account connected for this brand, so there is no Change Log to add to.' }, 400);
+        await env.DB.prepare(
+          `INSERT INTO activities (id, act_id, event_time, category, summary, reason, note, confirmed, manual, actor)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 1, ?8)`,
+        ).bind(id, metaAct, b.event_time || new Date().toISOString(), b.category || 'other',
+          b.summary || '', b.reason ?? null, b.note ?? null, b.actor || 'manual').run();
+        return json({ ok: true, id });
+      }
+      /* ---- Daily Brief (Chat 5) ---- */
+      if (path === '/api/tw-sync' && request.method === 'POST') {
+        const act = url.searchParams.get('act');
+        const days = Math.min(+url.searchParams.get('days') || 70, 430);
+        const accounts = (await listAccounts(env, true)).filter(a => !act || act === 'all' || a.act_id === act);
+        const results = [];
+        for (const a of accounts) results.push(await syncTwDaily(env, a, days).catch(e => ({ name: a.name, error: e.message })));
+        return json({ ok: true, results });
+      }
+      /* ---- Data health (2026-09-04) ----
+         Answers "can I trust this morning's numbers?" without anybody reading
+         code or asking. Three D1 reads per brand and no network calls, so it
+         is safe to open as often as you like. */
+      if (path === '/api/data-health' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        const days = Math.min(+url.searchParams.get('days') || 14, 60);
+        const accounts = (await listAccounts(env, true)).filter(a => !act || act === 'all' || a.act_id === act);
+        const brands = [];
+        for (const a of accounts) {
+          brands.push(await dataHealth(env, a, { days }).catch(e => ({
+            account: { act_id: a.act_id, name: a.name }, verdict: 'unknown',
+            headline: `This check could not run: ${e.message}`, issues: [], days: [], bad_dates: [],
+          })));
+        }
+        const rank = { broken: 0, unknown: 1, warn: 2, ok: 3 };
+        brands.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9) || x.account.name.localeCompare(y.account.name));
+        return json({ ok: true, checked_at: new Date().toISOString(), brands });
+      }
+      /* Rebuild one day's draft from freshly-checked data. Deliberately ONE
+         brand and ONE day per call: a brief is the most expensive unit of work
+         in this worker (~22 subrequests of a 50 budget), so a loop over six
+         brands would die halfway and leave half-written drafts. The UI walks
+         the list and shows progress instead. */
+      if (path === '/api/brief-rebuild' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = b.date;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return json({ error: 'date is required (YYYY-MM-DD)' }, 400);
+        const prior = await env.DB.prepare(
+          `SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`,
+        ).bind(acct.act_id, date).first().catch(() => null);
+        // A sent brief is a record of what the client received. It does not get
+        // quietly rewritten, however wrong the numbers turned out to be.
+        if (prior?.status === 'sent') return json({ error: 'that day was already sent to the client, so it cannot be rebuilt - say so in the channel instead' }, 400);
+        const steer = typeof b.steer === 'string' && b.steer.trim() ? b.steer.trim() : null;
+        const r = await makeBrief(env, acct, date, { steer });
+        if (r.error) return json({ error: r.error }, 400);
+        // Silent: no NEW Slack post. This is a repair, not a new morning notice - 
+        // but the card already in the channel is rewritten, or it would keep
+        // showing wording that no longer exists.
+        await upsertBrief(env, acct.act_id, date, draftStatus(acct), null, r.text, r.data, { health: r.health ?? null, steer });
+        await slackSyncBrief(env, acct, date).catch(() => {});
+        return json({ ok: true, date, health: r.health, narrative_error: r.narrative_error ?? null, steer });
+      }
+      if (path === '/api/goal-suggest' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        return json(await suggestGoals(env, acct));
+      }
+      if (path === '/api/brief' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        const acct = await acctOf(env, act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = url.searchParams.get('date') || addDays(localDate(acct.tz), -1);
+        const data = await briefData(env, acct, date);
+        const hist = (await env.DB.prepare(
+          `SELECT date, posted_at, channel, status, text, steer FROM briefs WHERE act_id = ?1 ORDER BY date DESC LIMIT 15`,
+        ).bind(acct.act_id).all()).results;
+        return json({ ...data, date, history: hist });
+      }
+      if (path === '/api/brief-preview' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = b.date || addDays(localDate(acct.tz), -1);
+        const r = await makeBrief(env, acct, date, { format: b.format === 'v2' || b.format === 'v1' ? b.format : undefined });
+        if (r.error) return json({ error: r.error }, 400);
+        return json({ ok: true, date, format: r.format, text: r.text, narrative_error: r.narrative_error ?? null });
+      }
+      /* What the buyer actually did, in their own words. v2 briefs build
+         "What we're doing" from this plus the Change Log and nothing else, so
+         the client is never promised something nobody planned. */
+      if (path === '/api/brief-note' && (request.method === 'GET' || request.method === 'PUT')) {
+        const act = request.method === 'GET' ? url.searchParams.get('act') : null;
+        if (request.method === 'GET') return json({ note: safeJson(await getSetting(env, `briefNote:${act}`), null) });
+        const b = await request.json().catch(() => ({}));
+        if (!b.act) return json({ error: 'act is required' }, 400);
+        const text = String(b.text || '').trim().slice(0, 1500);
+        await putSetting(env, `briefNote:${await resolveBrandId(env, b.act)}`, JSON.stringify({ text, at: new Date().toISOString() }));
+        return json({ ok: true });
+      }
+      if (path === '/api/brief-send' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = b.date || addDays(localDate(acct.tz), -1);
+        if (b.to === 'team') { const t = await postBriefToTeam(env, acct, date).catch(e => ({ error: e.message })); return t.ok ? json(t) : json(t, 400); }
+        // Send what was reviewed. Regenerating here would discard any wording
+        // edit made on the draft, which is the entire point of the review step.
+        // `ignore_health` is the human override: someone has looked at the
+        // flagged numbers and decided they are right. The UI asks first.
+        const r = await sendBrief(env, acct, date, { useStored: b.regenerate !== true, ignoreHealth: b.ignore_health === true });
+        return r.ok ? json(r) : json({ error: r.error || r.skipped, blocked: r.blocked === true }, 400);
+      }
+      /* Save an edited draft. Only a draft is editable - once it is sent, the
+         client has that text and it must stay a record of what they received. */
+      /* The client daily as it sits in the client channel: read it, or rewrite it in place (editClientPost). */
+      if (path === '/api/brief-client-post') {
+        const q = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await request.json().catch(() => ({}));
+        const ea = await acctOf(env, await resolveBrandId(env, q.act)).catch(() => null);
+        if (!ea || !q.date) return json({ error: 'act and date required' }, 400);
+        const ref = await clientPostOf(env, ea.act_id, q.date);
+        if (request.method === 'GET') {
+          if (ref?.ts) return json({ sent: true, text: ref.text, editable: true, edited_at: ref.edited_at ?? null });
+          // Not sent yet: the hand edit, else the built daily (built fresh so it is never stale).
+          const mine = await clientDraftOf(env, ea.act_id, q.date);
+          const built = mine ? null : (await clientPreviewFor(env, ea, q.date).catch(() => null))?.daily;
+          return json({ sent: false, text: mine || built || null, editable: !internalOnly(ea), edited: !!mine });
+        }
+        if (request.method !== 'PUT') return json({ error: 'GET or PUT' }, 405);
+        if (typeof q.text !== 'string') return json({ error: 'text is required' }, 400);
+        if (!ref?.ts) return json(await setClientDraft(env, ea, q.date, q.reset ? '' : q.text));
+        if (!q.text.trim()) return json({ error: 'text is required' }, 400);
+        const r = await editClientPost(env, ea, q.date, q.text);
+        return r.ok ? json(r) : json({ error: r.error }, 400);
+      }
+      if (path === '/api/brief-text' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        if (typeof b.text !== 'string' || !b.text.trim()) return json({ error: 'text is required' }, 400);
+        b.act = await resolveBrandId(env, b.act);
+        const r = await env.DB.prepare(
+          `UPDATE briefs SET text = ?3 WHERE act_id = ?1 AND date = ?2 AND status IN ('draft','handled')`,
+        ).bind(b.act, b.date, b.text).run();
+        if (!r.meta?.changes) return json({ error: 'no draft for that day (a sent brief cannot be edited)' }, 404);
+        const ea = await acctOf(env, b.act).catch(() => null);
+        if (ea) await slackSyncBrief(env, ea, b.date).catch(() => {});
+        return json({ ok: true });
+      }
+      /* "Don't send this one." Marks the day handled without messaging the
+         client, so the catch-up stops carrying it into every later draft.
+         Reversible: pressing Write the brief again drafts the day afresh. */
+      if (path === '/api/brief-skip' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = b.date || addDays(localDate(acct.tz), -1);
+        // A sent brief is a record of what the client received and is frozen - 
+        // the same rule the edit endpoint follows.
+        const prior = await env.DB.prepare(
+          `SELECT status FROM briefs WHERE act_id = ?1 AND date = ?2`,
+        ).bind(acct.act_id, date).first().catch(() => null);
+        if (prior?.status === 'sent') return json({ error: 'this brief was already sent to the client - it cannot be un-sent' }, 400);
+        const r = await env.DB.prepare(
+          `UPDATE briefs SET status = 'skipped' WHERE act_id = ?1 AND date = ?2 AND status <> 'sent'`,
+        ).bind(acct.act_id, date).run();
+        if (!r.meta?.changes) {
+          // No draft for that day yet - record the skip anyway, so a day that
+          // was never drafted still stops the catch-up carrying it forward.
+          await upsertBrief(env, acct.act_id, date, 'skipped', null, 'Skipped - deliberately not sent to the client.', null);
+        }
+        await slackSyncBrief(env, acct, date).catch(() => {});
+        return json({ ok: true, date, skipped: true });
+      }
+      /* Build (or rebuild) today's draft by hand, for a brand set to review. */
+      if (path === '/api/brief-draft' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const date = b.date || addDays(localDate(acct.tz), -1);
+        // The optional steer box on Locus's Rewrite button, and the same field
+        // in the Slack modal, both arrive here.
+        const steer = typeof b.steer === 'string' && b.steer.trim() ? b.steer.trim() : null;
+        const r = await draftBrief(env, acct, date, { steer });
+        return r.ok ? json(r) : json({ error: r.error || r.skipped }, 400);
+      }
+      if (path === '/api/briefs' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        const { results } = await env.DB.prepare(
+          `SELECT b.*, acc.name AS account_name FROM briefs b JOIN brand_accounts acc ON acc.act_id = b.act_id
+           ${act && act !== 'all' ? 'WHERE b.act_id = ?1' : ''} ORDER BY b.date DESC LIMIT 60`,
+        ).bind(...(act && act !== 'all' ? [act] : [])).all();
+        return json({ rows: results });
+      }
+
+      /* ---- Weekly / Monthly reports (interface = Mobius Profit's Reports tab) ---- */
+      if (path === '/api/reports' && request.method === 'GET') {
+        const act = url.searchParams.get('act');
+        const { results } = await env.DB.prepare(
+          `SELECT r.act_id, r.period, r.period_start, r.period_end, r.status, r.generated_at, r.sent_at,
+                  acc.name AS account_name, acc.currency
+           FROM reports r JOIN brand_accounts acc ON acc.act_id = r.act_id
+           ${act && act !== 'all' ? 'WHERE r.act_id = ?1' : ''}
+           ORDER BY r.period_start DESC, r.period LIMIT 80`,
+        ).bind(...(act && act !== 'all' ? [act] : [])).all();
+        return json({ rows: results, lastRun: safeJson(await getSetting(env, 'lastReportRun'), null) });
+      }
+      if (path === '/api/report' && request.method === 'GET') {
+        const row = await env.DB.prepare(
+          `SELECT * FROM reports WHERE act_id = ?1 AND period = ?2 AND period_start = ?3`,
+        ).bind(url.searchParams.get('act'), url.searchParams.get('period'), url.searchParams.get('start')).first();
+        if (!row) return json({ error: 'no report for that period' }, 404);
+        const { data_json, ...rest } = row;
+        return json({ ...rest, data: safeJson(data_json, null) });
+      }
+      if (path === '/api/report-generate' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        const period = b.period || 'weekly';
+        let start = b.start;
+        if (!start) {          // default: the last COMPLETE period, in Central time
+          const today = localDate(BRIEF_TZ);
+          if (period === 'weekly') {
+            const dow = new Date(today + 'T12:00:00Z').getUTCDay();          // 0 = Sunday
+            const mondayThisWeek = addDays(today, -((dow + 6) % 7));
+            start = addDays(mondayThisWeek, -7);
+          } else start = `${prevMonth(monthOf(today))}-01`;
+        }
+        await syncTwDaily(env, acct, period === 'monthly' ? 100 : 70).catch(() => {});
+        try {
+          const steer = typeof b.steer === 'string' && b.steer.trim() ? b.steer.trim() : null;
+          const r = await makeReport(env, acct, period, start, { force: !!b.force, steer });
+          await slackSyncReport(env, acct, period, r.start).catch(() => {});
+          return json({ ok: true, period, start: r.start, end: r.end, steer,
+            narrative_error: r.narrative_error ?? null, missing_days: r.data.missing_days ?? 0 });
+        } catch (e) { return json({ error: e.message }, 400); }
+      }
+      if (path === '/api/report-summary' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        b.act = await resolveBrandId(env, b.act);
+        const r = await env.DB.prepare(
+          `UPDATE reports SET summary = ?4 WHERE act_id = ?1 AND period = ?2 AND period_start = ?3 AND status IN ('draft','handled')`,
+        ).bind(b.act, b.period, b.start, b.summary ?? '').run();
+        if (!r.meta?.changes) return json({ error: 'no draft report for that period (a sent report is frozen)' }, 404);
+        const ra = await acctOf(env, b.act).catch(() => null);
+        if (ra) await slackSyncReport(env, ra, b.period, b.start).catch(() => {});
+        return json({ ok: true });
+      }
+      if (path === '/api/report-send' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        try { return json(b.to === 'team' ? await postReportToTeam(env, acct, b.period, b.start) : await sendReport(env, acct, b.period, b.start)); }
+        catch (e) { return json({ error: e.message }, 400); }
+      }
+      if (path === '/api/report-link' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const acct = await acctOf(env, b.act);
+        if (!acct) return json({ error: 'unknown account' }, 404);
+        return json({ ok: true, url: `${DASHBOARD_URL}?reports=${await reportToken(env, acct.act_id)}` });
+      }
+
+      if (path === '/api/summarise' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(b.from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(b.to || '')) {
+          return json({ error: 'from/to must be YYYY-MM-DD' }, 400);
+        }
+        return json(await writeUpdate(env, b));
+      }
+
+      /* ---- settings ---- */
+      if (path === '/api/password' && request.method === 'PUT') {
+        const { password } = await request.json();
+        if (!password || password.length < 6) return json({ error: 'password too short' }, 400);
+        await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('passwordHash', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+          .bind(await sha256hex(password)).run();
+        return json({ ok: true });
+      }
+
+      return json({ error: 'not found' }, 404);
+    } catch (e) {
+      console.log('error', e.message, e.stack);
+      return json({ error: e.message }, 500);
+    }
+  },
+};
+/* For the offline dashboard checks (test-dashrange.mjs). */
+export { dashNumbers, dashBlocks, dashRange };
+/** A creator link on the AUTO board (profit amb.js autoBoard, migration amb-004) also shows the
+ *  brand's top-ranked video ads. The ranked ids are cached on the brand row, so the slug authorises
+ *  exactly those ads on a LIVE page, the same rule as proof. Empty for a hand-picked board. */
+async function anglesBoardAds(env, slug) {
+  if (!/^[a-z0-9-]{1,50}$/.test(slug || '')) return [];
+  const row = await env.DB.prepare(`SELECT board_json FROM p_amb_brand WHERE slug = ?1 AND live = 1 AND board_mode = 'auto'`).bind(slug).first().catch(() => null);
+  let ids = [];
+  try { ids = (JSON.parse(row?.board_json || '[]') || []).map(x => String(x.ad_id)); } catch { ids = []; }
+  /* The hub's Top videos (2026-11-05) are the brand's own creator ads, named trybe= by Trybe's Build Ads. */
+  const tr = await env.DB.prepare(`SELECT a.ad_id FROM p_trybe_ad a JOIN p_amb_brand b ON b.act_id = a.act_id WHERE b.slug = ?1 AND b.live = 1`).bind(slug).all().catch(() => ({ results: [] }));
+  for (const r of tr.results || []) ids.push(String(r.ad_id));
+  return ids;
+}
+
+export default AH_APP;

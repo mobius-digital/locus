@@ -1,0 +1,865 @@
+/* Offline security checks for CLIENT LOGINS (2026-10-09) and THE BRAND EDITION (2026-10-10, docs/locus-hub/editions.md):
+ * brandguard.js (both workers), clients.js, the client mode of the assistant engine, the calendar's client rules, the
+ * daily caps, the Supply proxy for a brand's own stock changes, and the auth changes in both workers. Drives the REAL account-health and profit
+ * workers in node against an in-memory SQLite (node:sqlite), the profit worker's AUTH binding wired to the
+ * account-health worker exactly as in production (no SESSION_SECRET on profit), Google and Gmail mocked.
+ *   node test-clients.mjs      (from account-health/worker)
+ */
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = path.join(here, '..', '..');
+
+/* ---------------- databases ---------------- */
+const mkDb = () => {
+  const db = new DatabaseSync(':memory:');
+  /* ?N and bare ? (numbered on from the highest so far, as SQLite does) become named parameters. */
+  const bindSql = sql => { let hi = 0; return sql.replace(/\?(\d*)/g, (_, n) => { if (n) { hi = Math.max(hi, +n); return ':p' + n; } hi++; return ':p' + hi; }); };
+  /* D1 ignores a bound value the SQL does not use; node:sqlite refuses it, so only the used ones are passed. */
+  const vals = (a, sql) => { const used = new Set([...bindSql(sql).matchAll(/:p(\d+)/g)].map(m => 'p' + m[1])); return Object.fromEntries(a.map((v, i) => ['p' + (i + 1), v === undefined ? null : typeof v === 'boolean' ? +v : v]).filter(([k]) => used.has(k))); };
+  const stmt = sql => { let args = []; const st = () => db.prepare(bindSql(sql)); return { bind(...a) { args = a; return this; }, async first() { return st().get(vals(args, sql)) || null; }, async all() { return { results: st().all(vals(args, sql)) }; }, async run() { const r = st().run(vals(args, sql)); return { meta: { changes: r.changes } }; } }; };
+  return { db, DB: { prepare: stmt, async batch(list) { const out = []; for (const s of list) out.push(await s.run()); return out; } } };
+};
+const { db, DB } = mkDb();
+const load = f => { for (const st of fs.readFileSync(f, 'utf8').replace(/--[^\n]*/g, '').split(/;\s*(?:\n|$)/)) { try { if (st.trim()) db.exec(st); } catch { /* re-applied */ } } };
+load(path.join(root, 'profit', 'worker', 'schema.sql'));
+load(path.join(root, 'profit', 'worker', 'migrations', 'brand-001.sql'));
+load(path.join(here, 'schema.sql'));
+/* Live D1 has these columns from hand-run ALTERs; without them the ads route threw inside a passing check. */
+for (const c of ['media_type TEXT']) { try { db.exec(`ALTER TABLE ads ADD COLUMN ${c}`); } catch { /* already there */ } }
+db.exec(`INSERT INTO brands (id, slug, name, status, currency, tz, source) VALUES
+  ('brand_alpha', 'alpha', 'Alpha Golf', 'active', 'USD', 'America/Chicago', 'locus'),
+  ('brand_beta', 'beta', 'Beta Socks', 'active', 'USD', 'America/Chicago', 'locus')`);
+db.exec(`INSERT INTO connections (id, brand_id, kind, external_id, is_primary, source) VALUES
+  ('meta:act_111', 'brand_alpha', 'meta', 'act_111', 1, 'locus'), ('meta:act_222', 'brand_beta', 'meta', 'act_222', 1, 'locus')`);
+try { db.exec(`INSERT INTO ads (ad_id, act_id, name) VALUES ('9001', 'act_111', 'Alpha ad'), ('9002', 'act_222', 'Beta ad')`); } catch (e) { db.exec(`CREATE TABLE IF NOT EXISTS ads (ad_id TEXT PRIMARY KEY, act_id TEXT, name TEXT)`); db.exec(`INSERT INTO ads (ad_id, act_id, name) VALUES ('9001', 'act_111', 'Alpha ad'), ('9002', 'act_222', 'Beta ad')`); }
+db.exec(`INSERT INTO reports (act_id, period, period_start, period_end, status, summary, data_json) VALUES
+  ('brand_alpha', 'weekly', '2026-09-28', '2026-10-04', 'sent', 'Sent one', '{"cm":5,"sales":100}'),
+  ('brand_alpha', 'weekly', '2026-10-05', '2026-10-11', 'draft', 'DRAFT TEXT', '{"sales":1}'),
+  ('brand_beta', 'weekly', '2026-09-28', '2026-10-04', 'sent', 'Beta report', '{}')`);
+const setSetting = (k, v) => db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(k, JSON.stringify(v));
+const getSetting = k => { const r = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(k); return r ? JSON.parse(r.value) : null; };
+setSetting('clientUsers', { 'nick@alpha.com': { brands: ['brand_alpha'], name: 'Nick' }, 'empty@alpha.com': { brands: [] }, 'guest@outside.com': { brands: ['brand_alpha'] } });
+setSetting('allowedEmails', ['guest@outside.com']);
+
+/* Lineup's calendar database (CAL). */
+const cal = mkDb();
+cal.db.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, brand_id TEXT, name TEXT, type TEXT, status TEXT, brief TEXT, launch_date TEXT, promo_end_date TEXT, inventory_date TEXT, asset_deadline TEXT, teaser_start TEXT, channels TEXT, owner TEXT, notes TEXT, assets_link TEXT, created_at TEXT, updated_at TEXT, updated_by TEXT, locus_brand TEXT, asana TEXT, ticks TEXT);
+  CREATE TABLE changelog (id TEXT, brand_id TEXT, event_id TEXT, event_name TEXT, change_summary TEXT, changed_by TEXT, created_at TEXT);
+  CREATE TABLE people (email TEXT, name TEXT);
+  INSERT INTO events (id, brand_id, name, type, status, launch_date, channels, locus_brand, ticks) VALUES ('ev_a', 'alpha', 'Alpha drop', 'product_launch', 'tentative', '2026-11-01', '{}', 'brand_alpha', '{}'), ('ev_b', 'beta', 'Beta sale', 'promo', 'tentative', '2026-11-02', '{}', 'brand_beta', '{}');`);
+
+/* ---------------- tokens and mocks ---------------- */
+const SECRET = 'test-session-secret';
+const b64u = b => Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const mint = (email, key = SECRET) => { const p = b64u(`${email}|${Date.now() + 3600e3}`); return `mds.${p}.${b64u(crypto.createHmac('sha256', key).update(p).digest())}`; };
+const CLIENT = mint('nick@alpha.com'), TEAM = mint('ahsan@go-mobius-digital.com'), OWNER = mint('cole@go-mobius-digital.com');
+const EMPTY = mint('empty@alpha.com'), GUEST = mint('guest@outside.com'), STRANGER = mint('someone@else.com');
+const FORGED_DEV = mint('cole@go-mobius-digital.com', 'dev');
+
+const realFetch = globalThis.fetch;
+const mails = [], slackSent = [], slackOpened = [];
+/* The plain-text part of a captured Gmail send. */
+const mailText = m => { const raw = Buffer.from(m.raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); const part = raw.split('text/plain; charset=UTF-8')[1] || ''; const b = part.split('\r\n\r\n')[1].split('\r\n')[0]; return Buffer.from(b, 'base64').toString('utf8'); };
+/* The model, when a check sets it: body -> the Messages API answer. */
+const MOCK = { anthropic: null };
+globalThis.fetch = async (url, init = {}) => {
+  const u = String(url?.url || url);
+  if (u.startsWith('https://oauth2.googleapis.com/tokeninfo')) {
+    const email = decodeURIComponent(u.split('id_token=')[1] || '');
+    return new Response(JSON.stringify({ aud: 'cid', email, email_verified: 'true' }), { status: 200 });
+  }
+  if (u.startsWith('https://oauth2.googleapis.com/token')) return new Response(JSON.stringify({ access_token: 'gtok', expires_in: 3600 }), { status: 200 });
+  if (u.startsWith('https://slack.com/api/conversations.open')) { slackOpened.push(String(init.body || '')); return new Response(JSON.stringify({ ok: true, channel: { id: 'D0COLEDM1' } }), { status: 200 }); }
+  if (u.startsWith('https://slack.com/api/chat.postMessage')) { slackSent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true, ts: '1.1' }), { status: 200 }); }
+  if (u.includes('gmail/v1/users/me/messages/send')) { mails.push(JSON.parse(init.body)); return new Response('{}', { status: 200 }); }
+  if (u.startsWith('https://api.anthropic.com/') && MOCK.anthropic) return new Response(JSON.stringify({ model: 'claude-opus-5-5', ...MOCK.anthropic(JSON.parse(init.body)) }), { status: 200 });
+  return new Response(JSON.stringify({ error: 'offline: ' + u }), { status: 503 });
+};
+
+const AH = (await import('./src/worker.js')).default;
+const PF = (await import('../../profit/worker/src/worker.js')).default;
+const keyPem = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+const ahEnv = { DB, CAL: cal.DB, SESSION_SECRET: SECRET, GOOGLE_CLIENT_ID: 'cid', GOOGLE_SA_KEY: JSON.stringify({ client_email: 'sa@x.iam.gserviceaccount.com', private_key: keyPem }) };
+const ctx = { waitUntil() {} };
+/* Production shape: the profit worker has NO SESSION_SECRET and NO ADMIN_TOKEN; it asks account-health. */
+const pfEnv = { DB, AUTH: { fetch: req => AH.fetch(req, ahEnv, ctx) } };
+ahEnv.PROFIT = { fetch: req => PF.fetch(req, pfEnv, ctx) };
+const call = async (worker, tok, method, p, body) => {
+  const env = worker === 'ah' ? ahEnv : pfEnv;
+  const res = await (worker === 'ah' ? AH : PF).fetch(new Request(`https://${worker}.test${p}`, { method, headers: { ...(tok ? { Authorization: 'Bearer ' + tok } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }), env, ctx);
+  let j = null; try { j = await res.json(); } catch {}
+  return { status: res.status, j };
+};
+const ah = (tok, m, p, b) => call('ah', tok, m, p, b), pf = (tok, m, p, b) => call('pf', tok, m, p, b);
+
+const results = [];
+async function check(name, fn) { try { await fn(); results.push(true); console.log('PASS ', name); } catch (e) { results.push(false); console.log('FAIL ', name, '\n      ' + (e.stack || e.message).split('\n').slice(0, 3).join('\n      ')); } }
+
+
+/* ---------------- the checks ---------------- */
+const today = new Date().toISOString().slice(0, 10);
+/* Passed the guard: the handler ran (it may still fail offline on Meta, Triple Whale or Google, which is fine here). */
+const ran = async (w, tok, m, p, b) => { try { return await call(w, tok, m, p, b); } catch (e) { return { status: 'handler threw: ' + String(e.message).slice(0, 80), j: null }; } };
+const passed = r => r.status !== 401 && r.status !== 403 && r.status !== 429;
+
+await check('brandguard.js is byte-identical in both workers', () => {
+  assert.equal(fs.readFileSync(path.join(here, 'src', 'brandguard.js'), 'utf8'), fs.readFileSync(path.join(root, 'profit', 'worker', 'src', 'brandguard.js'), 'utf8'));
+});
+
+await check('Google sign-in: a client email signs in as a client, a stranger is refused, sign-in is recorded', async () => {
+  const ok = await ah(null, 'POST', '/api/google-login', { credential: 'nick@alpha.com' });
+  assert.equal(ok.status, 200); assert.equal(ok.j.role, 'client');
+  assert.ok(getSetting('clientUsers')['nick@alpha.com'].last_sign_in, 'last sign-in recorded');
+  const no = await ah(null, 'POST', '/api/google-login', { credential: 'someone@else.com' });
+  assert.equal(no.status, 403); assert.match(no.j.error, /no Locus login/);
+  const team = await ah(null, 'POST', '/api/google-login', { credential: 'ahsan@go-mobius-digital.com' });
+  assert.equal(team.j.role, 'team');
+});
+
+await check('/api/me says who: client (with brands, every old switch reading on), team, owner', async () => {
+  const c = await ah(CLIENT, 'GET', '/api/me');
+  assert.equal(c.status, 200); assert.equal(c.j.role, 'client'); assert.deepEqual(c.j.client.brands.map(b => b.id), ['brand_alpha']);
+  assert.deepEqual(c.j.client.brands[0].access, { pl: true, strategist: true, changes: true, creators: true });
+  /* A stored override from before 2026-10-10 is ignored: the switches are gone. */
+  setSetting('clientAccess', { brand_alpha: { pl: false, changes: false } });
+  assert.deepEqual((await ah(CLIENT, 'GET', '/api/me')).j.client.brands[0].access, { pl: true, strategist: true, changes: true, creators: true });
+  setSetting('clientAccess', {});
+  assert.equal((await ah(TEAM, 'GET', '/api/me')).j.role, 'team');
+  assert.equal((await ah(OWNER, 'GET', '/api/me')).j.role, 'owner');
+});
+
+/* 2026-11-05 audit: EVERY rule that names a brand refuses another brand's id, in the query and in the body, before any
+   handler runs (half the rules had no line of their own). One sweep over CLIENT_RULES, so a new rule is covered too. */
+await check('every brand-scoped client rule refuses another brand (query and body)', async () => {
+  const { CLIENT_RULES } = await import('./src/brandguard.js');
+  const open = [];
+  for (const r of CLIENT_RULES) {
+    if (!r.p || r.act === 'none') continue;
+    const q = await ran('ah', CLIENT, r.m, `${r.p}?act=brand_beta`, r.m === 'GET' ? undefined : {});
+    if (q.status !== 403) open.push(`${r.m} ${r.p}?act=brand_beta -> ${q.status}`);
+    if (r.m !== 'GET' && r.m !== 'DELETE') {
+      const b = await ran('ah', CLIENT, r.m, r.p, { act: 'brand_beta' });
+      if (b.status !== 403) open.push(`${r.m} ${r.p} body act=brand_beta -> ${b.status}`);
+    }
+  }
+  assert.deepEqual(open, [], 'not refused:\n' + open.join('\n'));
+});
+await check('brand/tag takes only the brand\'s own ads; social follows ride the daily cap', async () => {
+  const { CLIENT_RULES } = await import('./src/brandguard.js');
+  assert.equal((await pf(CLIENT, 'POST', '/api/brand/tag', { act: 'brand_alpha', ad_ids: ['9002'] })).status, 403, 'another brand\'s ad');
+  assert.equal((await pf(CLIENT, 'POST', '/api/brand/tag', { act: 'brand_alpha', ad_id: '9002' })).status, 403, 'single ad_id too');
+  assert.ok(passed(await ran('pf', CLIENT, 'POST', '/api/brand/tag', { act: 'brand_alpha', ad_ids: ['9001'] })), 'own ad');
+  assert.ok(CLIENT_RULES.find(r => r.m === 'POST' && r.p === '/api/social/follow').cap, 'follow is capped');
+});
+
+/* THE BRAND EDITION: every page a single brand has answers a client for its own brand. */
+const PAGE_ROUTES = [
+  // Home: Overview, Day check, P&L, Goals, Requests
+  ['pf', '/api/overview?days=30&series=0'], ['pf', '/api/hub/live?act=brand_alpha'], ['pf', '/api/hub/kept?act=brand_alpha'], ['pf', '/api/client?act=brand_alpha&days=30'], ['pf', '/api/forecast?act=brand_alpha'],
+  ['pf', '/api/costs?act=brand_alpha'], ['pf', '/api/expenses?act=brand_alpha'], ['pf', '/api/plan?act=brand_alpha&month=2026-10'], ['pf', '/api/quarter?act=brand_alpha'], ['pf', '/api/rhythm?act=brand_alpha'],
+  ['ah', '/api/metaday?days=30'], ['ah', '/api/daycheck/now?act=brand_alpha'], ['ah', '/api/requests?act=brand_alpha'], ['ah', '/api/production?act=brand_alpha'], ['pf', '/api/data-health?act=brand_alpha&days=14'],
+  // Ads: Today, All channels, Meta and its jobs, Google and its jobs, TikTok, Tests and angles
+  ['pf', '/api/hub/today?act=brand_alpha'], ['pf', '/api/hub/paid?platform=all&act=brand_alpha'], ['pf', '/api/hub/paid?platform=meta&act=brand_alpha'], ['pf', '/api/hub/drill?act=brand_alpha'],
+  ['pf', '/api/hub/orders?act=brand_alpha'], ['pf', '/api/hub/creative?act=brand_alpha'], ['ah', '/api/meta/live?act=brand_alpha'], ['ah', '/api/activities?act=brand_alpha'], ['ah', '/api/ad-updates?act=brand_alpha'], ['ah', '/api/series?act=brand_alpha&days=45'],
+  ['ah', '/api/creative?act=brand_alpha'], ['pf', '/api/ads?act=brand_alpha'], ['ah', '/api/launch/list?act=brand_alpha'], ['ah', '/api/google/ads?act=brand_alpha'], ['ah', '/api/google/ads-ads?act=brand_alpha'],
+  ['ah', '/api/google/ads-terms?act=brand_alpha'], ['ah', '/api/google/ads-changes?act=brand_alpha'], ['ah', '/api/tiktok/report?act=brand_alpha'], ['pf', '/api/brand/tests-overview'], ['ah', '/api/your-ads-link?act=brand_alpha'],
+  // Email and SMS, Store
+  ['pf', '/api/hub/email?act=brand_alpha'], ['ah', '/api/klaviyo?act=brand_alpha&what=overview'], ['pf', '/api/hub/store?act=brand_alpha'], ['pf', '/api/customers?act=brand_alpha'], ['pf', '/api/cohorts?act=brand_alpha'],
+  ['ah', '/api/survey?act=brand_alpha'], ['ah', '/api/leaks?act=brand_alpha'], ['ah', '/api/google/website?act=brand_alpha'], ['ah', '/api/google/search?act=brand_alpha'], ['ah', '/api/clarity?act=brand_alpha'],
+  // Products, Creative, Brand
+  ['pf', '/api/hub/stockads?act=brand_alpha'], ['pf', '/api/studio?act=brand_alpha'], ['pf', '/api/studio/asana?act=brand_alpha'], ['pf', '/api/amb?act=brand_alpha'], ['pf', '/api/amb/ads?act=brand_alpha'],
+  ['ah', '/api/assets?act=brand_alpha'], ['pf', '/api/brand?act=brand_alpha'], ['pf', '/api/brand/rules?act=brand_alpha'],
+  // Calendar, Reports (sent only), Dashboards, Season, Tools
+  ['ah', '/api/calendar?act=brand_alpha'], ['pf', '/api/briefs?act=brand_alpha'], ['pf', '/api/brief?act=brand_alpha'], ['pf', '/api/reports?act=brand_alpha'], ['pf', '/api/dashboards?act=brand_alpha'],
+  ['pf', '/api/snapshots'], ['pf', '/api/season?act=brand_alpha'], ['pf', '/api/season/war?act=brand_alpha'], ['ah', '/api/tw-day?act=brand_alpha'], ['pf', '/api/scenario?act=brand_alpha'],
+  // Brand settings and the profile
+  ['ah', '/api/accounts'], ['ah', '/api/integrations'], ['ah', '/api/clients/me'], ['ah', '/api/me/prefs'],
+];
+await check('the brand edition: every page a brand has answers a client for its own brand (both workers)', async () => {
+  const shut = [];
+  for (const [w, p] of PAGE_ROUTES) { const r = await ran(w, CLIENT, 'GET', p); if (!passed(r)) shut.push(`${w} ${p} -> ${r.status} ${JSON.stringify(r.j).slice(0, 80)}`); }
+  assert.deepEqual(shut, [], 'refused:\n' + shut.join('\n'));
+});
+
+await check('another brand, an old Meta id of another brand, or "all" is refused everywhere a client goes', async () => {
+  const let_ = [];
+  for (const [w, p] of PAGE_ROUTES) {
+    if (!/act=brand_alpha/.test(p)) continue;
+    for (const other of ['brand_beta', 'act_222', 'all']) {
+      const r = await ran(w, CLIENT, 'GET', p.replace('act=brand_alpha', 'act=' + other));
+      if (r.status !== 403) let_.push(`${w} ${p} as ${other} -> ${r.status}`);
+    }
+  }
+  assert.deepEqual(let_, [], 'let through:\n' + let_.join('\n'));
+});
+
+await check('the agency edition stays the agency\'s: every agency-only route is 403 for a client', async () => {
+  const open = [];
+  for (const [w, m, p, b] of [
+    ['ah', 'GET', '/api/settings'], ['ah', 'GET', '/api/team'], ['ah', 'GET', '/api/clients'], ['ah', 'GET', '/api/schedule-health'], ['ah', 'GET', '/api/command/work'],
+    ['ah', 'GET', '/api/agency/economics'], ['ah', 'GET', '/api/agency/workload'], ['ah', 'GET', '/api/actions?act=brand_alpha'], ['ah', 'POST', '/api/actions', { act: 'brand_alpha', text: 'x' }], ['ah', 'GET', '/api/meetings'], ['ah', 'GET', '/api/ask/settings'], ['ah', 'GET', '/api/ask/memory'], ['ah', 'GET', '/api/ask/skills'],
+    ['ah', 'GET', '/api/ask/usage'], ['ah', 'GET', '/api/ask/findings'], ['ah', 'GET', '/api/ask/schedules'], ['ah', 'GET', '/api/ask/review'], ['ah', 'GET', '/api/ask/reports'], ['ah', 'GET', '/api/alerts'],
+    ['ah', 'GET', '/api/new-client/options'], ['pf', 'GET', '/api/brief-note?act=brand_alpha'], ['ah', 'GET', '/api/calendar/client-preview'], ['ah', 'GET', '/api/smoke'], ['ah', 'GET', '/api/meta-access'],
+    ['ah', 'GET', '/api/google/ads-accounts'], ['ah', 'GET', '/api/tiktok/status'], ['ah', 'GET', '/api/atria/status'], ['ah', 'GET', '/api/frame/status'], ['pf', 'GET', '/api/slack-channels'],
+    ['ah', 'GET', '/api/share/slack?act=brand_alpha'], ['pf', 'GET', '/api/hub/command?act=all'], ['pf', 'GET', '/api/hub/command?act=brand_alpha'], ['pf', 'GET', '/api/amb/overview'],
+    ['pf', 'GET', '/api/brand/overview'], ['pf', 'GET', '/api/connections'], ['ah', 'GET', '/api/slack-identity'],
+    ['ah', 'PUT', '/api/settings', { briefHour: 3 }], ['ah', 'PUT', '/api/team', { email: 'x@y.com' }], ['ah', 'POST', '/api/clients/invite', { emails: ['a@b.com'], brands: ['brand_alpha'] }],
+    ['ah', 'POST', '/api/clients/remove', { email: 'nick@alpha.com' }], ['ah', 'POST', '/api/report-send', { act: 'brand_alpha' }], ['pf', 'POST', '/api/brief-send', { act: 'brand_alpha' }],
+    ['pf', 'POST', '/api/brief-draft', { act: 'brand_alpha' }], ['pf', 'PUT', '/api/brief-text', { act: 'brand_alpha', text: 'x' }], ['pf', 'POST', '/api/report-generate', { act: 'brand_alpha' }],
+    ['pf', 'PUT', '/api/report-summary', { act: 'brand_alpha' }], ['pf', 'PUT', '/api/client-settings', { act: 'brand_alpha', brief_channel: 'C0123456789' }], ['ah', 'POST', '/api/new-client', { name: 'x' }],
+    ['ah', 'PUT', '/api/ask/settings', { model: 'deep' }], ['ah', 'POST', '/api/ask/apply', { id: 'p1' }], ['ah', 'POST', '/api/ask/memory', { text: 'x' }], ['ah', 'PUT', '/api/alerts', { act: 'brand_alpha' }],
+    ['ah', 'POST', '/api/dashboard-post', { id: 'db_0000000000' }], ['ah', 'POST', '/api/share/slack', { act: 'brand_alpha' }], ['ah', 'POST', '/api/calendar/tick', { id: 'ev_a', key: 'x', done: true }],
+    ['ah', 'POST', '/api/calendar/asana', { id: 'ev_a' }], ['pf', 'POST', '/api/studio/key', { key: 'sk-xxxxxxxxxxxxxxxxxxxxxxxx' }], ['pf', 'POST', '/api/studio/canva/setup', { act: 'brand_alpha' }],
+    ['ah', 'POST', '/api/research/step', { act: 'brand_alpha', step: 'market' }], ['ah', 'POST', '/api/research/prefill', { act: 'brand_alpha' }], ['ah', 'POST', '/api/voice/staff/build-skill', { act: 'brand_alpha' }],
+    ['ah', 'POST', '/api/discover'], ['ah', 'POST', '/api/sync?act=brand_alpha'], ['ah', 'PUT', '/api/agency/settings', { x: 1 }], ['ah', 'POST', '/api/brand-asana/sync', { act: 'brand_alpha' }],
+    ['ah', 'POST', '/api/supply/reseed?act=brand_alpha', {}], ['ah', 'PUT', '/api/meta-business', { id: '1' }], ['ah', 'POST', '/api/brands', { name: 'Mine' }],
+    ['ah', 'POST', '/api/tiktok/start'], ['pf', 'POST', '/api/connections/map', { act: 'brand_alpha', shop: 'x.myshopify.com' }], ['ah', 'POST', '/api/assets/sync?act=brand_alpha'],
+  ]) { const r = await ran(w, CLIENT, m, p, b); if (r.status !== 403) open.push(`${w} ${m} ${p} -> ${r.status}`); }
+  assert.deepEqual(open, [], 'open to a client:\n' + open.join('\n'));
+});
+
+await check('writes: a client changes its own brand through the team\'s routes, never another brand\'s or the agency\'s fields', async () => {
+  /* Brand settings: own brand, safe fields only. */
+  assert.equal((await ah(CLIENT, 'PUT', '/api/accounts/brand_alpha', { name: 'Alpha Golf Co', target_cpa: 40 })).status, 200);
+  assert.equal(db.prepare(`SELECT name FROM brands WHERE id = 'brand_alpha'`).get().name, 'Alpha Golf Co');
+  assert.equal((await ah(CLIENT, 'PUT', '/api/accounts/brand_beta', { name: 'Hijack' })).status, 403, 'another brand');
+  assert.equal((await ah(CLIENT, 'PUT', '/api/accounts/act_222', { name: 'Hijack' })).status, 403, 'another brand by its Meta id');
+  for (const k of ['slack_channel', 'brief_channel', 'tw_shop', 'active', 'brief_enabled']) assert.equal((await ah(CLIENT, 'PUT', '/api/accounts/brand_alpha', { [k]: k === 'active' ? false : 'C0123456789' })).status, 403, k);
+  assert.equal(db.prepare(`SELECT name FROM brands WHERE id = 'brand_beta'`).get().name, 'Beta Socks');
+  /* Integrations: their own keys and links, never an id Mobius's access reaches. */
+  for (const k of ['ga4', 'gsc', 'google_ads', 'meta', 'tw_shop']) assert.equal((await ah(CLIENT, 'PUT', '/api/brand-links', { act: 'brand_alpha', [k]: '1234567890' })).status, 403, k);
+  assert.ok(passed(await ran('ah', CLIENT, 'PUT', '/api/brand-links', { act: 'brand_alpha', drive: 'https://drive.google.com/drive/folders/x' })), 'their own Drive link');
+  /* Goals and the plan. */
+  assert.equal((await pf(CLIENT, 'PUT', '/api/plan', { act: 'brand_alpha', month: '2026-11', sales: 50000, spend: 10000 })).status, 200);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/goals', { act: 'brand_beta', sales: 1 })).status, 403);
+  /* The War Room plan: their own, without the team's notes. */
+  const war = await pf(CLIENT, 'PUT', '/api/season/war', { act: 'brand_alpha', patch: { goals: [{ metric: 'revenue', target: 90000 }], notes: 'CLIENT WROTE THIS' } });
+  assert.equal(war.status, 200, JSON.stringify(war.j)); assert.equal(war.j.war.notes, undefined, 'notes stay the team\'s');
+  assert.equal((await pf(CLIENT, 'PUT', '/api/season/war', { act: 'brand_beta', patch: { goals: [] } })).status, 403);
+  /* A record named by id must be theirs: dashboards, scenarios, Studio ads, change log rows. */
+  const dB = await pf(OWNER, 'PUT', '/api/dashboard', { act: 'brand_beta', name: 'Beta board', spec: { blocks: [{ type: 'note', text: 'hi' }] } });
+  assert.equal(dB.status, 200, JSON.stringify(dB.j));
+  assert.equal((await pf(CLIENT, 'GET', `/api/dashboard?id=${dB.j.id}`)).status, 403);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/dashboard', { act: 'brand_alpha', id: dB.j.id, name: 'Mine now', spec: { blocks: [{ type: 'note', text: 'x' }] } })).status, 403);
+  assert.equal((await pf(CLIENT, 'DELETE', `/api/dashboard?id=${dB.j.id}`)).status, 403);
+  const agencyBoard = await pf(OWNER, 'PUT', '/api/dashboard', { act: 'all', name: 'Every brand', spec: { blocks: [{ type: 'note', text: 'agency' }] } });
+  assert.equal((await pf(CLIENT, 'GET', `/api/dashboard?id=${agencyBoard.j.id}`)).status, 403, 'an all-brands board has no brand: the agency\'s');
+  const dA = await pf(CLIENT, 'PUT', '/api/dashboard', { act: 'brand_alpha', name: 'My board', spec: { blocks: [{ type: 'note', text: 'mine' }] } });
+  assert.equal(dA.status, 200, JSON.stringify(dA.j));
+  const myList = await pf(CLIENT, 'GET', '/api/dashboards?act=brand_alpha');
+  assert.deepEqual(myList.j.dashboards.map(x => x.name), ['My board'], 'only its own brand\'s boards, never the agency\'s');
+  const sB = db.prepare(`INSERT INTO p_scenario (id, act_id, kind, name, inputs_json) VALUES ('sc_bbbbbbbbbb', 'brand_beta', 'roas', 'Beta what-if', '{}')`).run();
+  assert.equal((await pf(CLIENT, 'PUT', '/api/scenario', { act: 'brand_alpha', id: 'sc_bbbbbbbbbb', kind: 'roas', name: 'Mine' })).status, 403);
+  assert.equal((await pf(CLIENT, 'DELETE', '/api/scenario?id=sc_bbbbbbbbbb')).status, 403);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/scenario', { act: 'brand_alpha', kind: 'roas', name: 'Our what-if', inputs: { aov: 80 } })).status, 200);
+  db.exec(`INSERT INTO p_studio_ad (id, act_id, spec_json) VALUES ('a0a0a0a0a0a0a0a0a0a0a0a0', 'brand_alpha', '{}'), ('b0b0b0b0b0b0b0b0b0b0b0b0', 'brand_beta', '{}')`);
+  assert.equal((await pf(CLIENT, 'POST', '/api/studio/status', { id: 'b0b0b0b0b0b0b0b0b0b0b0b0', status: 'approved' })).status, 403);
+  assert.equal((await pf(CLIENT, 'POST', '/api/studio/status', { id: 'a0a0a0a0a0a0a0a0a0a0a0a0', status: 'approved' })).status, 200);
+  assert.equal(db.prepare(`SELECT status FROM p_studio_ad WHERE id = 'b0b0b0b0b0b0b0b0b0b0b0b0'`).get().status, 'review', 'beta untouched');
+  try { db.exec(`INSERT INTO activities (id, act_id, event_time) VALUES ('ev-alpha', 'act_111', '2026-10-01T00:00:00Z'), ('ev-beta', 'act_222', '2026-10-01T00:00:00Z')`); } catch {}
+  assert.equal((await ah(CLIENT, 'PATCH', '/api/activities/ev-beta', { reason: 'mine' })).status, 403);
+  assert.equal((await ah(CLIENT, 'PATCH', '/api/activities/ev-alpha', { reason: 'Launch week' })).status, 200);
+  /* Live ad changes: the same propose / confirm path, its brand only. */
+  assert.equal((await ah(CLIENT, 'POST', '/api/meta/write', { act: 'brand_beta', kind: 'pause', object: '1' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/klaviyo/write', { act: 'brand_beta' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/google/write', { act: 'brand_beta' })).status, 403);
+  assert.ok(passed(await ran('ah', CLIENT, 'POST', '/api/meta/write', { act: 'brand_alpha', kind: 'pause', object: '1' })), 'its own brand reaches the propose step');
+});
+
+await check('the scrub: Slack channel ids, report config and the team\'s notes never reach a client; costs and margins now do', async () => {
+  db.exec(`UPDATE brands SET internal_channel = 'C0123456789', client_channel = 'C0987654321' WHERE id = 'brand_alpha'`);
+  const board = await pf(OWNER, 'PUT', '/api/dashboard', { act: 'brand_alpha', name: 'Posted board', schedule: 'monday', channel: 'C0123456789', spec: { blocks: [{ type: 'note', text: 'p' }] } });
+  for (const [w, p] of [['ah', '/api/accounts'], ['pf', '/api/overview?days=30&series=0'], ['ah', '/api/calendar?act=brand_alpha'], ['pf', '/api/dashboards?act=brand_alpha'], ['ah', '/api/integrations'], ['ah', '/api/me']]) {
+    const s = JSON.stringify((await ran(w, CLIENT, 'GET', p)).j || {});
+    for (const bad of ['C0123456789', 'C0987654321', '"report_config"', '"review_first"', '"steer"']) assert.ok(!s.includes(bad), `${p} leaks ${bad}`);
+  }
+  /* A client editing that board keeps the team's posting setup (never sees it, never clears it). */
+  assert.equal((await pf(CLIENT, 'PUT', '/api/dashboard', { act: 'brand_alpha', id: board.j.id, name: 'Posted board, renamed', spec: { blocks: [{ type: 'note', text: 'q' }] } })).status, 200);
+  const row = db.prepare(`SELECT name, channel, schedule FROM p_dashboard WHERE id = ?`).get(board.j.id);
+  assert.deepEqual([row.name, row.channel, row.schedule], ['Posted board, renamed', 'C0123456789', 'monday']);
+  /* Costs and margins are not scrubbed any more: a sent report carries its contribution margin. */
+  const sent = await ah(CLIENT, 'GET', '/api/report?act=brand_alpha&period=weekly&start=2026-09-28');
+  assert.equal(sent.status, 200); assert.equal(sent.j.data.cm, 5);
+  db.exec(`UPDATE brands SET internal_channel = NULL, client_channel = NULL WHERE id = 'brand_alpha'`);
+});
+
+await check('Integrations: a client never gets the pick lists (other clients Google Ads, GA4, Search Console, TikTok, Meta) or an id paste box', async () => {
+  const { CLIENT_RULES } = await import('./src/brandguard.js');
+  const rule = CLIENT_RULES.find(r => r.p === '/api/integrations');
+  const body = { agency: [{ id: 'x' }], brands: [{ act_id: 'brand_alpha', name: 'Alpha', items: [
+    { id: 'google_ads', input: { key: 'google_ads' }, options: [{ value: '111', label: 'Beta Golf (111)', linked_to: 'Beta Golf' }], levels: [{ name: 'Direct', on: false, note: 'manager 556' }] },
+    { id: 'ga4', input: { key: 'ga4' }, options: [{ value: '9', label: 'Beta GA4', linked_to: 'Beta Golf' }] },
+    { id: 'klaviyo', input: { key: 'klaviyo_key', secret: true }, options: [] }] }] };
+  const out = rule.post(body);
+  const s = JSON.stringify(out);
+  assert.ok(!s.includes('Beta'), 'another brand leaks: ' + s);
+  assert.deepEqual(out.agency, []);
+  assert.equal(out.brands[0].items[0].input, null, 'no Google Ads id box for a client');
+  assert.equal(out.brands[0].items[2].input.key, 'klaviyo_key', 'its own key box stays');
+});
+
+await check('the 2026-10-14 audit: every brand field is checked (array act, a second act_id, a text/plain body), team-only docs and labels refused', async () => {
+  const raw = async (w, m, p, bodyText, ct) => {
+    const res = await (w === 'ah' ? AH : PF).fetch(new Request(`https://${w}.test${p}`, { method: m, headers: { Authorization: 'Bearer ' + CLIENT, ...(ct ? { 'Content-Type': ct } : {}) }, body: bodyText }), w === 'ah' ? ahEnv : pfEnv, ctx);
+    return res.status;
+  };
+  /* An act sent as an array, or an act_id beside a matching act, or a JSON body labelled text/plain: all refused. */
+  assert.equal(await raw('ah', 'POST', '/api/activities?act=brand_alpha', JSON.stringify({ act: ['brand_beta'], summary: 'x' }), 'application/json'), 403);
+  assert.equal(await raw('ah', 'POST', '/api/activities', JSON.stringify({ act: 'brand_alpha', act_id: 'brand_beta', summary: 'x' }), 'application/json'), 403);
+  assert.equal(await raw('ah', 'POST', '/api/activities?act=brand_alpha', JSON.stringify({ act: 'brand_beta', summary: 'x' }), 'text/plain'), 403);
+  assert.equal(await raw('ah', 'POST', '/api/activities?act=brand_alpha', JSON.stringify({ act: 'brand_beta', summary: 'x' }), 'application/octet-stream'), 403);
+  assert.equal(await raw('pf', 'POST', '/api/profit-share?act=brand_alpha', JSON.stringify({ act: 'brand_beta' }), 'text/plain'), 403);
+  assert.equal(await raw('ah', 'POST', '/api/activities?act=brand_alpha&act=brand_beta', JSON.stringify({ act: 'brand_alpha', summary: 'x' }), 'application/json'), 403);
+  /* Brand docs that point a sync somewhere, or hold keys, are the team's. */
+  for (const key of ['asana', 'assets', 'klaviyo', 'survey_fairing']) assert.equal((await pf(CLIENT, 'PUT', '/api/brand/doc', { act: 'brand_alpha', line_id: '', key, data: { project_gid: '1' } })).status, 403, key);
+  /* The war plan is edited on its own page; the weekly summary needs the client's own act. */
+  assert.equal((await pf(CLIENT, 'PUT', '/api/season/answer', { act: 'brand_alpha', key: 'war', value: '{}' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/summarise', { act_id: 'brand_alpha', from: '2026-10-01', to: '2026-10-07' })).status, 403);
+  /* Day check: the accounts-we-run sign never reaches a client; the verdict is redone from the three outside signs. */
+  const { CLIENT_RULES } = await import('./src/brandguard.js');
+  const md = CLIENT_RULES.find(r => r.p === '/api/metaday').post({ thresholds: { high: 0.6 }, how: 'our brands ...', days: [{ hits: 2, verdict: 'bad', signs: { ours: { high: true, brands: 9, worse: 5, score: 1.2, cpm_change: 0.3 }, breezeway: 'BAD', outage: [], chatter: null } }, { hits: 3, verdict: 'vbad', signs: { ours: { high: true }, breezeway: 'BAD', outage: ['Ads Manager: outage'], chatter: { issues: true } } }] });
+  assert.equal(md.days[0].signs.ours, undefined); assert.equal(md.days[0].hits, 1); assert.equal(md.days[0].verdict, 'mixed');
+  assert.equal(md.days[1].hits, 3); assert.equal(md.days[1].verdict, 'vbad'); assert.equal(md.thresholds, undefined); assert.ok(!/our brands/i.test(md.how));
+  const dv = CLIENT_RULES.find(r => r.p === '/api/daycheck').post({ headline: 'Mixed: our accounts did not move', why: '5 of our 9 brands', todo: 'hold', client_line: 'Meta was expensive for everyone.' });
+  assert.equal(dv.headline, 'Meta was expensive for everyone.'); assert.equal(dv.why, ''); assert.equal(dv.todo, undefined);
+});
+
+await check('reports and briefs: a client reads what was SENT, never a draft, the review or the send', async () => {
+  const list = await pf(CLIENT, 'GET', '/api/reports?act=brand_alpha');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.j.rows.map(r => r.status), ['sent']); assert.equal(list.j.lastRun, undefined);
+  const draft = await pf(CLIENT, 'GET', '/api/report?act=brand_alpha&period=weekly&start=2026-10-05');
+  assert.equal(draft.status, 404); assert.ok(!JSON.stringify(draft.j).includes('DRAFT TEXT'));
+  try { db.exec(`INSERT INTO briefs (act_id, date, status, text, steer) VALUES ('brand_alpha', '2026-10-08', 'sent', 'SENT BRIEF', 'TEAM STEER'), ('brand_alpha', '2026-10-09', 'draft', 'DRAFT BRIEF', NULL)`); } catch (e) { db.exec(`INSERT INTO briefs (act_id, date, status, text) VALUES ('brand_alpha', '2026-10-08', 'sent', 'SENT BRIEF'), ('brand_alpha', '2026-10-09', 'draft', 'DRAFT BRIEF')`); }
+  const bl = JSON.stringify((await ran('pf', CLIENT, 'GET', '/api/briefs?act=brand_alpha')).j);
+  assert.ok(bl.includes('SENT BRIEF') && !bl.includes('DRAFT BRIEF') && !bl.includes('TEAM STEER'), bl.slice(0, 200));
+  const one = JSON.stringify((await ran('pf', CLIENT, 'GET', '/api/brief?act=brand_alpha&date=2026-10-09')).j || {});
+  assert.ok(!one.includes('DRAFT BRIEF') && !one.includes('TEAM STEER'), 'the brief page history holds sent briefs only');
+});
+
+await check('the assistant: a client asks the SAME engine in its client mode, pinned to its brand, its own sign-in, no SQL, no agency memory', async () => {
+  /* Offline with no model key: the client path answers that it is not set up (never the team path, never a 403). */
+  const off = await ah(CLIENT, 'POST', '/api/ask', { question: 'how are sales', screen: { act_id: 'brand_alpha' } });
+  assert.notEqual(off.status, 403); assert.match(off.j.error, /not set up/);
+  assert.equal((await ah(CLIENT, 'POST', '/api/ask', { question: 'how is beta', screen: { act_id: 'brand_beta' } })).status, 403);
+  setSetting('strategistInstructions', 'TEAM ONLY: we are dropping Beta Socks next month');
+  ahEnv.ANTHROPIC_API_KEY = 'test-key';
+  const asked = [];
+  let turn = 0;
+  MOCK.anthropic = body => {
+    asked.push(body);
+    turn++;
+    const use = { input_tokens: 2000, output_tokens: 100 };
+    if (turn === 1) return { content: [{ type: 'tool_use', id: 't1', name: 'query_locus', input: { sql: 'SELECT * FROM brands' } }], stop_reason: 'tool_use', usage: use };
+    if (turn === 2) return { content: [{ type: 'tool_use', id: 't2', name: 'locus_get', input: { path: '/api/reports?act=brand_beta' } }], stop_reason: 'tool_use', usage: use };
+    if (turn === 3) return { content: [{ type: 'tool_use', id: 't3', name: 'locus_get', input: { path: '/api/reports?act=brand_alpha' } }], stop_reason: 'tool_use', usage: use };
+    return { content: [{ type: 'text', text: 'One weekly report was sent, for Sept 28 to Oct 4.' }], stop_reason: 'end_turn', usage: use };
+  };
+  try {
+    const r = await ah(CLIENT, 'POST', '/api/ask', { question: 'what reports did we get?', screen: { act_id: 'brand_alpha', screen: 'Reports' }, runId: 'abc1234' });
+    assert.equal(r.status, 200, JSON.stringify(r.j)); assert.match(r.j.answer, /weekly report/); assert.equal(r.j.client, true);
+    const tools = asked[0].tools.map(t => t.name);
+    assert.ok(tools.includes('locus_get') && tools.includes('locus_routes'), tools.join(','));
+    for (const t of ['query_locus', 'read_app', 'search_slack', 'read_thread', 'recall', 'read_skill', 'save_skill', 'locus_write', 'meta_read', 'tool_search_tool_regex']) assert.ok(!tools.includes(t), `${t} offered to a client`);
+    const sys = JSON.stringify(asked[0].system);
+    assert.match(sys, /ACCESS RULE/); assert.match(sys, /Alpha Golf/);
+    for (const bad of ['Beta Socks', 'TEAM ONLY', 'Standing instructions', 'The active brands right now']) assert.ok(!sys.includes(bad), `system prompt carries ${bad}`);
+    const results = JSON.stringify(asked.slice(1).map(b => b.messages[b.messages.length - 1]));
+    assert.match(results, /Not available on this login/, 'the SQL tool was refused');
+    assert.match(results, /do not have access to that brand/, 'another brand refused through the client\'s own sign-in');
+    assert.ok(results.includes('2026-09-28') && !results.includes('2026-10-05'), 'its own reports read through the guard, the draft left out: ' + results.slice(-600));
+    const use = getSetting(`clientAsk:${today}:nick@alpha.com`);
+    assert.ok(use && use.n === 1 && use.cost > 0, 'the cost is counted against the client\'s day: ' + JSON.stringify(use));
+    /* The team's daily question count is not touched by a client's question. */
+    assert.equal(getSetting('strategistUsage'), null);
+  } finally { MOCK.anthropic = null; delete ahEnv.ANTHROPIC_API_KEY; }
+  /* Progress and Stop: only for the client's own run. */
+  setSetting('askRun:zzz9999', { steps: ['Reading the numbers'], stop: false });
+  const peek = await ah(CLIENT, 'GET', '/api/ask/progress?id=zzz9999');
+  assert.deepEqual(peek.j.steps, [], 'someone else\'s run shows nothing');
+  assert.equal((await ah(CLIENT, 'POST', '/api/ask/stop', { id: 'zzz9999' })).j.ok, false);
+  setSetting('askRunWho:zzz9999', 'nick@alpha.com');
+  assert.deepEqual((await ah(CLIENT, 'GET', '/api/ask/progress?id=zzz9999')).j.steps, ['Reading the numbers']);
+  assert.equal((await ah(CLIENT, 'POST', '/api/ask/stop', { id: 'zzz9999' })).j.ok, true);
+});
+
+await check('the daily caps: Studio $3 and the assistant $2 per client per day, refused with 429 and a plain message when spent', async () => {
+  const sKey = `clientStudio:${today}:nick@alpha.com`, aKey = `clientAsk:${today}:nick@alpha.com`;
+  setSetting(sKey, { n: 9, cost: 2.9 });
+  const full = await pf(CLIENT, 'POST', '/api/studio/make', { act: 'brand_alpha', n: 1, spec: { images: ['x'] } });
+  assert.equal(full.status, 429); assert.match(full.j.error, /\$3 a day/);
+  assert.equal((await pf(CLIENT, 'POST', '/api/studio/make', { act: 'brand_alpha', n: 4, spec: {} })).status, 429, 'four at once would pass the cap');
+  setSetting(sKey, { n: 0, cost: 0 });
+  const free = await ran('pf', CLIENT, 'POST', '/api/studio/make', { act: 'brand_alpha', n: 1, spec: { images: ['x'] } });
+  assert.ok(passed(free), 'under the cap it reaches the handler: ' + free.status);
+  assert.deepEqual(getSetting(sKey), { n: 0, cost: 0 }, 'a call that failed (no image key offline) is not charged');
+  assert.equal((await ah(CLIENT, 'POST', '/api/studio-ai/video-create', { act: 'brand_alpha' })).status !== 429, true);
+  setSetting(sKey, { n: 1, cost: 2 });
+  assert.equal((await ah(CLIENT, 'POST', '/api/studio-ai/video-create', { act: 'brand_alpha' })).status, 429, 'a video estimate would pass $3');
+  setSetting(aKey, { n: 30, cost: 2 });
+  assert.equal((await ah(CLIENT, 'POST', '/api/read', { screen: 'overview', scope: 'Alpha', facts: {} })).status, 429);
+  ahEnv.ANTHROPIC_API_KEY = 'test-key';
+  try { const a = await ah(CLIENT, 'POST', '/api/ask', { question: 'x', screen: { act_id: 'brand_alpha' } }); assert.equal(a.status, 429); assert.match(a.j.error, /\$2 a day/); }
+  finally { delete ahEnv.ANTHROPIC_API_KEY; }
+  setSetting(aKey, { n: 0, cost: 0 });
+  assert.equal((await ah(CLIENT, 'POST', '/api/read', { screen: 'command', facts: {} })).status, 403, 'the command center read is the agency\'s');
+  /* The team has no cap. */
+  assert.notEqual((await ran('pf', OWNER, 'POST', '/api/studio/make', { act: 'brand_alpha', n: 1, spec: { images: ['x'] } })).status, 429);
+});
+
+await check('War Room: a client reads its whole plan for its brand (never another or all), the team\'s notes stay out', async () => {
+  assert.equal((await ah(CLIENT, 'GET', '/api/tw-day?act=brand_beta')).status, 403, 'another brand');
+  assert.equal((await ah(CLIENT, 'GET', '/api/tw-day?act=all')).status, 403, 'all');
+  assert.equal((await pf(CLIENT, 'GET', '/api/season/war?act=all')).status, 403);
+  await pf(OWNER, 'PUT', '/api/season/war', { act: 'brand_alpha', patch: { notes: 'TEAM NOTE', thresholds: { mer: 2 } } });
+  const w = await pf(CLIENT, 'GET', '/api/season/war?act=brand_alpha');
+  assert.equal(w.status, 200, JSON.stringify(w.j).slice(0, 300)); assert.equal(w.j.war.notes, undefined); assert.deepEqual(w.j.war.thresholds, { mer: 2 }, 'the rest of the plan is theirs: ' + JSON.stringify(w.j.war));
+  assert.equal((await pf(OWNER, 'GET', '/api/season/war?act=brand_alpha')).j.war.notes, 'TEAM NOTE');
+});
+
+await check('survey: a client reads and manages its own brand\'s survey card, never another brand\'s', async () => {
+  const own = await ah(CLIENT, 'GET', '/api/survey?act=brand_alpha');
+  assert.equal(own.status, 200, 'own brand'); assert.equal(own.j.error, 'not_linked');
+  assert.equal((await ah(CLIENT, 'GET', '/api/survey?act=brand_beta')).status, 403, 'another brand');
+  assert.equal((await ah(CLIENT, 'GET', '/api/survey?act=all')).status, 403, 'all');
+  assert.equal((await ah(CLIENT, 'PUT', '/api/survey', { act: 'brand_beta', question_id: '1' })).status, 403, 'pin another brand\'s');
+  assert.equal((await ah(CLIENT, 'DELETE', '/api/survey?act=brand_beta')).status, 403, 'forget another brand\'s');
+  assert.equal((await ah(OWNER, 'GET', '/api/survey?act=brand_beta')).status, 200, 'the owner reads any brand');
+});
+
+await check('ads: a client may open its own ad, never another brand\'s', async () => {
+  assert.equal((await ah(CLIENT, 'GET', '/api/ad-video?ad=9002&mode=preview')).status, 403);
+  assert.equal((await ah(CLIENT, 'GET', '/api/ad-breakdown?ad=9002&from=2026-09-01&to=2026-09-30')).status, 403);
+  assert.equal((await ah(CLIENT, 'GET', '/api/ad-creatives?act=brand_alpha&ads=9001,9002')).status, 403, 'one foreign ad in the list refuses the call');
+  assert.equal((await ah(CLIENT, 'GET', '/api/ad-video?ad=424242')).status, 403, 'an unknown ad is refused');
+  const mine = await ran('ah', CLIENT, 'GET', '/api/ad-video?ad=9001&mode=preview');
+  assert.ok(passed(mine), 'own ad passes the guard');
+});
+
+await check('calendar: add, note, remove and put back its own brand\'s dates; never another brand\'s; never tick or Asana', async () => {
+  const add = await ah(CLIENT, 'POST', '/api/calendar/event', { act: 'brand_alpha', name: 'Client launch', start: '2026-11-20', kind: 'drop' });
+  assert.equal(add.status, 200, JSON.stringify(add.j));
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/event', { act: 'brand_beta', name: 'Sneaky', start: '2026-11-20' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/event', { act: 'brand_alpha', id: 'ev_b', name: 'Hijack', start: '2026-11-20' })).status, 403, 'editing beta\'s date with alpha\'s act');
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/move', { id: 'ev_b', start: '2026-12-01' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/move', { id: 'ev_a', start: '2026-11-03' })).status, 200);
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/comment', { id: 'ev_b', text: 'hi' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/comment', { id: 'ev_a', text: 'Photos come Friday' })).status, 200);
+  assert.equal((await ah(CLIENT, 'GET', '/api/calendar/history?id=ev_b')).status, 403);
+  const h = await ah(CLIENT, 'GET', '/api/calendar/history?id=ev_a');
+  assert.equal(h.status, 200); assert.ok(h.j.history.some(x => x.s === 'Note: Photos come Friday' && x.b === 'Nick'));
+  assert.equal((await ah(CLIENT, 'DELETE', '/api/calendar/event?id=ev_b')).status, 403, 'remove another brand\'s date');
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/restore', { id: 'ev_b' })).status, 403);
+  assert.equal((await ah(CLIENT, 'DELETE', '/api/calendar/event?id=ev_a')).status, 200, 'remove its own');
+  assert.equal(cal.db.prepare(`SELECT status FROM events WHERE id = 'ev_a'`).get().status, 'cancelled');
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/restore', { id: 'ev_a' })).status, 200, 'and put it back');
+  assert.equal((await ah(CLIENT, 'POST', '/api/calendar/tick', { id: 'ev_a', key: 'briefs', done: true })).status, 403);
+  assert.equal(cal.db.prepare(`SELECT launch_date, status FROM events WHERE id = 'ev_b'`).get().launch_date, '2026-11-02', 'beta untouched');
+  assert.equal(cal.db.prepare(`SELECT status FROM events WHERE id = 'ev_b'`).get().status, 'tentative');
+});
+
+await check('a removed or brand-less client gets nothing; a team guest is never treated as a client', async () => {
+  assert.equal((await ah(EMPTY, 'GET', '/api/reports?act=brand_alpha')).status, 401);
+  assert.equal((await pf(EMPTY, 'GET', '/api/overview?days=30')).status, 401);
+  assert.equal((await ah(STRANGER, 'GET', '/api/me')).status, 401);
+  assert.equal((await pf(STRANGER, 'GET', '/api/overview')).status, 401);
+  assert.equal((await ah(GUEST, 'GET', '/api/me')).j.role, 'team', 'allowedEmails wins over clientUsers');
+});
+
+await check('profit worker: a token signed with the old "dev" fallback key is refused', async () => {
+  assert.equal((await pf(FORGED_DEV, 'GET', '/api/overview')).status, 401);
+  assert.equal((await pf(FORGED_DEV, 'GET', '/api/auth-check')).j.local_session_verify, false);
+  assert.equal((await pf(OWNER, 'GET', '/api/overview?days=30&series=0')).status, 200, 'a real session still works by delegation');
+});
+
+await check('profit worker now SEES who is asking: a limited teammate is held to their brands there too', async () => {
+  setSetting('userBrands', { 'ahsan@go-mobius-digital.com': ['brand_beta'] });
+  assert.equal((await pf(TEAM, 'GET', '/api/hub/store?act=brand_alpha')).status, 403);
+  const ov = await pf(TEAM, 'GET', '/api/overview?days=30&series=0');
+  assert.deepEqual(ov.j.accounts.map(a => a.act_id), ['brand_beta']);
+  setSetting('userBrands', {});
+});
+
+await check('inviting: owner only, Mobius emails refused, the email goes only on approval, no switches, remove works', async () => {
+  assert.equal((await ah(TEAM, 'GET', '/api/clients')).status, 200, 'the team can see the list');
+  assert.equal((await ah(TEAM, 'POST', '/api/clients/invite', { emails: 'x@y.com', brands: ['brand_alpha'] })).status, 403, 'only Cole invites');
+  const dom = await ah(OWNER, 'POST', '/api/clients/invite', { emails: 'ravo@go-mobius-digital.com', brands: ['brand_alpha'] });
+  assert.equal(dom.j.failed.length, 1); assert.match(dom.j.failed[0].error, /Mobius account/);
+  assert.equal((await ah(OWNER, 'POST', '/api/clients/invite', { emails: 'new@beta.com', brands: ['brand_beta'], send: true, subject: 's', body: 'b' })).status, 400, 'no send without approval');
+  const draft = await ah(OWNER, 'GET', '/api/clients/draft?brands=brand_beta&email=new@beta.com&name=Sam%20Lee');
+  assert.match(draft.j.body, /Hi Sam,/); assert.match(draft.j.body, /\{\{sign-in link\}\}/); assert.match(draft.j.body, /any Google account/); assert.ok(!/\u2014/.test(draft.j.body + draft.j.subject), 'no em dashes');
+  assert.ok(!/read-only/i.test(draft.j.body), 'the invite no longer says read-only');
+  setSetting('clientAccess', {});
+  const inv = await ah(OWNER, 'POST', '/api/clients/invite', { emails: 'new@beta.com', brands: ['brand_beta'], access: { pl: false }, send: true, approved: true, subject: draft.j.subject, body: draft.j.body });
+  assert.equal(inv.status, 200, JSON.stringify(inv.j)); assert.deepEqual(inv.j.sent, ['new@beta.com']); assert.equal(mails.length, 1);
+  const tok = getSetting('clientUsers')['new@beta.com'].invite.token;
+  assert.match(mailText(mails[0]), new RegExp(`\\?invite=${tok}`), 'the email carries their own invite link');
+  assert.ok(!/\{\{sign-in link\}\}/.test(mailText(mails[0])), 'the placeholder is replaced');
+  assert.deepEqual(getSetting('clientAccess'), {}, 'an old screen\'s switches are ignored');
+  assert.equal((await ah(OWNER, 'PUT', '/api/clients/access', { act: 'brand_beta', pl: false })).status, 404, 'the switch route is gone');
+  const list = await ah(OWNER, 'GET', '/api/clients?act=brand_beta');
+  assert.deepEqual(list.j.clients.map(c => c.email), ['new@beta.com']); assert.ok(list.j.clients[0].last_invite);
+  const NEW = mint('new@beta.com');
+  assert.equal((await ah(NEW, 'GET', '/api/reports?act=brand_alpha')).status, 403);
+  assert.equal((await ah(OWNER, 'POST', '/api/clients/remove', { email: 'new@beta.com' })).status, 200);
+  assert.equal((await ah(NEW, 'GET', '/api/me')).status, 401, 'removed = locked out at once');
+});
+
+await check('invite links (2026-11-06): any Google account claims an invite once; no Google account = an emailed one-time link; strangers learn nothing', async () => {
+  const before = mails.length;
+  await ah(OWNER, 'POST', '/api/clients/invite', { emails: 'rob@outlook-only.com', name: 'Rob', brands: ['brand_beta'] });
+  const link = (await ah(OWNER, 'POST', '/api/clients/link', { email: 'rob@outlook-only.com' })).j.link;
+  const t = /invite=([0-9a-f]{32})/.exec(link)[1];
+  assert.equal((await ah(TEAM, 'POST', '/api/clients/link', { email: 'rob@outlook-only.com' })).status, 403, 'only Cole copies links');
+  const info = await ah(null, 'GET', '/api/clients/invite-info?t=' + t);
+  assert.equal(info.j.ok, true); assert.deepEqual(info.j.brands, ['Beta Socks']); assert.ok(!info.j.email.includes('rob@'), 'the address is masked');
+  assert.equal((await ah(null, 'GET', '/api/clients/invite-info?t=' + 'f'.repeat(32))).j.ok, false);
+  /* Emailed link: by invite (goes to the invited address) and by typed email; a stranger gets the same answer and no mail. */
+  const sent = await ah(null, 'POST', '/api/clients/login-link', { invite: t });
+  assert.equal(sent.status, 200); assert.equal(mails.length, before + 1);
+  const st = /signin=([0-9a-f]{48})/.exec(mailText(mails[mails.length - 1]))[1];
+  const stranger = await ah(null, 'POST', '/api/clients/login-link', { email: 'nobody@else.com' });
+  assert.equal(stranger.status, 200); assert.equal(mails.length, before + 1, 'no mail to a stranger');
+  await ah(null, 'POST', '/api/clients/login-link', { email: 'rob@outlook-only.com' });
+  assert.equal(mails.length, before + 1, 'one link a minute per address');
+  const s1 = await ah(null, 'POST', '/api/clients/signin', { t: st });
+  assert.equal(s1.status, 200); assert.equal(s1.j.role, 'client'); assert.equal(s1.j.email, 'rob@outlook-only.com');
+  assert.equal((await ah(s1.j.token, 'GET', '/api/me')).j.role, 'client');
+  assert.equal((await ah(null, 'POST', '/api/clients/signin', { t: st })).status, 401, 'one use');
+  /* Any Google account through a fresh invite: it takes over the login; the invite is spent; the old address is gone. */
+  await ah(OWNER, 'POST', '/api/clients/invite', { emails: 'shreya@old-domain.com', name: 'Shreya', brands: ['brand_beta'] });
+  const t2 = /invite=([0-9a-f]{32})/.exec((await ah(OWNER, 'POST', '/api/clients/link', { email: 'shreya@old-domain.com' })).j.link)[1];
+  assert.equal((await ah(null, 'POST', '/api/google-login', { credential: 'ravo@go-mobius-digital.com', invite: t2 })).j.role, 'team', 'a Mobius account stays team and does not spend it');
+  const g = await ah(null, 'POST', '/api/google-login', { credential: 'shreya.p@gmail.com', invite: t2 });
+  assert.equal(g.status, 200, JSON.stringify(g.j)); assert.equal(g.j.role, 'client');
+  const users = getSetting('clientUsers');
+  assert.ok(!users['shreya@old-domain.com'], 'the invited address is replaced'); assert.equal(users['shreya.p@gmail.com'].invited_as, 'shreya@old-domain.com');
+  assert.deepEqual(users['shreya.p@gmail.com'].brands, ['brand_beta']); assert.ok(!users['shreya.p@gmail.com'].invite, 'invite spent');
+  assert.equal((await ah(null, 'POST', '/api/google-login', { credential: 'thief@gmail.com', invite: t2 })).status, 403, 'a spent invite claims nothing');
+  await ah(OWNER, 'POST', '/api/clients/remove', { email: 'shreya.p@gmail.com' }); await ah(OWNER, 'POST', '/api/clients/remove', { email: 'rob@outlook-only.com' });
+});
+
+await check('the 2026-10-27 audit: act_id alone is written back as act (no fall-through to every brand), an upload-typed body is refused off the upload routes, Creators / Today\'s calls / Social routes a client opens answer', async () => {
+  /* act_id only: the calendar used to answer every brand's dates (its handler reads `act`). */
+  const cal = await ah(CLIENT, 'GET', '/api/calendar?act_id=brand_alpha');
+  assert.equal(cal.status, 200, JSON.stringify(cal.j));
+  const items = cal.j.items || cal.j.events || [];
+  assert.ok(items.some(e => e.name === 'Alpha drop'), 'its own date is there');
+  assert.ok(!items.some(e => (e.act || e.act_id) === 'brand_beta' || e.name === 'Beta sale'), 'another brand\'s dates leaked through act_id');
+  /* a JSON body padded past the old 64-byte sniff and labelled as an upload: refused everywhere but the upload routes */
+  const raw = async (w, m, p, bodyText, ct) => (await (w === 'ah' ? AH : PF).fetch(new Request(`https://${w}.test${p}`, { method: m, headers: { Authorization: 'Bearer ' + CLIENT, 'Content-Type': ct }, body: bodyText }), w === 'ah' ? ahEnv : pfEnv, ctx)).status;
+  const padded = ' '.repeat(80) + JSON.stringify({ act: 'brand_alpha', meta: 'act_222' });
+  assert.equal(await raw('ah', 'PUT', '/api/brand-links', padded, 'multipart/form-data; boundary=x'), 403);
+  assert.equal(await raw('pf', 'PUT', '/api/goals', ' '.repeat(80) + JSON.stringify({ act: 'brand_beta', goals: {} }), 'image/png'), 403);
+  assert.equal(await raw('ah', 'PUT', '/api/brand-links', padded, 'application/octet-stream'), 403);
+  /* the routes the client pages call (2026-10-27): its own creator link and board ads, Done / Not now on Today's calls, the Week's grid */
+  db.exec(`INSERT OR IGNORE INTO p_amb_brand (act_id, slug, live) VALUES ('brand_alpha', 'alpha-creators', 1), ('brand_beta', 'beta-creators', 1)`);
+  assert.notEqual((await pf(CLIENT, 'GET', '/api/angles/alpha-creators')).status, 403, 'its own creator link');
+  assert.equal((await pf(CLIENT, 'GET', '/api/angles/beta-creators')).status, 403, 'another brand\'s creator link');
+  assert.notEqual((await pf(CLIENT, 'GET', '/api/amb/board-ads?act=brand_alpha')).status, 403);
+  assert.notEqual((await ah(CLIENT, 'GET', '/api/buyer-list/state?act=brand_alpha')).status, 403);
+  assert.notEqual((await ah(CLIENT, 'GET', '/api/buyer-list?act=brand_alpha')).status, 403, 'a client reads its own calls');
+  assert.equal((await ah(CLIENT, 'GET', '/api/buyer-list?act=brand_beta')).status, 403);
+  assert.equal((await ah(CLIENT, 'GET', '/api/buyer-list?act=all')).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/buyer-list/decision', { act: 'brand_alpha', object: 'x', action: 'cut', decision: 'yes' })).status, 403, 'the team decides');
+  assert.equal((await ah(CLIENT, 'GET', '/api/buyer-list/ready-check?act=brand_alpha')).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/buyer-list/state', { act: 'brand_beta', object: 'x', action: 'cut', status: 'done' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/buyer-list/state', { act: 'brand_alpha', object: 'x', action: 'cut', status: 'done', owner: 'Cole' })).status, 403, 'only the state fields');
+  assert.notEqual((await ah(CLIENT, 'GET', '/api/social/grid?act=brand_alpha')).status, 403);
+  /* the team's paid switches on the day check are dropped, never refused */
+  assert.notEqual((await ah(CLIENT, 'GET', '/api/daycheck/now?act=brand_alpha&fresh=1&web=1')).status, 403);
+});
+
+await check('the client call screen (2026-10-27): the team gets the Ads step (review, approved, went live) for the brand; a client login never opens it', async () => {
+  const r = await ah(OWNER, 'GET', '/api/calls/screen?kind=client&act=brand_alpha');
+  assert.equal(r.status, 200, JSON.stringify(r.j).slice(0, 300));
+  assert.ok(r.j.ads && Array.isArray(r.j.ads.review) && Array.isArray(r.j.ads.approved) && Array.isArray(r.j.ads.live), 'ads step keys');
+  assert.equal((await ah(CLIENT, 'GET', '/api/calls/screen?kind=client&act=brand_alpha')).status, 403);
+});
+
+await check('the command center answers the team (every brand with its reasons) and a limited teammate only their brands', async () => {
+  const c = await pf(OWNER, 'GET', '/api/hub/command?act=all');
+  assert.equal(c.status, 200, JSON.stringify(c.j).slice(0, 300));
+  assert.deepEqual(c.j.brands.map(b => b.act_id).sort(), ['brand_alpha', 'brand_beta']);
+  const w = await ah(OWNER, 'GET', '/api/command/work');
+  assert.equal(w.status, 200, JSON.stringify(w.j).slice(0, 300)); assert.ok(Array.isArray(w.j.pending) && Array.isArray(w.j.alerts));
+  setSetting('userBrands', { 'ahsan@go-mobius-digital.com': ['brand_beta'] });
+  const t = await pf(TEAM, 'GET', '/api/hub/command?act=all');
+  assert.deepEqual(t.j.brands.map(b => b.act_id), ['brand_beta']);
+  setSetting('userBrands', {});
+});
+
+await check('Costs: a client adds and edits its own brand\'s custom expenses, never another brand\'s', async () => {
+  const item = { name: 'Warehouse rent', category: 'rent', kind: 'monthly', amount: 3000, start_date: '2026-10-01' };
+  const put = await pf(CLIENT, 'PUT', '/api/expenses', { act: 'brand_alpha', items: [item] });
+  assert.equal(put.status, 200, JSON.stringify(put.j));
+  assert.equal(put.j.items[0].added_by, 'Nick', 'the client\'s own name');
+  assert.ok(!JSON.stringify(put.j).includes('@'), 'no email in the answer');
+  const got = await pf(CLIENT, 'GET', '/api/expenses?act=brand_alpha');
+  assert.equal(got.status, 200); assert.deepEqual(got.j.items.map(x => x.name), ['Warehouse rent']);
+  assert.ok(got.j.sources && 'cogs' in got.j.sources, 'where each cost comes from rides along');
+  assert.equal((await pf(CLIENT, 'GET', '/api/expenses?act=brand_beta')).status, 403);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/expenses', { act: 'brand_beta', items: [item] })).status, 403);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/expenses?act=brand_alpha', { act: 'brand_beta', items: [item] })).status, 403);
+  assert.equal((await pf(CLIENT, 'PUT', '/api/expenses', { act: 'all', items: [] })).status, 403);
+  const t = await pf(OWNER, 'PUT', '/api/expenses', { act: 'brand_beta', items: [{ name: 'Klaviyo', category: 'software', kind: 'monthly', amount: 400, start_date: '2026-09-01' }] });
+  assert.equal(t.status, 200, JSON.stringify(t.j));
+  const betaId = t.j.items[0].id;
+  const steal = await pf(CLIENT, 'PUT', '/api/expenses', { act: 'brand_alpha', items: [{ id: betaId, name: 'Mine now', kind: 'monthly', amount: 1, start_date: '2026-10-01' }] });
+  assert.equal(steal.status, 200);
+  assert.equal(db.prepare(`SELECT name FROM p_expense WHERE act_id = 'brand_beta'`).get().name, 'Klaviyo', 'beta untouched');
+});
+
+await check('a client can edit only its own profile', async () => {
+  const r = await ah(CLIENT, 'PUT', '/api/clients/me', { name: 'Nick Y', welcomed: true });
+  assert.equal(r.status, 200);
+  assert.equal(getSetting('clientUsers')['nick@alpha.com'].name, 'Nick Y');
+  const me = await ah(CLIENT, 'GET', '/api/clients/me');
+  assert.equal(me.j.welcomed, true); assert.deepEqual(me.j.brands.map(b => b.id), ['brand_alpha']);
+  assert.equal((await ah(CLIENT, 'PUT', '/api/clients/me', { email: 'cole@go-mobius-digital.com', brands: ['brand_beta'] })).status, 200);
+  assert.deepEqual(getSetting('clientUsers')['nick@alpha.com'].brands, ['brand_alpha'], 'a client cannot widen its own brands');
+});
+
+await check('Inspiration: a client reads its own brand\'s Atria board and the shared season boards, never another brand\'s board', async () => {
+  const { swipeBoardsFor } = await import('../../profit/worker/src/season.js');
+  const shared = swipeBoardsFor('brand_alpha')[0];
+  const r = await ran('ah', CLIENT, 'GET', `/api/atria/board?board_id=${shared}&act=brand_alpha`);
+  assert.ok(passed(r), 'a shared season board: ' + r.status);
+  assert.equal((await ah(CLIENT, 'GET', `/api/atria/board?board_id=${swipeBoardsFor('brand_lucky_golf').pop()}&act=brand_alpha`)).status, 403, 'another brand\'s own board');
+  assert.equal((await ah(CLIENT, 'GET', `/api/atria/board?board_id=${shared}`)).status, 403, 'no brand named');
+  assert.ok(passed(await ran('ah', OWNER, 'GET', `/api/atria/board?board_id=${swipeBoardsFor('brand_lucky_golf').pop()}`)), 'the team reads any board');
+});
+
+/* Products > Stock, Buying and Drops for clients (2026-10-10 read only; 2026-10-12 the brand owns it: Cole, "buying and
+   stock changes is literally a brand thing"). Supply is mocked behind the SUPPLY binding; every request it gets is
+   recorded (method, path, brand, token, actor, body) so the test can prove what reached it and as whom. */
+await check('Stock, Buying and Drops (2026-10-12): a client reads its whole brand, costs and factories included, and makes every Supply change for its own brand through the proxy; never another brand, "all" or the agency\'s wiring', async () => {
+  const seen = [];
+  const FIX = {
+    brandName: 'Alpha Golf', tz: 'America/Chicago', today: '2026-10-10', generatedAt: '2026-10-10T12:00:00Z', lastRun: '2026-10-10T11:00:00Z', historyDays: 400, historyStart: '2025-09-01',
+    settings: { buffer_days: 10, cover_days: 180, asana_project: '1200000000000001', asana_project_name: 'Lucky designs', digest_monday: true, digest_alerts: false }, headline: { revenueAtRisk: 9999 }, decisions: [{ title: 'Order Polo by Oct 20', body: 'about $4.2k at cost' }],
+    products: [{ id: '101', title: 'Polo Navy', image: 'https://cdn/p.png', lineId: 'l_polo', lineName: 'Polos', status: 'order', lifecycle: 'core', decision: 'keep', onHand: 40, velocity: 1.2, perWeek: 8.4,
+      runOutDays: 33, runOutDate: '2026-11-12', incoming: 100, incomingLands: '2026-12-01', weeksOfCover: 5, sold90: 108, cost: 11.5, price: 65, factoryId: 'fac_wst_golf', factoryName: 'WST Golf Ltd',
+      leadDays: 75, moq: 100, suggested: 220, atCost: 2530, revenueAtRisk: 1400, deadCost: 50, notes: 'Factory rep is Mr Chen, 20% deposit',
+      variants: [{ id: 'v1', sku: 'PN-M', axis: 'M', onHand: 20, velocity: 0.7, isCore: true, runOutDays: 28, cost: 11.5, price: 65, suggested: 120, series: [1, 2], incomingOrders: [{ orderId: 'PO-0007', qty: 60, lands: '2026-12-01', status: 'production' }] }] }],
+    lines: [{ id: 'l_polo', name: 'Polos', target: 12, cutRulePct: 25, planned: true, keep: 9, decide: 2, cut: 1, openSlots: 1, weeksOfCover: 5, onHand: 400, factoryId: 'fac_wst_golf', factoryName: 'WST Golf Ltd', moq: 100, plan: [{ productId: '101', rank: 1, band: false, near: false, state: 'keep', decided: true }] }],
+    slots: [{ id: 's1', name: 'Spring 2027 · Polo 1', line_id: 'l_polo', lineName: 'Polos', collection_id: 'c1', collectionName: 'Spring 2027', status: 'sampling', factoryId: 'fac_wst_golf', dates: { briefDue: '2026-09-01', onSite: '2027-03-01' },
+      next: { what: 'Sample approved', on: '2026-11-01', days: 22, late: false }, asana_task: 'https://app.asana.com/0/1/2', asana_gid: '2', notes: 'Use the cheaper thread, saves $0.40' }],
+    collections: [{ id: 'c1', name: 'Spring 2027', drop_at: '2027-03-01', designs: 1, notes: 'Budget $12k' }],
+    orders: [{ id: 'ALPHA-PO-0007', status: 'production', factory_id: 'fac_wst_golf', factoryName: 'WST Golf Ltd', expected_at: '2026-12-01', units: 100, received: 0, atCost: 1150, deposit: '50% paid', notes: 'pay balance on ship' }, { id: 'ALPHA-PO-0008', status: 'draft', units: 50, atCost: 575 }],
+    factories: [{ id: 'fac_wst_golf', name: 'WST Golf Ltd', contact: 'chen@wst.example', moq_default: 100, closures: [{ from: '2027-02-06', to: '2027-02-20', label: 'Chinese New Year' }] }],
+    asanaLoose: [{ name: 'Loose card', url: 'https://app.asana.com/0/9/9' }],
+    db: { brand: { id: 'alpha', name: 'Alpha', slack_channel: 'C0ALPHA12345', act_id: 'brand_alpha', buys: 1, makes: 1 }, settings: { buffer_days: 10, asana_project: '1200000000000001', digest_monday: true }, lines: [{ id: 'l_polo', target_designs: 12, factory_id: 'fac_wst_golf' }], factories: [{ name: 'WST Golf Ltd' }] },
+  };
+  ahEnv.SUPPLY = { fetch: async req => {
+    const u = new URL(req.url); const body = req.method === 'GET' ? null : await req.json().catch(() => null);
+    seen.push({ m: req.method, path: u.pathname, brand: u.searchParams.get('brand') || '', auth: req.headers.get('Authorization'), actor: req.headers.get('X-Actor') || '', body });
+    const ok = (j = { ok: true }) => new Response(JSON.stringify(j));
+    if (u.pathname === '/api/brands') return ok({ brands: [{ id: 'alpha', name: 'Alpha', act_id: 'brand_alpha', makes: true, buys: true, active: true }, { id: 'beta', name: 'Beta', act_id: 'brand_beta', makes: true, buys: true, active: true }] });
+    if (u.pathname === '/api/state') return ok({ ...FIX, brandName: u.searchParams.get('brand') });
+    if (req.method === 'POST' && u.pathname === '/api/orders') return ok({ ok: true, id: 'ALPHA-PO-0009' });
+    if ((req.method === 'POST' || req.method === 'PUT') && u.pathname === '/api/slots') return ok({ ok: true, id: 'slot-' + seen.length, asanaTask: 'https://app.asana.com/0/1/' + seen.length });
+    if (req.method === 'POST' && u.pathname === '/api/collections') return ok({ ok: true, id: 'col-new' });
+    if (/^\/api\/(orders\/[\w-]+|products\/\d+|collections|settings|brand|factories|lines\/[\w%.:-]+|lines|type-map|shopify\/snapshot)$/.test(u.pathname) && req.method !== 'GET') return ok();
+    if (/^\/api\/slots\/[\w-]+\/asana$/.test(u.pathname)) return ok({ task: { completed: false, section: 'Sampling' } });
+    return new Response('{"error":"no such route in the mock"}', { status: 404 });
+  } };
+  ahEnv.SUPPLY_TOKEN = 'supply-token';
+  const writes = () => seen.filter(x => x.m !== 'GET');
+  try {
+    /* the client's own brand: the brand list (Buying AND Drops on) and the whole state */
+    const br = await ah(CLIENT, 'GET', '/api/supply/client?act=brand_alpha&what=brands');
+    assert.equal(br.status, 200, JSON.stringify(br.j)); assert.deepEqual(br.j.brands, [{ id: 'alpha', act_id: 'brand_alpha', name: 'Alpha', makes: true, buys: true, active: true }]);
+    const r = await ah(CLIENT, 'GET', '/api/supply/client?act=brand_alpha&what=state');
+    assert.equal(r.status, 200, JSON.stringify(r.j));
+    assert.equal(r.j.client, true); assert.equal(r.j.brand, 'alpha'); assert.equal(r.j.act, 'brand_alpha');
+    const p = r.j.products[0];
+    assert.equal(p.status, 'order', 'the order-timing status is the brand\'s to see'); assert.equal(p.cost, 11.5); assert.equal(p.factoryName, 'WST Golf Ltd'); assert.equal(p.atCost, 2530); assert.equal(p.suggested, 220); assert.equal(p.notes, 'Factory rep is Mr Chen, 20% deposit');
+    assert.equal(r.j.orders.length, 2, 'drafts too'); assert.equal(r.j.orders[0].id, 'ALPHA-PO-0007'); assert.equal(r.j.orders[0].atCost, 1150); assert.equal(r.j.orders[0].deposit, '50% paid');
+    assert.equal(r.j.factories[0].name, 'WST Golf Ltd'); assert.equal(r.j.factories[0].contact, 'chen@wst.example');
+    assert.equal(r.j.slots[0].asana_task, 'https://app.asana.com/0/1/2', 'the Asana card link stays'); assert.equal(r.j.slots[0].notes, 'Use the cheaper thread, saves $0.40');
+    assert.deepEqual(r.j.headline, { revenueAtRisk: 9999 }); assert.equal(r.j.decisions.length, 1); assert.equal(r.j.asanaLoose.length, 1);
+    assert.equal(r.j.settings.buffer_days, 10); assert.equal(r.j.db.lines[0].target_designs, 12); assert.equal(r.j.db.brand.id, 'alpha');
+    /* only the agency's wiring is out: the Slack channel, the digest switches, which Mobius Asana project */
+    const raw = JSON.stringify(r.j);
+    for (const bad of ['C0ALPHA12345', 'slack_channel', 'asana_project', 'Lucky designs', 'digest_monday', 'digest_alerts']) assert.ok(!raw.includes(bad), `client answer leaks ${bad}`);
+    /* Ad spend per product (the Stock page's Ads column): their brand only */
+    { const sa = await pf(CLIENT, 'GET', '/api/hub/stockads?act=brand_alpha'); assert.equal(sa.status, 200, 'stockads ' + JSON.stringify(sa.j)); }
+    assert.equal((await pf(CLIENT, 'GET', '/api/hub/stockads?act=brand_beta')).status, 403);
+    /* another brand, "all", no brand: refused before Supply is asked */
+    let before = seen.length;
+    for (const q of ['act=brand_beta&what=state', 'act=act_222&what=brands', 'act=all&what=state', 'what=state'])
+      assert.equal((await ah(CLIENT, 'GET', '/api/supply/client?' + q)).status, 403, q);
+    assert.equal(seen.length, before, 'Supply never asked for another brand');
+
+    /* EVERY Supply change the team has, for its own brand, through the proxy. The `brand` the client sends is ignored:
+       the proxy resolves the Supply brand from the client's own Locus brand. */
+    const lines = [{ variant_id: 'v1', product_id: '101', qty: 120, unit_cost: 11.5 }];
+    let w = await ah(CLIENT, 'POST', '/api/supply/orders?act=brand_alpha&brand=beta', { factory_id: 'fac_wst_golf', status: 'sent', lines, notes: 'ship by sea' });
+    assert.equal(w.status, 200, 'place an order ' + JSON.stringify(w.j)); assert.equal(w.j.id, 'ALPHA-PO-0009');
+    let last = writes().at(-1);
+    assert.equal(last.path, '/api/orders'); assert.equal(last.brand, 'alpha', 'pinned to the client\'s brand, not the one it sent'); assert.deepEqual(last.body.lines, lines); assert.equal(last.body.status, 'sent'); assert.equal(last.body.act, undefined);
+    w = await ah(CLIENT, 'PUT', '/api/supply/orders/ALPHA-PO-0009?act=brand_alpha', { status: 'production', expected_at: '2026-12-20' });
+    assert.equal(w.status, 200, 'mark a stage'); last = writes().at(-1); assert.equal(last.path, '/api/orders/ALPHA-PO-0009'); assert.equal(last.body.status, 'production');
+    w = await ah(CLIENT, 'PUT', '/api/supply/products/101?act=brand_alpha', { lifecycle: 'drop' });
+    assert.equal(w.status, 200, 'set a kind'); last = writes().at(-1); assert.equal(last.path, '/api/products/101'); assert.equal(last.body.lifecycle, 'drop');
+    w = await ah(CLIENT, 'PUT', '/api/supply/products/101?act=brand_alpha', { decision: 'cut' });
+    assert.equal(w.status, 200, 'keep or cut'); assert.equal(writes().at(-1).body.decision, 'cut');
+    w = await ah(CLIENT, 'PUT', '/api/supply/products/101?act=brand_alpha', { moq: 150, notes: 'ask for 90 day terms' });
+    assert.equal(w.status, 200, 'minimum and notes'); assert.equal(writes().at(-1).body.moq, 150);
+    w = await ah(CLIENT, 'POST', '/api/supply/collections?act=brand_alpha', { name: 'Fall 2027', drop_at: '2027-09-01' });
+    assert.equal(w.status, 200, 'new drop'); assert.equal(w.j.id, 'col-new'); assert.equal(writes().at(-1).body.name, 'Fall 2027');
+    w = await ah(CLIENT, 'PUT', '/api/supply/collections?act=brand_alpha', { id: 'c1', name: 'Spring 2027', drop_at: '2027-03-15' });
+    assert.equal(w.status, 200, 'edit a drop');
+    before = writes().length;
+    w = await ah(CLIENT, 'POST', '/api/supply/slots?act=brand_alpha', { line_id: 'l_polo', collection_id: 'c1', name: 'Spring 2027 · Polo 2', status: 'needs_brief', _count: 2 });
+    assert.equal(w.status, 200, 'add designs ' + JSON.stringify(w.j)); assert.equal(w.j.made, 2);
+    const added = writes().slice(before); assert.deepEqual(added.map(x => x.body.name), ['Spring 2027 · Polo 2', 'Spring 2027 · Polo 3']); assert.ok(added.every(x => x.path === '/api/slots' && x.body._count === undefined));
+    w = await ah(CLIENT, 'PUT', '/api/supply/slots?act=brand_alpha', { id: 's1', line_id: 'l_polo', name: 'Spring 2027 · Polo 1', status: 'approved', collection_id: 'c1', notes: 'sample is in' });
+    assert.equal(w.status, 200, 'edit a design'); assert.equal(writes().at(-1).body.status, 'approved');
+    w = await ah(CLIENT, 'GET', '/api/supply/slots/s1/asana?act=brand_alpha'); assert.equal(w.status, 200, 'read the Asana card'); assert.equal(w.j.task.section, 'Sampling');
+    w = await ah(CLIENT, 'POST', '/api/supply/slots/s1/asana?act=brand_alpha', {}); assert.equal(w.status, 200, 'make the Asana card');
+    w = await ah(CLIENT, 'POST', '/api/supply/shopify/snapshot?act=brand_alpha', {}); assert.equal(w.status, 200, 'Refresh'); assert.equal(writes().at(-1).path, '/api/shopify/snapshot');
+    w = await ah(CLIENT, 'PUT', '/api/supply/factories?act=brand_alpha', { id: 'fac_wst_golf', name: 'WST Golf Ltd', production_days: 60, shipping_days: 30, moq_default: 100, closures: [], contact: 'chen@wst.example' });
+    assert.equal(w.status, 200, 'its own factory'); assert.equal(writes().at(-1).path, '/api/factories');
+    w = await ah(CLIENT, 'PUT', '/api/supply/lines?act=brand_alpha', { id: 'l_polo', name: 'Polos', category_id: 'alpha:apparel', target_designs: 14 }); assert.equal(w.status, 200, 'a product group');
+    w = await ah(CLIENT, 'PUT', '/api/supply/type-map?act=brand_alpha', { Polo: 'l_polo' }); assert.equal(w.status, 200, 'sort Shopify types');
+    w = await ah(CLIENT, 'PUT', '/api/supply/settings?act=brand_alpha', { buffer_days: 12, cover_days: 150 }); assert.equal(w.status, 200, 'its stock rules');
+    w = await ah(CLIENT, 'PUT', '/api/supply/brand?act=brand_alpha', { buys: true, makes: true }); assert.equal(w.status, 200, 'Buying and Drops switches');
+    w = await ah(CLIENT, 'DELETE', `/api/supply/orders/${encodeURIComponent('ALPHA-PO-0008')}?act=brand_alpha`); assert.equal(w.status, 200, 'delete its own draft');
+    w = await ah(CLIENT, 'DELETE', `/api/supply/lines/${encodeURIComponent('alpha:old')}?act=brand_alpha`); assert.equal(w.status, 200, 'a colon in an id still matches the rule');
+    /* every write that reached Supply: the client's brand, the Supply token, the client named as the actor */
+    for (const x of writes()) { assert.equal(x.brand, 'alpha', `${x.m} ${x.path} brand`); assert.equal(x.auth, 'Bearer supply-token'); assert.ok(x.actor.includes('nick@alpha.com') && x.actor.includes('brand login') && x.actor.includes('Nick'), `actor "${x.actor}"`); }
+
+    /* the agency's wiring is not the brand's to set: the Slack channel, the digest, which Asana project, the brand's Locus id */
+    before = writes().length;
+    for (const [m2, p2, b2] of [['PUT', '/api/supply/settings?act=brand_alpha', { digest_monday: false }], ['PUT', '/api/supply/settings?act=brand_alpha', { asana_project: '1200000000000002', asana_project_name: 'x' }],
+      ['PUT', '/api/supply/settings?act=brand_alpha', { buffer_days: 5, slack_channel: 'C0123456789' }], ['PUT', '/api/supply/brand?act=brand_alpha', { slack_channel: 'C0123456789' }], ['PUT', '/api/supply/brand?act=brand_alpha', { act_id: 'brand_beta' }],
+      ['PUT', '/api/supply/brand?act=brand_alpha', { buys: false, name: 'Mine now' }]])
+      { const x = await ah(CLIENT, m2, p2, b2); assert.equal(x.status, 403, `${m2} ${p2} ${JSON.stringify(b2)} -> ${x.status} ${JSON.stringify(x.j)}`); }
+    /* another brand's order, another brand, "all", no brand, a route not on the list: refused before Supply is asked */
+    for (const [m2, p2, b2] of [['DELETE', '/api/supply/orders/BETA-PO-0001?act=brand_alpha'], ['POST', '/api/supply/orders?act=brand_beta', { lines }], ['POST', '/api/supply/orders?brand=alpha', { act: 'brand_beta', lines }],
+      ['PUT', '/api/supply/products/101?act=all', { lifecycle: 'core' }], ['POST', '/api/supply/orders?brand=alpha', { lines }], ['PUT', '/api/supply/products/101?act=brand_alpha&brand=beta', { act_id: 'brand_beta', lifecycle: 'core' }],
+      ['POST', '/api/supply/reseed?act=brand_alpha', {}], ['POST', '/api/supply/shopify/password?act=brand_alpha', { password: 'x' }], ['PUT', '/api/supply/shopify/settings?act=brand_alpha', { stores: {} }], ['POST', '/api/supply/digest?act=brand_alpha', {}],
+      ['GET', '/api/supply/orders?act=brand_alpha'], ['GET', '/api/supply/asana/projects?act=brand_alpha'], ['GET', '/api/supply/changelog?act=brand_alpha'], ['POST', '/api/supply/client?act=brand_alpha', {}]])
+      { const x = await ah(CLIENT, m2, p2, b2); assert.equal(x.status, 403, `${m2} ${p2} -> ${x.status} ${JSON.stringify(x.j)}`); }
+    assert.equal(writes().length, before, 'nothing refused reached Supply');
+    assert.ok(seen.every(x => x.auth === 'Bearer supply-token'), 'Supply is called with the Supply token, never the client session');
+
+    /* the team: unchanged. The same read for any brand; the Strategist's proxy honours ?brand= and names the person */
+    const t = await ah(TEAM, 'GET', '/api/supply/client?act=brand_beta&what=state');
+    assert.equal(t.status, 200, 'team ' + JSON.stringify(t.j)); assert.equal(t.j.brand, 'beta');
+    const tw = await ah(TEAM, 'PUT', '/api/supply/products/101?brand=beta', { decision: 'keep' });
+    assert.equal(tw.status, 200, 'team write ' + JSON.stringify(tw.j)); last = writes().at(-1); assert.equal(last.brand, 'beta'); assert.equal(last.actor, 'ahsan@go-mobius-digital.com (via the Strategist)');
+    const to = await ah(TEAM, 'POST', '/api/supply/orders?brand=beta', { status: 'sent', lines });
+    assert.equal(to.status, 200); assert.equal(writes().at(-1).brand, 'beta');
+    assert.equal((await ah(TEAM, 'POST', '/api/supply/reseed?brand=beta', {})).status, 404, 'a route the proxy does not forward');
+    assert.equal((await ah(null, 'GET', '/api/supply/client?act=brand_alpha&what=state')).status, 401, 'no login, no stock');
+    assert.equal((await ah(null, 'POST', '/api/supply/orders?act=brand_alpha', { lines })).status, 401, 'no login, no order');
+  } finally { delete ahEnv.SUPPLY; delete ahEnv.SUPPLY_TOKEN; }
+});
+
+await check("Production (2026-10-14): a client reads its own brand (Needs you + Coming up), opens and comments on its own cards, never another brand's, never the team's controls", async () => {
+  for (const c of ['asana_section', 'asana_gid', 'asana_url', 'brief_url', 'asset_url', 'brief_text', 'verdict', 'asana_result']) { try { db.exec(`ALTER TABLE p_br_batch ADD COLUMN ${c} TEXT`); } catch { /* already there */ } }
+  db.exec(`INSERT OR REPLACE INTO p_br_batch (id, act_id, num, title, stage) VALUES ('pa1', 'brand_alpha', '48', 'Alpha brief', 'idea'), ('pb1', 'brand_beta', '7', 'Beta brief', 'idea')`);
+  const own = await ah(CLIENT, 'GET', '/api/production?act=brand_alpha');
+  assert.equal(own.status, 200); assert.equal(own.j.client, true); assert.equal(own.j.cards, undefined, 'never the team board');
+  assert.ok(own.j.coming.some(x => x.id === 'pa1') && !own.j.coming.some(x => x.id === 'pb1'));
+  assert.equal((await ah(CLIENT, 'GET', '/api/production?act=brand_beta')).status, 403);
+  assert.equal((await ah(CLIENT, 'GET', '/api/production/card?id=pa1')).status, 200);
+  assert.equal((await ah(CLIENT, 'GET', '/api/production/card?id=pb1')).status, 403, "another brand's card");
+  assert.equal((await ah(CLIENT, 'POST', '/api/production/comment', { id: 'pb1', body: 'hi' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/production/comment', { id: 'pa1', body: 'Looks good' })).status, 200);
+  assert.equal((await ah(CLIENT, 'POST', '/api/production/decide', { id: 'pa1', ok: true })).status, 403, 'nothing was sent for their OK');
+  for (const [m, p, b] of [['POST', '/api/production/move', { id: 'pa1', to: 'live' }], ['POST', '/api/production/brief', { act: 'brand_alpha', text: 'x' }], ['POST', '/api/production/save', { id: 'pa1', brief: {} }],
+    ['POST', '/api/production/send', { id: 'pa1', what: 'idea' }], ['POST', '/api/production/share', { id: 'pa1' }], ['PUT', '/api/production/mirror', { on: false }], ['GET', '/api/production/mirror'], ['GET', '/api/production/photos']])
+    assert.equal((await ah(CLIENT, m, p, b)).status, 403, `${m} ${p}`);
+  const team = await ah(TEAM, 'GET', '/api/production?act=brand_alpha');
+  assert.equal(team.status, 200); assert.ok(Array.isArray(team.j.cards), 'the team gets the board');
+});
+
+await check('2026-10-27 leftovers: a client reads the transcript of its own Social post only, cannot move an idea into another brand\'s section, and cannot put another brand\'s upload on its post', async () => {
+  db.exec(`INSERT OR IGNORE INTO social_post (id, act_id, follow_id, plat, pid, fmt) VALUES ('spa', 'brand_alpha', 'f1', 'tt', 'p1', 'photo'), ('spb', 'brand_beta', 'f2', 'tt', 'p2', 'photo')`);
+  const own = await ah(CLIENT, 'POST', '/api/social/transcript', { id: 'spa' });
+  assert.equal(own.status, 200, 'own post'); assert.equal(own.j.text, '');
+  assert.equal((await ah(CLIENT, 'POST', '/api/social/transcript', { id: 'spb' })).status, 403, "another brand's post");
+  db.exec(`INSERT OR IGNORE INTO p_amb_section (id, act_id, name) VALUES ('seca', 'brand_alpha', 'A'), ('secb', 'brand_beta', 'B');
+    INSERT OR IGNORE INTO p_amb_angle (id, act_id, section_id, title) VALUES ('anga', 'brand_alpha', 'seca', 'idea')`);
+  const mv = await pf(CLIENT, 'POST', '/api/amb/order', { act: 'brand_alpha', kind: 'angles', ids: ['anga'], section_id: 'secb' });
+  assert.equal(mv.status, 404, "a section of another brand is unknown");
+  assert.equal(db.prepare(`SELECT section_id FROM p_amb_angle WHERE id = 'anga'`).get().section_id, 'seca');
+  assert.equal((await pf(CLIENT, 'POST', '/api/amb/order', { act: 'brand_alpha', kind: 'angles', ids: ['anga'], section_id: 'seca' })).status, 200);
+  db.exec(`INSERT OR IGNORE INTO social_media (id, act_id, kind, key, type, name) VALUES ('ma', 'brand_alpha', 'image', 'u/aaaaaaaaaaaaaaaaaaaaaaaa', 'image/jpeg', 'a'), ('mb', 'brand_beta', 'image', 'u/bbbbbbbbbbbbbbbbbbbbbbbb', 'image/jpeg', 'b')`);
+  const post = (key) => ah(CLIENT, 'POST', '/api/social/post', { act: 'brand_alpha', at: '2026-11-03T15:00:00.000Z', caption: 'x', media: [{ ref: 'm', src: 'upload', kind: 'image', key }], targets: {}, status: 'draft' });
+  assert.equal((await post('u/bbbbbbbbbbbbbbbbbbbbbbbb')).status, 403, "another brand's upload");
+  const ok = await post('u/aaaaaaaaaaaaaaaaaaaaaaaa'); assert.equal(ok.status, 200, 'own upload');
+  await ah(CLIENT, 'DELETE', `/api/social/post?id=${ok.j.post.id}`);
+});
+
+await check("Social phase 2 (2026-10-19): a client plans its own brand's week (never another's), posts and captions are its own rows, connecting accounts and the Pages list stay the team's", async () => {
+  const week = await ah(CLIENT, 'GET', '/api/social/week?act=brand_alpha&from=2026-11-02');
+  assert.equal(week.status, 200); assert.equal(week.j.act, 'brand_alpha'); assert.equal(week.j.days.length, 7);
+  assert.equal((await ah(CLIENT, 'GET', '/api/social/week?act=brand_beta&from=2026-11-02')).status, 403);
+  const acc = await ah(CLIENT, 'GET', '/api/social/accounts?act=brand_alpha');
+  assert.equal(acc.status, 200); assert.equal(acc.j.keys, undefined, "which server keys exist is not the client's"); assert.ok(!JSON.stringify(acc.j).includes('token'));
+  for (const [m, p, b] of [['GET', '/api/social/accounts/meta-pages'], ['POST', '/api/social/accounts/meta', { act: 'brand_alpha', page_id: '1' }], ['POST', '/api/social/connect/tiktok', { act: 'brand_alpha' }],
+    ['POST', '/api/social/connect/youtube', { act: 'brand_alpha' }], ['PUT', '/api/social/accounts/mode', { act: 'brand_alpha', plat: 'ig', mode: 'notify' }], ['DELETE', '/api/social/accounts?act=brand_alpha&plat=ig']])
+    assert.equal((await ah(CLIENT, m, p, b)).status, 403, `${m} ${p}`);
+  const mk = await ah(CLIENT, 'POST', '/api/social/post', { act: 'brand_alpha', at: '2026-11-03T15:00:00.000Z', caption: 'Hello', media: [{ ref: 'x', src: 'upload', kind: 'image', title: 't', file: 'https://files.test/a.jpg' }], targets: { ig: { on: true } }, status: 'draft' });
+  assert.equal(mk.status, 200); const id = mk.j.post.id;
+  assert.equal((await ah(CLIENT, 'POST', '/api/social/post', { act: 'brand_beta', at: '2026-11-03T15:00:00.000Z', caption: 'x', media: [], targets: {}, status: 'draft' })).status, 403, "another brand's week");
+  assert.equal((await ah(CLIENT, 'GET', `/api/social/post?id=${id}`)).status, 200);
+  db.prepare(`INSERT INTO social_post_out (id, act_id, at, status, caption) VALUES ('pbeta', 'brand_beta', '2026-11-03T15:00:00.000Z', 'draft', 'beta')`).run();
+  assert.equal((await ah(CLIENT, 'GET', '/api/social/post?id=pbeta')).status, 403, "another brand's post");
+  assert.equal((await ah(CLIENT, 'DELETE', '/api/social/post?id=pbeta')).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/social/post/byhand', { id: 'pbeta', plat: 'ig' })).status, 403);
+  const cap = await ah(CLIENT, 'POST', '/api/social/captions', { act: 'brand_alpha', text: 'Keep this one' });
+  assert.equal(cap.status, 200);
+  db.prepare(`INSERT INTO social_caption (id, act_id, text) VALUES ('cbeta', 'brand_beta', 'beta caption')`).run();
+  assert.equal((await ah(CLIENT, 'DELETE', '/api/social/captions?id=cbeta')).status, 403);
+  assert.equal((await ah(CLIENT, 'DELETE', `/api/social/captions?id=${cap.j.id}`)).status, 200);
+  assert.equal((await ah(CLIENT, 'DELETE', `/api/social/post?id=${id}`)).status, 200);
+  assert.ok(passed(await ah(TEAM, 'GET', '/api/social/accounts/meta-pages')), 'the team reaches the Pages list (it fails offline on Meta, which is fine)');
+  assert.ok(passed(await pf(CLIENT, 'GET', '/api/calendar?act=brand_alpha&from=2026-11-02&to=2026-11-08')), 'the calendar with its posts layer still answers a client');
+});
+
+await check('site reviews: a client answers and sends its own brand only; the token link opens one review; the list and link are team only', async () => {
+  const sections = [{ id: 'home', title: 'Homepage' }, { id: 'cart', title: 'Cart' }];
+  assert.equal((await ah(CLIENT, 'GET', '/api/site-review?act=brand_beta&slug=site-rebuild')).status, 403, "another brand's review");
+  assert.equal((await ah(CLIENT, 'PUT', '/api/site-review/answer', { act: 'brand_beta', slug: 'site-rebuild', section: 'home', status: 'approved' })).status, 403);
+  assert.equal((await ah(CLIENT, 'POST', '/api/site-review/send', { act: 'brand_beta', slug: 'site-rebuild' })).status, 403);
+  for (const [m, p, b] of [['GET', '/api/site-review/list?act=brand_alpha'], ['POST', '/api/site-review/link', { act: 'brand_alpha', slug: 'site-rebuild', path: 'reviews/alpha/site-rebuild/' }],
+    ['POST', '/api/site-review/reopen', { act: 'brand_alpha', slug: 'site-rebuild' }], ['DELETE', '/api/site-review/answers?act=brand_alpha&slug=site-rebuild']])
+    assert.equal((await ah(CLIENT, m, p, b)).status, 403, `${m} ${p}`);
+  assert.equal((await ah(null, 'GET', '/api/site-review?act=brand_alpha&slug=site-rebuild')).status, 401, 'no login, no token');
+  const link = await ah(OWNER, 'POST', '/api/site-review/link', { act: 'brand_alpha', slug: 'site-rebuild', title: 'Site rebuild', path: 'reviews/alpha/site-rebuild/', sections });
+  assert.equal(link.status, 200); const tok = /\?t=([a-f0-9]{32})$/.exec(link.j.url)[1];
+  assert.equal((await ah(CLIENT, 'PUT', '/api/site-review/answer', { act: 'brand_alpha', slug: 'site-rebuild', section: 'home', status: 'approved' })).status, 200);
+  assert.equal((await ah(null, 'PUT', `/api/site-review/t/${tok}/answer`, { section: 'cart', status: 'changes', note: 'Bigger <!channel> button', who: 'Rob' })).status, 200);
+  assert.equal((await ah(null, 'PUT', `/api/site-review/t/${tok}/answer`, { section: 'nope', status: 'approved' })).status, 400, 'unknown section');
+  const pub = await ah(null, 'GET', `/api/site-review/t/${tok}`);
+  assert.equal(pub.status, 200); assert.equal(pub.j.answers.length, 2); assert.equal(pub.j.link, undefined, 'the public view has no link field');
+  assert.equal((await ah(null, 'GET', `/api/site-review/t/${'0'.repeat(32)}`)).status, 404);
+  slackSent.length = 0; ahEnv.SLACK_BOT_TOKEN = 'xoxb-test';
+  const sent = await ah(null, 'POST', `/api/site-review/t/${tok}/send`, { overall: 'Looks good', who: 'Rob' });
+  assert.equal(sent.status, 200); assert.equal(sent.j.approved, 1); assert.equal(sent.j.changes, 1);
+  assert.equal(slackSent.length, 1); delete ahEnv.SLACK_BOT_TOKEN;
+  assert.equal(slackSent[0].channel, 'D0COLEDM1', 'posted into the DM it opened'); assert.ok(slackOpened.some(b => b.includes('U06C37MDWD7')), 'a DM to Cole, never a client channel'); assert.equal(sent.j.slack, true);
+  assert.ok(!slackSent[0].text.includes('<!channel>'), 'notes are escaped'); assert.ok(!/—/.test(slackSent[0].text));
+  assert.equal((await ah(null, 'PUT', `/api/site-review/t/${tok}/answer`, { section: 'home', status: 'changes' })).status, 409, 'locked once sent');
+  const list = await ah(OWNER, 'GET', '/api/site-review/list?act=brand_alpha');
+  assert.equal(list.j.reviews.length, 1); assert.ok(list.j.reviews[0].sent_at); assert.ok(list.j.reviews[0].link);
+  assert.equal((await ah(OWNER, 'DELETE', '/api/site-review/answers?act=brand_alpha&slug=site-rebuild')).status, 200);
+  assert.equal((await ah(OWNER, 'GET', '/api/site-review/list?act=brand_alpha')).j.reviews[0].answers.length, 0);
+});
+
+globalThis.fetch = realFetch;
+const pass = results.filter(Boolean).length;
+console.log(`\n${pass}/${results.length} passed`);
+process.exit(pass === results.length ? 0 : 1);

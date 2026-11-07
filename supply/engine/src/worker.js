@@ -1,0 +1,1106 @@
+/**
+ * Mobius Restock — inventory forecasting worker (Cloudflare Workers)
+ *
+ * Snapshots Shopify inventory + sales daily, computes a weighted
+ * sell-through velocity per variant, projects days-of-stock remaining,
+ * compares that to each product's manufacturer lead time, and alerts
+ * Slack: a morning digest plus an instant ping the moment anything
+ * crosses into "reorder now".
+ *
+ * Bindings (see wrangler.toml):
+ *   KV                     — KV namespace: history, catalog, settings, state
+ * Secrets (wrangler secret put <NAME>):
+ *   ADMIN_TOKEN            — long random string; guards the API
+ *   SLACK_BOT_TOKEN        — xoxb- token (same Slack app as Mobius Pulse)
+ *   SHOPIFY_CLIENT_ID_LUCKY + SHOPIFY_CLIENT_SECRET_LUCKY
+ *                          — Dev Dashboard app credentials for Lucky Golf
+ *                            (one pair per store; worker exchanges them for
+ *                            24h access tokens via client_credentials grant).
+ *                            Legacy alternative: SHOPIFY_TOKEN_<STOREID>.
+ */
+
+/* ------------------------------------------------------------------ */
+/*  Stores — add a store: append here + set its SHOPIFY_TOKEN_ secret  */
+/* ------------------------------------------------------------------ */
+
+const STORES = [
+  {
+    id: 'lucky',
+    name: 'Lucky Golf',
+    domain: 'lucky-wedges.myshopify.com',
+    tz: 'America/Chicago',
+  },
+];
+
+const API_VERSION = '2026-01';
+const HISTORY_DAYS = 800;          // rolling window of daily history kept in KV (2+ years, for seasonality once read_all_orders is granted)
+const DASHBOARD_URL = 'https://tools.go-mobius-digital.com/supply/';
+
+/* Velocity blend: three windows, recency-weighted. */
+const WINDOWS = [
+  { days: 14, weight: 0.45 },
+  { days: 30, weight: 0.35 },
+  { days: 90, weight: 0.20 },
+];
+/* If the 14-day rate exceeds SPIKE_CAP × the 90-day rate (promo, viral
+ * moment), the 14-day input is capped at that multiple for projection —
+ * the spike is flagged, not blindly extrapolated. */
+const SPIKE_CAP = 2.0;
+const SPIKE_FLAG = 2.0;   // v14/v90 above this ⇒ trend "spiking"
+const RISE_FLAG = 1.35;
+const FALL_FLAG = 0.65;
+
+/* ------------------------------------------------------------------ */
+/*  Small date helpers (all bucketing is in the store's local zone)    */
+/* ------------------------------------------------------------------ */
+
+function localDate(tz, d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(d); // → YYYY-MM-DD
+}
+
+function tzOffsetStr(tz, d = new Date()) {
+  try {
+    const s = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' })
+      .formatToParts(d).find(p => p.type === 'timeZoneName')?.value || '';
+    const m = s.match(/GMT([+-]\d{2}):?(\d{2})?/);
+    if (m) return `${m[1]}:${m[2] || '00'}`;
+  } catch (e) { /* fall through */ }
+  return '-06:00';
+}
+
+function addDays(ymd, n) {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** ISO instant of local midnight `daysAgo` days before today (store tz). */
+function localMidnightISO(tz, daysAgo) {
+  const day = addDays(localDate(tz), -daysAgo);
+  return `${day}T00:00:00${tzOffsetStr(tz)}`;
+}
+
+const gidTail = gid => String(gid || '').split('/').pop();
+
+/* ------------------------------------------------------------------ */
+/*  Shopify Admin GraphQL                                              */
+/* ------------------------------------------------------------------ */
+
+/* Auth: either a static token (legacy custom app / offline token) via
+ * SHOPIFY_TOKEN_<ID>, or — the post-2026 Dev Dashboard flow — a client
+ * credentials grant via SHOPIFY_CLIENT_ID_<ID> + SHOPIFY_CLIENT_SECRET_<ID>.
+ * Client-credentials tokens expire every 24h; we exchange + cache in KV. */
+
+const staticToken = (env, store) => env[`SHOPIFY_TOKEN_${store.id.toUpperCase()}`];
+function clientCreds(env, store) {
+  const u = store.id.toUpperCase();
+  const id = env[`SHOPIFY_CLIENT_ID_${u}`], secret = env[`SHOPIFY_CLIENT_SECRET_${u}`];
+  return id && secret ? { id, secret } : null;
+}
+const hasShopifyAuth = (env, store) => !!(staticToken(env, store) || clientCreds(env, store));
+
+async function getAccessToken(env, store, { force = false } = {}) {
+  const st = staticToken(env, store);
+  if (st) return st;
+  const creds = clientCreds(env, store);
+  if (!creds) {
+    const u = store.id.toUpperCase();
+    throw new Error(`missing Shopify credentials: set SHOPIFY_CLIENT_ID_${u} + SHOPIFY_CLIENT_SECRET_${u} (Dev Dashboard app) or SHOPIFY_TOKEN_${u}`);
+  }
+  const key = `shoptoken:${store.id}`;
+  if (!force) {
+    const cached = await env.KV.get(key, 'json');
+    if (cached && cached.expiresAt > Date.now() + 10 * 60 * 1000) return cached.token;
+  }
+  const res = await fetch(`https://${store.domain}/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: creds.id, client_secret: creds.secret,
+    }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || !j.access_token) {
+    throw new Error(`Shopify token exchange failed (HTTP ${res.status}): ${JSON.stringify(j).slice(0, 200)}`);
+  }
+  const ttl = j.expires_in || 86399;
+  await env.KV.put(key, JSON.stringify({
+    token: j.access_token, expiresAt: Date.now() + ttl * 1000,
+  }), { expirationTtl: ttl });
+  return j.access_token;
+}
+
+async function shopify(env, store, query, variables = {}) {
+  let token = await getAccessToken(env, store);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await fetch(`https://${store.domain}/admin/api/${API_VERSION}/graphql.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status === 429) { await new Promise(r => setTimeout(r, 1500)); continue; }
+    if (res.status === 401 && !staticToken(env, store)) {
+      // cached client-credentials token expired or the secret was rotated
+      token = await getAccessToken(env, store, { force: true });
+      continue;
+    }
+    const json = await res.json();
+    if (json.errors?.some(e => e.extensions?.code === 'THROTTLED')) {
+      await new Promise(r => setTimeout(r, 1500)); continue;
+    }
+    if (json.errors) throw new Error(`Shopify: ${JSON.stringify(json.errors).slice(0, 300)}`);
+    return json.data;
+  }
+  throw new Error('Shopify: throttled after retries');
+}
+
+const CATALOG_QUERY = `
+query($after: String) {
+  products(first: 8, query: "status:active", after: $after) {
+    pageInfo { hasNextPage endCursor }
+    edges { node {
+      id title productType vendor
+      featuredMedia { preview { image { url(transform: {maxWidth: 160, maxHeight: 160}) } } }
+      leadMeta: metafield(namespace: "custom", key: "lead_time_days") { value }
+      moqMeta: metafield(namespace: "custom", key: "moq") { value }
+      variants(first: 100) { edges { node {
+        id title sku inventoryQuantity createdAt price
+        selectedOptions { name value }
+        inventoryItem { tracked unitCost { amount } }
+      } } }
+    } }
+  }
+}`;
+
+async function fetchCatalog(env, store) {
+  const products = [];
+  let after = null;
+  do {
+    const data = await shopify(env, store, CATALOG_QUERY, { after });
+    const page = data.products;
+    for (const { node: p } of page.edges) {
+      const override = parseInt(p.leadMeta?.value, 10);
+      const moq = parseInt(p.moqMeta?.value, 10);
+      products.push({
+        moq: Number.isFinite(moq) && moq > 0 ? moq : null,
+        id: gidTail(p.id),
+        title: p.title,
+        type: p.productType || '',
+        vendor: p.vendor || '',
+        image: p.featuredMedia?.preview?.image?.url || null,
+        leadOverride: Number.isFinite(override) && override > 0 ? override : null,
+        variants: p.variants.edges.map(({ node: v }) => ({
+          id: gidTail(v.id),
+          title: v.title === 'Default Title' ? '' : v.title,
+          sku: v.sku || '',
+          inv: v.inventoryQuantity ?? 0,
+          createdAt: v.createdAt || null,
+          tracked: !!v.inventoryItem?.tracked,
+          price: v.price != null ? +v.price : null,
+          cost: v.inventoryItem?.unitCost?.amount != null ? +v.inventoryItem.unitCost.amount : null,
+          options: (v.selectedOptions || []).map(o => ({ n: o.name, v: o.value })),
+        })),
+      });
+    }
+    after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  } while (after);
+  return { fetchedAt: new Date().toISOString(), products };
+}
+
+const ORDERS_QUERY = `
+query($q: String!, $after: String) {
+  orders(first: 25, query: $q, after: $after, sortKey: CREATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    edges { node {
+      createdAt cancelledAt
+      lineItems(first: 25) { edges { node { quantity variant { id } } } }
+    } }
+  }
+}`;
+
+/**
+ * Fetch orders since `sinceISO`, bucketing unit sales by store-local day.
+ * Stops after `maxPages` (Workers cap subrequests per invocation) and
+ * returns a cursor so the caller can resume.
+ */
+async function fetchSales(env, store, sinceISO, { after = null, maxPages = 30 } = {}) {
+  const salesByDate = {};   // { 'YYYY-MM-DD': { [variantId]: qty } }
+  let pages = 0, orders = 0, done = false;
+  const q = `created_at:>='${sinceISO}'`;
+  do {
+    const data = await shopify(env, store, ORDERS_QUERY, { q, after });
+    const page = data.orders;
+    for (const { node: o } of page.edges) {
+      if (o.cancelledAt) continue;
+      orders++;
+      const day = localDate(store.tz, new Date(o.createdAt));
+      const bucket = (salesByDate[day] ||= {});
+      for (const { node: li } of o.lineItems.edges) {
+        const vid = gidTail(li.variant?.id);
+        if (!vid) continue; // deleted variant / custom line item
+        bucket[vid] = (bucket[vid] || 0) + (li.quantity || 0);
+      }
+    }
+    after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+    done = !after;
+    pages++;
+  } while (after && pages < maxPages);
+  return { salesByDate, orders, cursor: after, done };
+}
+
+/* ------------------------------------------------------------------ */
+/*  History (KV)                                                       */
+/* ------------------------------------------------------------------ */
+
+async function getHistory(env, store) {
+  return (await env.KV.get(`history:${store.id}`, 'json'))
+    || { startDate: null, days: {}, inventory: {} };
+}
+
+function mergeSales(history, salesByDate, { overwriteDates = null } = {}) {
+  if (overwriteDates) for (const d of overwriteDates) delete history.days[d];
+  for (const [day, byVariant] of Object.entries(salesByDate)) {
+    const bucket = (history.days[day] ||= {});
+    for (const [vid, qty] of Object.entries(byVariant)) {
+      bucket[vid] = (bucket[vid] || 0) + qty;
+    }
+  }
+  if (!history.startDate || Object.keys(salesByDate).some(d => d < history.startDate)) {
+    const all = Object.keys(history.days).sort();
+    history.startDate = all[0] || history.startDate;
+  }
+}
+
+function pruneHistory(history, tz) {
+  const cutoff = addDays(localDate(tz), -HISTORY_DAYS);
+  for (const key of ['days', 'inventory']) {
+    for (const d of Object.keys(history[key])) if (d < cutoff) delete history[key][d];
+  }
+  if (history.startDate && history.startDate < cutoff) history.startDate = cutoff;
+}
+
+/* ------------------------------------------------------------------ */
+/*  On-order (open POs)                                                */
+/* ------------------------------------------------------------------ */
+
+/** { [variantId]: { qty, placedAt: 'YYYY-MM-DD', eta: 'YYYY-MM-DD' } } —
+ *  quantities already ordered from the manufacturer but not yet received.
+ *  Set from the dashboard's "Mark as ordered"; auto-cleared when a restock
+ *  lands in Shopify (see runSnapshot) or manually from the dashboard. */
+async function getOnOrder(env, store) {
+  return (await env.KV.get(`onorder:${store.id}`, 'json')) || {};
+}
+
+/* ------------------------------------------------------------------ */
+/*  Settings                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Seeded with example profiles so day one isn't a wall of "unmapped" —
+ * the dashboard flags these as defaults to review. */
+const DEFAULT_SETTINGS = {
+  bufferDays: 10,          // customs / anything-goes-wrong padding
+  watchWindow: 30,         // days ahead of the reorder point to start watching
+  targetCoverDays: 180,    // reorder suggestions aim for this much coverage
+  digestHourLocal: 6,      // store-local hour the morning digest sends
+  digestMode: 'always',    // 'always' | 'issues'
+  reviewedDefaults: false, // dashboard shows a "review lead times" banner until true
+  profiles: [
+    { id: 'clubs', name: 'Clubs', productionDays: 60, shippingDays: 30 },
+    { id: 'softgoods', name: 'Soft Goods', productionDays: 45, shippingDays: 30 },
+    { id: 'accessories', name: 'Accessories', productionDays: 30, shippingDays: 30 },
+  ],
+  typeMap: {
+    'Wedges': 'clubs', 'Putter': 'clubs', 'Driver': 'clubs',
+    'Hybrids': 'clubs', 'Shaft': 'clubs',
+    'Apparel': 'softgoods', 'HAT': 'softgoods', 'Glove': 'softgoods',
+    'Head Cover': 'softgoods',
+    'Grip': 'accessories', 'Grips': 'accessories', 'Tees': 'accessories',
+  },
+  muted: [],               // variant or product ids to silence ("v123", "p456")
+  stores: { lucky: { channel: '' } },
+};
+
+async function getSettings(env) {
+  const s = await env.KV.get('settings', 'json');
+  if (!s) return structuredClone(DEFAULT_SETTINGS);
+  for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+    if (s[k] === undefined) s[k] = structuredClone(v);
+  }
+  for (const store of STORES) if (!s.stores[store.id]) s.stores[store.id] = { channel: '' };
+  return s;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Forecast math                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Sales rate for one variant over a trailing window ending yesterday.
+ * Days where the variant sat at zero stock with zero sales are excluded
+ * from the denominator — being sold out must not read as selling slowly.
+ * Days before the variant existed (`sinceDay` = its Shopify createdAt)
+ * are excluded entirely — a 10-day-old product is judged on its 10 real
+ * days, not diluted across a 90-day window of pre-launch zeros.
+ * (Inventory snapshots only exist from tracking start, so backfilled
+ * days always count.)
+ */
+function windowRate(history, vid, endDay, days, sinceDay, recon) {
+  let sold = 0, eff = 0, have = 0;
+  for (let i = 0; i < days; i++) {
+    const day = addDays(endDay, -i);
+    if (history.startDate && day < history.startDate) break;
+    if (sinceDay && day < sinceDay) break;
+    have++;
+    const qty = history.days[day]?.[vid] || 0;
+    const inv = history.inventory[day]?.[vid] ?? recon?.[day]?.[vid];
+    const oosDay = inv !== undefined && inv <= 0 && qty === 0;
+    if (!oosDay) eff++;
+    sold += qty;
+  }
+  // eff = days the variant was actually buyable; 0 ⇒ window has no signal.
+  // Rate denominator floors at 3 buyable days so a single lucky in-stock day
+  // can't extrapolate into a whole velocity (conservative for thin data).
+  return { sold, days: have, eff, rate: have ? sold / Math.max(eff, Math.min(3, have)) : 0 };
+}
+
+/**
+ * Reconstruct inventory for backfilled days that predate daily snapshots.
+ * Walking backwards from the earliest snapshot: stock(day) = stock(day+1) +
+ * units sold that day — so the day the count crosses zero IS the stockout
+ * date, and the dead days beyond it get excluded from velocity math.
+ * Restocks inside the window make the reconstruction an overestimate, which
+ * only errs on the safe side (a day is never wrongly marked out-of-stock).
+ */
+function reconstructInventory(history) {
+  const tracked = Object.keys(history.inventory).sort();
+  if (!tracked.length || !history.startDate) return null;
+  const earliest = tracked[0];
+  if (history.startDate >= earliest) return null;
+  const recon = {};
+  const running = { ...(history.inventory[earliest] || {}) };
+  let day = addDays(earliest, -1);
+  for (let guard = 0; day >= history.startDate && guard < HISTORY_DAYS + 5; guard++) {
+    const sales = history.days[day] || {};
+    const bucket = {};
+    for (const vid of Object.keys(running)) {
+      running[vid] += sales[vid] || 0;
+      bucket[vid] = running[vid];
+    }
+    recon[day] = bucket;
+    day = addDays(day, -1);
+  }
+  return recon;
+}
+
+function blendVelocity(rates, { isNew = false } = {}) {
+  const [r14, r30, r90] = rates;
+  // promo damper: cap the short window's contribution when it's spiking.
+  // Skipped for new products — their windows are launch-truncated, so a
+  // strong launch is the baseline, not a spike to damp away.
+  const ratio = r90.rate > 0.02 ? r14.rate / r90.rate : (r14.rate > 0 ? 99 : 1);
+  const spike = !isNew && ratio > SPIKE_CAP && r90.rate > 0.02;
+  const damped14 = spike ? r90.rate * SPIKE_CAP : r14.rate;
+
+  let vel = 0, velRaw = 0, wSum = 0;
+  WINDOWS.forEach((w, i) => {
+    if (rates[i].days < Math.min(7, w.days)) return; // window has no real data yet
+    if (rates[i].eff === 0) return; // out of stock the whole window — no signal, don't drag to zero
+    const rate = i === 0 ? damped14 : rates[i].rate;
+    vel += rate * w.weight;
+    velRaw += rates[i].rate * w.weight;
+    wSum += w.weight;
+  });
+  if (wSum > 0) { vel /= wSum; velRaw /= wSum; }
+  else { // nothing qualified (very new, or OOS everywhere): first window with any signal
+    const w = rates.find(r => r.days > 0 && r.eff > 0);
+    if (w) vel = velRaw = w.rate;
+  }
+
+  const trend = isNew ? 'new'
+    : ratio >= SPIKE_FLAG ? 'spiking'
+    : ratio >= RISE_FLAG ? 'rising'
+    : ratio <= FALL_FLAG ? 'falling' : 'steady';
+  return { velocity: vel, velocityRaw: velRaw, trend, damped: vel !== velRaw };
+}
+
+const STATUS_RANK = { stockout: 5, reorder: 4, watch: 3, onorder: 2.5, unmapped: 2, healthy: 1, slow: 1, dormant: 0, muted: 0 };
+
+function computeReport(store, catalog, history, settings, onOrder = {}) {
+  const today = localDate(store.tz);
+  const endDay = addDays(today, -1); // windows end yesterday (today is partial)
+  const historyDays = history.startDate
+    ? Math.max(0, Math.round((Date.parse(endDay) - Date.parse(history.startDate)) / 86400000) + 1)
+    : 0;
+  const profileById = Object.fromEntries(settings.profiles.map(p => [p.id, p]));
+  const recon = reconstructInventory(history);
+  const unmappedTypes = new Set();
+  const products = [];
+
+  for (const p of catalog.products) {
+    const tracked = p.variants.filter(v => v.tracked);
+    if (!tracked.length) continue; // gift cards, checkout add-ons
+
+    const profile = profileById[settings.typeMap[p.type]] || null;
+    const leadBase = p.leadOverride ?? (profile ? profile.productionDays + profile.shippingDays : null);
+    const leadDays = leadBase != null ? leadBase + settings.bufferDays : null;
+    const leadSource = p.leadOverride != null ? 'metafield' : profile ? 'profile' : null;
+    if (!leadSource) unmappedTypes.add(p.type || '(no type)');
+    const productMuted = settings.muted.includes(`p${p.id}`);
+
+    const variants = tracked.map(v => {
+      const launchDay = v.createdAt ? localDate(store.tz, new Date(v.createdAt)) : null;
+      const ageDays = launchDay
+        ? Math.max(0, Math.round((Date.parse(endDay) - Date.parse(launchDay)) / 86400000) + 1)
+        : null;
+      const isNew = ageDays != null && ageDays < 14;
+      const rates = WINDOWS.map(w => windowRate(history, v.id, endDay, w.days, launchDay, recon));
+      const { velocity, velocityRaw, trend, damped } = blendVelocity(rates, { isNew });
+      const daysLeft = velocity > 0.001 ? v.inv / velocity : null;
+      const muted = productMuted || settings.muted.includes(`v${v.id}`);
+      const noSales90 = rates[2].sold === 0;
+      const series = [];
+      for (let i = 89; i >= 0; i--) series.push(history.days[addDays(endDay, -i)]?.[v.id] || 0);
+
+      // open PO: judge urgency on effective stock (on-hand + incoming), so a
+      // placed order stops screaming red — unless it's too small to cover the
+      // next lead-time cycle too, in which case red stays red.
+      const oo = onOrder[v.id] || null;
+      const effInv = Math.max(v.inv, 0) + (oo?.qty || 0);
+      const effDays = velocity > 0.001 ? effInv / velocity : null;
+
+      let status;
+      if (muted) status = 'muted';
+      else if (oo) {
+        if (effDays != null && leadDays != null && effDays <= leadDays) {
+          status = v.inv <= 0 ? 'stockout' : 'reorder'; // ordered, but still short
+        } else status = 'onorder';
+      }
+      else if (v.inv <= 0) status = noSales90 ? 'dormant' : 'stockout';
+      else if (!leadSource) status = 'unmapped';
+      else if (velocity <= 0.001) status = 'slow';
+      else if (daysLeft <= leadDays) status = 'reorder';
+      else if (daysLeft <= leadDays + settings.watchWindow) status = 'watch';
+      else status = 'healthy';
+
+      const suggestedQty = velocity > 0.001 && leadDays != null
+        ? Math.max(0, Math.ceil(velocity * (settings.targetCoverDays + leadDays) - effInv))
+        : null;
+
+      return {
+        id: v.id, sku: v.sku, title: v.title, inv: v.inv,
+        onOrder: oo ? { qty: oo.qty, placedAt: oo.placedAt, eta: oo.eta, overdue: today > oo.eta } : null,
+        windows: rates.map((r, i) => ({ days: WINDOWS[i].days, sold: r.sold, rate: +r.rate.toFixed(4), covered: r.days })),
+        velocity: +velocity.toFixed(4), velocityRaw: +velocityRaw.toFixed(4),
+        trend, damped, isNew, ageDays,
+        daysLeft: daysLeft != null ? Math.round(daysLeft) : null,
+        status, muted, suggestedQty, series,
+      };
+    });
+
+    // product-level series = sum of variant series
+    const series = Array.from({ length: 90 },
+      (_, i) => variants.reduce((s, v) => s + v.series[i], 0));
+
+    const statusCounts = {};
+    for (const v of variants) statusCounts[v.status] = (statusCounts[v.status] || 0) + 1;
+
+    const totalInv = tracked.reduce((s, v) => s + v.inv, 0);
+    const velocity = variants.reduce((s, v) => s + v.velocity, 0);
+    const worst = variants.reduce((w, v) => STATUS_RANK[v.status] > STATUS_RANK[w] ? v.status : w, 'dormant');
+    const alertable = variants.filter(v => v.status === 'reorder' || v.status === 'stockout');
+
+    const combinedNeed = variants.reduce((s, v) => s + (v.suggestedQty || 0), 0);
+    products.push({
+      id: p.id, title: p.title, type: p.type, vendor: p.vendor, image: p.image,
+      moq: p.moq ?? null, combinedNeed,
+      moqMet: p.moq ? combinedNeed >= p.moq : null,
+      leadDays, leadSource, profileName: profile?.name || null,
+      leadBreakdown: leadSource === 'profile'
+        ? { production: profile.productionDays, shipping: profile.shippingDays, buffer: settings.bufferDays }
+        : leadSource === 'metafield'
+          ? { override: p.leadOverride, buffer: settings.bufferDays } : null,
+      totalInv, velocity: +velocity.toFixed(4),
+      daysLeft: velocity > 0.001 ? Math.round(totalInv / velocity) : null,
+      status: worst, statusCounts, muted: productMuted,
+      alertCount: alertable.length,
+      seriesEnd: endDay, series,
+      variants,
+    });
+  }
+
+  products.sort((a, b) => (STATUS_RANK[b.status] - STATUS_RANK[a.status])
+    || ((a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9)));
+
+  const counts = { stockout: 0, reorder: 0, watch: 0, onorder: 0, unmapped: 0, healthy: 0, slow: 0, dormant: 0, muted: 0 };
+  for (const p of products) for (const v of p.variants) counts[v.status]++;
+
+  return {
+    store: store.id, storeName: store.name, generatedAt: new Date().toISOString(),
+    catalogFetchedAt: catalog.fetchedAt, historyDays, historyStart: history.startDate,
+    counts, unmappedTypes: [...unmappedTypes], products,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Slack                                                              */
+/* ------------------------------------------------------------------ */
+
+async function slackApi(env, method, body) {
+  const res = await fetch(`https://slack.com/api/${method}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.SLACK_BOT_TOKEN}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (!json.ok) console.log(`Slack ${method} error: ${json.error}`);
+  return json;
+}
+
+const fmtDays = d => d == null ? '—' : d >= 9000 ? '∞' : `${d}d`;
+const skuOr = v => v.sku || v.title || 'variant';
+
+/** One status line for a variant: "~34d left · lead 85d · need ~402 ⚡" —
+ *  "need" is demand for the coverage target, not an order instruction. */
+function lineBody(p, v) {
+  const lead = p.leadDays != null ? ` · lead ${p.leadDays}d` : '';
+  const need = v.suggestedQty ? ` · need ~${v.suggestedQty}` : '';
+  const flag = v.trend === 'spiking' ? ' ⚡' : v.isNew ? ' 🆕' : '';
+  const left = v.status === 'stockout' ? '*OUT OF STOCK*' : `~${fmtDays(v.daysLeft)} left`;
+  return `${left}${lead}${need}${flag}`;
+}
+
+/** MOQ context for a product: compares combined demand across ALL variants
+ *  (that's the number a product-level MOQ is judged against). */
+function moqNote(p) {
+  if (!p.moq) return '';
+  return p.combinedNeed >= p.moq
+    ? ` · MOQ ${p.moq} met ✓`
+    : ` · combined need ${p.combinedNeed} of MOQ ${p.moq} — consider waiting`;
+}
+
+/** Product-grouped lines: single-variant products on one line, multi-variant
+ *  products as a bold product name with indented variant bullets. */
+function productLines(p, statuses, maxVariants = 8) {
+  const hits = p.variants.filter(v => statuses.includes(v.status));
+  if (!hits.length) return null;
+  if (p.variants.length === 1) return `*${p.title}* — ${lineBody(p, hits[0])}${moqNote(p)}`;
+  const combined = p.combinedNeed ? ` · need ~${p.combinedNeed} total` : '';
+  const rows = hits.slice(0, maxVariants).map(v => `        •  \`${skuOr(v)}\` — ${lineBody(p, v)}`);
+  if (hits.length > maxVariants) rows.push(`        _…and ${hits.length - maxVariants} more variants_`);
+  return `*${p.title}*  (${hits.length}/${p.variants.length} variants${combined}${moqNote(p)})\n${rows.join('\n')}`;
+}
+
+function digestMessage(store, report, settings) {
+  const c = report.counts;
+  const issues = c.stockout + c.reorder;
+  const color = issues ? '#D0342C' : c.watch ? '#ECB22E' : '#2EB67D';
+  const date = new Date().toLocaleDateString('en-US',
+    { month: 'short', day: 'numeric', year: 'numeric', timeZone: store.tz });
+
+  const reds = [], yellows = [];
+  for (const p of report.products) {
+    const r = productLines(p, ['stockout', 'reorder']);
+    if (r) reds.push(r);
+    const y = productLines(p, ['watch']);
+    if (y) yellows.push(y);
+  }
+  const cap = (arr, n) => arr.length > n
+    ? [...arr.slice(0, n), `_…and ${arr.length - n} more products — see the dashboard_`] : arr;
+
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: `📦  *${store.name} — Inventory digest* · ${date}` } },
+    { type: 'section', text: { type: 'mrkdwn',
+      text: `🔴 ${c.stockout + c.reorder} reorder now · 🟡 ${c.watch} watch · 🟢 ${c.healthy + c.slow} healthy` +
+            ((c.onorder || 0) ? ` · ✈️ ${c.onorder} on order` : '') +
+            (c.unmapped ? ` · ⚠️ ${c.unmapped} unmapped` : '') } },
+    { type: 'divider' },
+  ];
+  if (reds.length) blocks.push({ type: 'section', text: { type: 'mrkdwn',
+    text: `*🔴 Reorder now*\n${cap(reds, 8).join('\n')}`.slice(0, 2900) } });
+  if (yellows.length) blocks.push({ type: 'section', text: { type: 'mrkdwn',
+    text: `*🟡 Watch — order window approaching*\n${cap(yellows, 8).join('\n')}`.slice(0, 2900) } });
+  if (!reds.length && !yellows.length) blocks.push({ type: 'section',
+    text: { type: 'mrkdwn', text: '✅ All clear — nothing needs reordering today.' } });
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn',
+    text: `"need" = demand to hit the coverage target, not an order instruction · ⚡ spiking (damped) · 🆕 new product   ·   <${DASHBOARD_URL}|Open Supply →>` }] });
+
+  return {
+    attachments: [{ color, fallback: `${store.name} inventory: ${issues} reorder, ${c.watch} watch`, blocks }],
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Snapshot run                                                       */
+/* ------------------------------------------------------------------ */
+
+async function runSnapshot(env, store, { digest = false, forceDigest = false } = {}) {
+  const settings = await getSettings(env);
+  const [history, prevState, onOrder] = await Promise.all([
+    getHistory(env, store),
+    env.KV.get(`state:${store.id}`, 'json').then(v => v || { variants: {} }),
+    getOnOrder(env, store),
+  ]);
+
+  // 1. catalog + inventory snapshot
+  const catalog = await fetchCatalog(env, store);
+  const today = localDate(store.tz);
+  const invToday = {};
+  for (const p of catalog.products) for (const v of p.variants) {
+    if (v.tracked) invToday[v.id] = v.inv;
+  }
+  // open POs: a big inventory jump since the last check = the shipment landed
+  // → clear the record. Sales only push inventory down, so a rise of ≥half the
+  // ordered qty can't be anything but a restock (threshold tolerates partial
+  // receipts and same-day sales).
+  const prevInv = history.inventory[today] || history.inventory[addDays(today, -1)] || {};
+  let ooChanged = false;
+  for (const [vid, rec] of Object.entries(onOrder)) {
+    const before = prevInv[vid], now = invToday[vid];
+    if (now === undefined) { delete onOrder[vid]; ooChanged = true; continue; } // variant gone
+    if (before !== undefined && now - before >= Math.max(1, Math.ceil(rec.qty * 0.5))) {
+      delete onOrder[vid]; ooChanged = true;
+    }
+  }
+  if (ooChanged) await env.KV.put(`onorder:${store.id}`, JSON.stringify(onOrder));
+  history.inventory[today] = invToday;
+
+  // 2. re-pull sales for the last 3 local days (idempotent overwrite)
+  const overwrite = [addDays(today, -2), addDays(today, -1), today];
+  const { salesByDate } = await fetchSales(env, store, localMidnightISO(store.tz, 2), { maxPages: 8 });
+  mergeSales(history, salesByDate, { overwriteDates: overwrite });
+  if (!history.startDate) history.startDate = overwrite[0];
+  pruneHistory(history, store.tz);
+
+  // 3. compute + detect transitions
+  const report = computeReport(store, catalog, history, settings, onOrder);
+  const newState = { variants: {}, lastDigestDate: prevState.lastDigestDate || null };
+  const newReds = [];
+  for (const p of report.products) {
+    for (const v of p.variants) {
+      newState.variants[v.id] = v.status;
+      const before = prevState.variants[v.id];
+      const isRed = v.status === 'reorder' || v.status === 'stockout';
+      const wasRed = before === 'reorder' || before === 'stockout';
+      if (isRed && before && !wasRed) newReds.push({ p, v });
+    }
+  }
+
+  // 4. persist
+  await Promise.all([
+    env.KV.put(`history:${store.id}`, JSON.stringify(history)),
+    env.KV.put(`catalog:${store.id}`, JSON.stringify(catalog)),
+    env.KV.put('lastRun', new Date().toISOString()),
+  ]);
+
+  // 5. Slack
+  const channel = settings.stores[store.id]?.channel;
+  let alerted = 0, digested = false;
+  if (channel && env.SLACK_BOT_TOKEN) {
+    /* The old "Reorder point crossed" alert is off (2026-10-08): it judged by
+       the legacy report and contradicted Supply. Supply's same-day alerts below
+       replace it. newReds is still tracked in state, nothing posts it. */
+    /* 2026-10-08: Monday = Supply's summary; other days = Supply's same-day
+       alerts, which answer {skip:true} unless something NEW crossed. Supply
+       owns both switches (settings digest_monday, digest_alerts). The legacy
+       digest is only a Monday fallback when Supply cannot answer. */
+    const monday = new Intl.DateTimeFormat('en-US', { timeZone: store.tz, weekday: 'short' }).format(new Date()) === 'Mon';
+    const mode = forceDigest || monday ? 'monday' : 'alerts';
+    const wantDigest = forceDigest || (digest && newState.lastDigestDate !== today);
+    if (wantDigest) {
+      let msg = null, failed = !env.SUPPLY;
+      if (env.SUPPLY) {
+        try {
+          const res = await env.SUPPLY.fetch(new Request(`https://mobius-supply.internal/api/digest?brand=${store.id}&mode=${mode}`,
+            { headers: { 'Authorization': `Bearer ${env.ADMIN_TOKEN}` } }));
+          if (res.ok) msg = await res.json();
+          else { failed = true; console.log(`Supply digest ${res.status}: ${(await res.text()).slice(0, 200)}`); }
+        } catch (e) { failed = true; console.log(`Supply digest failed: ${e.message}`); }
+      }
+      if (failed && mode === 'monday') msg = digestMessage(store, report, settings);
+      if (msg && !msg.skip) {
+        await slackApi(env, 'chat.postMessage', { channel, ...msg, unfurl_links: false });
+        digested = true;
+      }
+      newState.lastDigestDate = today;
+    }
+  }
+  await env.KV.put(`state:${store.id}`, JSON.stringify(newState));
+
+  return { store: store.id, products: report.products.length, counts: report.counts,
+           newReds: alerted, digested, at: report.generatedAt };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Backfill (resumable — Workers cap subrequests per invocation)      */
+/* ------------------------------------------------------------------ */
+
+async function runBackfill(env, store, days) {
+  const key = `backfill:${store.id}`;
+  const job = (await env.KV.get(key, 'json'))
+    || { since: localMidnightISO(store.tz, days), cursor: null, orders: 0 };
+
+  const { salesByDate, orders, cursor, done } =
+    await fetchSales(env, store, job.since, { after: job.cursor, maxPages: 35 });
+
+  const history = await getHistory(env, store);
+  // first chunk of a fresh job: clear the range so re-runs don't double-count
+  if (!job.cursor) {
+    const startDay = job.since.slice(0, 10);
+    for (const d of Object.keys(history.days)) if (d >= startDay) delete history.days[d];
+  }
+  mergeSales(history, salesByDate);
+  pruneHistory(history, store.tz);
+  await env.KV.put(`history:${store.id}`, JSON.stringify(history));
+
+  job.orders += orders;
+  if (done) {
+    await env.KV.delete(key);
+  } else {
+    job.cursor = cursor;
+    await env.KV.put(key, JSON.stringify(job), { expirationTtl: 3600 });
+  }
+  return { done, ordersProcessed: job.orders, historyStart: history.startDate };
+}
+
+/* ------------------------------------------------------------------ */
+/*  HTTP routes                                                        */
+/* ------------------------------------------------------------------ */
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, PUT, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+};
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+  status, headers: { 'Content-Type': 'application/json', ...CORS },
+});
+
+async function sha256hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* Shared Mobius Google session — minted by the mobius-account-health worker
+ * (/api/google-login), verified here with the same SESSION_SECRET secret. */
+const MOBIUS_DOMAIN = 'go-mobius-digital.com';
+async function validSession(env, token) {
+  const m = /^mds\.([\w-]+)\.([\w-]+)$/.exec(token || '');
+  if (!m || !env.SESSION_SECRET) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.SESSION_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = btoa(String.fromCharCode(...new Uint8Array(
+    await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(m[1])))))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  if (sig !== m[2]) return false;
+  let email, exp;
+  try { [email, exp] = atob(m[1].replace(/-/g, '+').replace(/_/g, '/')).split('|'); } catch { return false; }
+  return +exp > Date.now() && String(email).toLowerCase().endsWith('@' + MOBIUS_DOMAIN);
+}
+
+/** Valid credentials: a Mobius Google session, the dashboard-set password
+ *  (hash in KV), or the ADMIN_TOKEN secret as a master/recovery key. */
+async function isAdmin(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return false;
+  const tok = auth.slice(7);
+  if (env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) return true;
+  if (await validSession(env, tok)) return true;
+  const stored = await env.KV.get('passwordHash');
+  return !!stored && (await sha256hex(tok)) === stored;
+}
+
+const storeFrom = url => STORES.find(s => s.id === (url.searchParams.get('store') || STORES[0].id));
+
+export default {
+  async scheduled(event, env, ctx) {
+    const settings = await getSettings(env);
+    const digestHour = settings.digestHourLocal ?? 6;
+    ctx.waitUntil(Promise.allSettled(STORES.map(s => {
+      const localHour = (+new Intl.DateTimeFormat('en-US',
+        { timeZone: s.tz, hour: 'numeric', hour12: false }).format(new Date())) % 24;
+      return runSnapshot(env, s, { digest: localHour === digestHour });
+    })));
+  },
+
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+
+    if (path === '/health') {
+      return json({ ok: true, lastRun: await env.KV.get('lastRun') });
+    }
+
+    if (!path.startsWith('/api/')) return json({ error: 'not found' }, 404);
+    if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+    const store = storeFrom(url);
+    if (!store) return json({ error: 'unknown store' }, 400);
+
+    try {
+      if (path === '/api/stores') {
+        const out = [];
+        for (const s of STORES) {
+          const history = await getHistory(env, s);
+          out.push({
+            id: s.id, name: s.name, domain: s.domain, tz: s.tz,
+            hasToken: hasShopifyAuth(env, s),
+            historyStart: history.startDate,
+            historyDays: Object.keys(history.days).length,
+          });
+        }
+        return json({ stores: out, slackConfigured: !!env.SLACK_BOT_TOKEN });
+      }
+
+      if (path === '/api/report') {
+        // computed live from the latest snapshot data, so settings changes
+        // (mutes, lead times, thresholds) apply immediately — no re-snapshot
+        const [catalog, history, settings, onOrder] = await Promise.all([
+          env.KV.get(`catalog:${store.id}`, 'json'),
+          getHistory(env, store),
+          getSettings(env),
+          getOnOrder(env, store),
+        ]);
+        if (!catalog) return json({ error: 'no snapshot yet — run one from Settings' }, 404);
+        return json(computeReport(store, catalog, history, settings, onOrder));
+      }
+
+      // Raw feed for the Supply worker (service binding): everything the brain
+      // needs, untouched. Supply owns its own forecast; this worker owns Shopify.
+      if (path === '/api/raw') {
+        const [catalog, history, settings, onOrder] = await Promise.all([
+          env.KV.get(`catalog:${store.id}`, 'json'),
+          getHistory(env, store),
+          getSettings(env),
+          getOnOrder(env, store),
+        ]);
+        return json({ store: { id: store.id, name: store.name, domain: store.domain, tz: store.tz },
+          catalog, history, settings, onOrder, lastRun: await env.KV.get('lastRun') });
+      }
+
+      // Post a prepared Slack message to this store's channel (Supply's digest
+      // "Send now"). Body: { attachments?, blocks?, text? }.
+      if (path === '/api/slack-post' && request.method === 'POST') {
+        const settings = await getSettings(env);
+        const channel = settings.stores[store.id]?.channel;
+        if (!channel) return json({ error: 'no Slack channel set for this store (Restock → Settings)' }, 400);
+        if (!env.SLACK_BOT_TOKEN) return json({ error: 'SLACK_BOT_TOKEN is not set' }, 400);
+        const body = await request.json().catch(() => ({}));
+        const msg = {};
+        if (Array.isArray(body.attachments)) msg.attachments = body.attachments;
+        if (Array.isArray(body.blocks)) msg.blocks = body.blocks;
+        if (typeof body.text === 'string') msg.text = body.text.slice(0, 3000);
+        if (!msg.attachments && !msg.blocks && !msg.text) return json({ error: 'nothing to post' }, 400);
+        const r = await slackApi(env, 'chat.postMessage', { channel, ...msg, unfurl_links: false });
+        return json({ ok: !!r.ok, error: r.error || undefined });
+      }
+
+      if (path === '/api/on-order' && request.method === 'POST') {
+        // body: { set: [{variantId, qty, leadDays}], placedAt?, clear: [variantId] } —
+        // placedAt defaults to today (backdatable, never future);
+        // eta = placedAt + leadDays (the product's lead time)
+        const body = await request.json().catch(() => ({}));
+        const key = `onorder:${store.id}`;
+        const cur = await getOnOrder(env, store);
+        const today = localDate(store.tz);
+        let placedAt = /^\d{4}-\d{2}-\d{2}$/.test(body.placedAt || '') ? body.placedAt : today;
+        if (placedAt > today) placedAt = today;
+        if (placedAt < addDays(today, -400)) placedAt = addDays(today, -400);
+        let set = 0, cleared = 0;
+        if (Array.isArray(body.set)) {
+          for (const it of body.set.slice(0, 500)) {
+            const vid = String(it.variantId || '').replace(/\D/g, '');
+            const qty = Math.floor(Number(it.qty) || 0);
+            if (!vid || qty < 1) continue;
+            const lead = Math.min(730, Math.max(0, Math.floor(Number(it.leadDays) || 0)));
+            cur[vid] = { qty, placedAt, eta: addDays(placedAt, lead) };
+            set++;
+          }
+        }
+        if (Array.isArray(body.clear)) {
+          for (const v of body.clear.slice(0, 500)) {
+            const vid = String(v).replace(/\D/g, '');
+            if (cur[vid]) { delete cur[vid]; cleared++; }
+          }
+        }
+        await env.KV.put(key, JSON.stringify(cur));
+        return json({ ok: true, set, cleared, open: Object.keys(cur).length });
+      }
+
+      if (path === '/api/settings' && request.method === 'GET') {
+        return json(await getSettings(env));
+      }
+
+      if (path === '/api/settings' && request.method === 'PUT') {
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body !== 'object') return json({ error: 'bad body' }, 400);
+        const cur = await getSettings(env);
+        const num = (v, fb, lo, hi) => {
+          const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fb;
+        };
+        const next = {
+          bufferDays: num(body.bufferDays, cur.bufferDays, 0, 120),
+          watchWindow: num(body.watchWindow, cur.watchWindow, 0, 180),
+          targetCoverDays: num(body.targetCoverDays, cur.targetCoverDays, 30, 720),
+          digestHourLocal: num(body.digestHourLocal, cur.digestHourLocal ?? 6, 0, 23),
+          digestMode: body.digestMode === 'issues' ? 'issues' : 'always',
+          reviewedDefaults: body.reviewedDefaults === undefined
+            ? cur.reviewedDefaults : !!body.reviewedDefaults,
+          profiles: Array.isArray(body.profiles)
+            ? body.profiles.filter(p => p && p.id && p.name).map(p => ({
+                id: String(p.id).slice(0, 40), name: String(p.name).slice(0, 60),
+                productionDays: num(p.productionDays, 30, 0, 365),
+                shippingDays: num(p.shippingDays, 30, 0, 365),
+              }))
+            : cur.profiles,
+          typeMap: body.typeMap && typeof body.typeMap === 'object'
+            ? Object.fromEntries(Object.entries(body.typeMap)
+                .filter(([, v]) => typeof v === 'string')
+                .map(([k, v]) => [String(k).slice(0, 80), v.slice(0, 40)]))
+            : cur.typeMap,
+          muted: Array.isArray(body.muted)
+            ? body.muted.map(String).filter(m => /^[pv]\d+$/.test(m)).slice(0, 500)
+            : cur.muted,
+          stores: { ...cur.stores },
+        };
+        if (body.stores && typeof body.stores === 'object') {
+          for (const s of STORES) {
+            if (body.stores[s.id]?.channel !== undefined) {
+              next.stores[s.id] = { channel: String(body.stores[s.id].channel) };
+            }
+          }
+        }
+        await env.KV.put('settings', JSON.stringify(next));
+        return json(next);
+      }
+
+      if (path === '/api/channels') {
+        const chans = [];
+        let cursor = '';
+        do {
+          const qs = new URLSearchParams({
+            types: 'public_channel,private_channel',
+            exclude_archived: 'true', limit: '200',
+            ...(cursor ? { cursor } : {}),
+          });
+          const res = await fetch(`https://slack.com/api/conversations.list?${qs}`, {
+            headers: { 'Authorization': `Bearer ${env.SLACK_BOT_TOKEN}` },
+          });
+          const r = await res.json();
+          if (!r.ok) return json({ error: r.error || 'slack error' }, 502);
+          for (const c of r.channels || []) {
+            chans.push({ id: c.id, name: c.name, is_member: !!c.is_member, is_private: !!c.is_private });
+          }
+          cursor = r.response_metadata?.next_cursor || '';
+        } while (cursor);
+        chans.sort((a, b) => a.name.localeCompare(b.name));
+        return json({ channels: chans });
+      }
+
+      if (path === '/api/snapshot' && request.method === 'POST') {
+        return json(await runSnapshot(env, store));
+      }
+
+      if (path === '/api/digest' && request.method === 'POST') {
+        return json(await runSnapshot(env, store, { forceDigest: true }));
+      }
+
+      if (path === '/api/set-type' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const pid = String(body.productId || '').replace(/\D/g, '');
+        const type = String(body.type || '').trim().slice(0, 80);
+        if (!pid || !type) return json({ error: 'productId and type required' }, 400);
+        const MUT = `
+          mutation($product: ProductUpdateInput!) {
+            productUpdate(product: $product) {
+              product { id productType }
+              userErrors { field message }
+            }
+          }`;
+        const vars = { product: { id: `gid://shopify/Product/${pid}`, productType: type } };
+        let data;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            data = await shopify(env, store, MUT, vars);
+            break;
+          } catch (err) {
+            const m = String(err.message || err);
+            if (/ACCESS_DENIED|write_products/i.test(m)) {
+              // scopes may have been widened after the current token was cached —
+              // force a fresh token once before concluding the scope is missing
+              if (attempt === 0 && clientCreds(env, store)) {
+                await getAccessToken(env, store, { force: true });
+                continue;
+              }
+              return json({ error: 'Shopify app lacks the write_products scope — add it in the Dev Dashboard (Apps → Mobius Restock → scopes), release + reinstall, then retry.' }, 403);
+            }
+            throw err;
+          }
+        }
+        const errs = data.productUpdate?.userErrors;
+        if (errs?.length) return json({ error: errs.map(e => e.message).join('; ') }, 400);
+        // patch the cached catalog so the dashboard reflects it immediately
+        const catalog = await env.KV.get(`catalog:${store.id}`, 'json');
+        if (catalog) {
+          const p = catalog.products.find(p => p.id === pid);
+          if (p) { p.type = type; await env.KV.put(`catalog:${store.id}`, JSON.stringify(catalog)); }
+        }
+        return json({ ok: true, productId: pid, type });
+      }
+
+      if (path === '/api/set-moq' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const pid = String(body.productId || '').replace(/\D/g, '');
+        const moq = Math.max(0, Math.floor(Number(body.moq) || 0)); // 0 = no MOQ
+        if (!pid) return json({ error: 'productId required' }, 400);
+        try {
+          const data = await shopify(env, store, `
+            mutation($m: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $m) {
+                metafields { id }
+                userErrors { field message }
+              }
+            }`, { m: [{ ownerId: `gid://shopify/Product/${pid}`, namespace: 'custom',
+                        key: 'moq', type: 'number_integer', value: String(moq) }] });
+          const errs = data.metafieldsSet?.userErrors;
+          if (errs?.length) return json({ error: errs.map(e => e.message).join('; ') }, 400);
+        } catch (err) {
+          const m = String(err.message || err);
+          if (/ACCESS_DENIED|write_products/i.test(m)) {
+            return json({ error: 'Shopify app lacks the write_products scope — add it in the Dev Dashboard, then retry.' }, 403);
+          }
+          throw err;
+        }
+        const catalog = await env.KV.get(`catalog:${store.id}`, 'json');
+        if (catalog) {
+          const p = catalog.products.find(p => p.id === pid);
+          if (p) { p.moq = moq > 0 ? moq : null; await env.KV.put(`catalog:${store.id}`, JSON.stringify(catalog)); }
+        }
+        return json({ ok: true, productId: pid, moq: moq > 0 ? moq : null });
+      }
+
+      if (path === '/api/password' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const pw = String(body.password || '');
+        if (pw.length < 8) return json({ error: 'password must be at least 8 characters' }, 400);
+        await env.KV.put('passwordHash', await sha256hex(pw));
+        return json({ ok: true });
+      }
+
+      if (path === '/api/backfill' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const days = Math.min(HISTORY_DAYS, Math.max(7, Number(body.days) || 90));
+        return json(await runBackfill(env, store, days));
+      }
+
+      return json({ error: 'not found' }, 404);
+    } catch (err) {
+      return json({ error: String(err && err.message || err) }, 500);
+    }
+  },
+};

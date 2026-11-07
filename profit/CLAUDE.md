@@ -1,0 +1,4823 @@
+# Locus — instructions for Claude Code
+
+**The platform is named Locus** (by Mobius Digital), chosen 2026-08-27. The
+directory and URL stay `profit/` — every client report link, the Shopify app
+config and its OAuth redirects point there.
+
+**The whole internal platform.** Directory is still `profit/` and the URL is
+still `/profit/` (share links, the Shopify app config and OAuth redirects all
+point at it — do not rename either). **Read `PRD.md` first.**
+
+Two questions, two kinds of number, one app: **blended store-level money** —
+"is the brand making money?" — on every tab except one, and **Meta-reported
+ads** — "are the Meta ads working?", matching Ads Manager — on the **Meta** tab.
+They must never be mixed inside a single surface; that rule is why the Meta
+screens keep their own file, their own worker and their own labels.
+
+## Layout
+
+```
+profit/
+  PRD.md            plan, decisions, phases   ← source of truth
+  CLAUDE.md         this file
+  index.html        the whole dashboard (vanilla JS, one file, GitHub Pages)
+  worker/
+    wrangler.toml   worker mobius-profit, D1 binding DB -> SHARED mobius-account-health
+    schema.sql      only p_-prefixed tables (additive to the shared DB)
+    src/worker.js   money model + JSON API
+```
+
+## Hard rules
+
+- **THIS IS THE WHOLE PLATFORM (merged 2026-08-27).** Account Health's Meta
+  screens are now the **Meta tab** here, in `profit/meta.js` — its own file and
+  its own IIFE, because a merged single file would be ~4,400 lines and nearly
+  every helper name collides (`esc`, `fmtMoney`, `S`, `api`; `fmtPct` differs
+  between the two — this file's is SIGNED). meta.js calls the **account-health
+  worker directly** (not through `PROXY_PATHS`) with the same session token;
+  that worker still owns the Meta sync, both crons and every secret, so nothing
+  moved but the screens. Sub-tabs render into `#subtabs`, which lives OUTSIDE
+  `#main` because meta.js owns `#main` completely. `account-health/index.html`
+  is now only a redirect — do not rebuild a dashboard there.
+- **Removed in the merge; do not reinstate without new evidence:** monthly Meta
+  *pacing* (page and alert) — Plan forecasts the month on blended revenue and
+  total spend, and the Meta-only copy disagreed with the agreed plan; the
+  **ROAS-floor alert and the 2.5 floor itself** (cleared on all six brands) —
+  it was the blended MER goal applied to Meta-attributed ROAS, unreachable by
+  construction, firing nightly for every brand; and the **Meta-only client
+  share link** — clients get blended reporting. The intraday curve SURVIVES as
+  the Meta → Today sub-tab: it is the one question Plan cannot answer.
+- **Adding a client starts in Settings → Meta ad accounts**: find on Meta,
+  switch on, set the Triple Whale shop (nothing blended works without it), then
+  channels here and a plan on Plan. That flow used to live in the other app,
+  which is why "how do I add a client" had no single answer.
+
+- **Shared database, never a second copy.** `DB` binds the *existing*
+  `mobius-account-health` D1. Read `accounts`, `tw_daily`, `daily_insights`,
+  `activities`. Write only `p_*` tables — plus `accounts.goals_json.cm_pct`,
+  which is the margin override the Daily Brief already reads. One source of
+  truth; never introduce a second margin field.
+- **REVENUE HAS ONE DEFINITION: Shopify Total Sales MINUS sales tax.** That is
+  gross sales, less discounts, less returns, PLUS shipping charged to customers,
+  less tax — the line CTC report as "Net Sales + Shipping". Every tab, the brief
+  and the client link use it. Spend = TW `blendedAds` (Meta+Google fallback);
+  MER = revenue/spend; aMER = new-customer revenue/spend. **Platform ROAS does not
+  belong on this tool** — that is Account Health's job.
+- **Triple Whale's field names LIE, and this cost us a 4-13% overstatement.** In
+  TW's own catalog `netSales` is TITLED "Total Sales": it is Shopify's TOTAL SALES
+  and already contains shipping AND tax. `totalSales` is titled "Order Revenue" —
+  the same figure before returns. There is NO TW field equal to Shopify's
+  `net_sales`, so never assume one. Reconciled against Shopify for Lucky Golf,
+  July 2026: Shopify gross 89,725.63 − disc 16,264.62 − returns 1,405.55 =
+  net_sales 72,055.46; + ship 5,287.00 + tax 624.06 = total_sales 77,966.52; TW
+  `netSales` = 77,990.42 (0.03% off total_sales, 8% off net_sales). The original
+  code did `netSales + totalShippingPrice`, counting shipping twice and inflating
+  every revenue, CM, MER and goal. `dayEconomics` now does `totalSales - tax`, and
+  derives `net_sales = sales - shipRev` so the waterfall matches Shopify's own
+  structure line for line. **Never add `totalShippingPrice` to `netSales`.**
+- **TRIPLE WHALE SUMMARY PERIODS ARRIVE ONE DAY EARLY (measured 2026-09-12).** A
+  bare-date `period {start, end}` to `summary-page/get-data` returns the day BEFORE
+  each date (bare dates read as UTC midnight, the previous evening in a US shop):
+  asking for 09-12..09-12 returned the day Meta dates 09-11, to the cent. The daily
+  sync inherits this harmlessly (chart x labels carry the right calendar day, so
+  `tw_daily` dates are correct; it simply never lands today). The live routes want
+  today, so `/api/tw-day` on the account-health worker asks for `date + 1`. NEVER
+  correct the shift inside `twSummary` or the sync starts writing a partial today
+  into `tw_daily`. Also: a SINGLE-DAY period returns charts keyed by HOUR (x = 0..23),
+  which is the only hourly view of blended revenue and spend in the stack; that is
+  what the Profit tab draws for Yesterday and Today. The Today preset is served live
+  from that route, stamped as_of, with the plan pro-rated to whole days only.
+- **`totalNetTaxes` must stay in `TW_KEEP`.** The sync filter is a regex over metric
+  id + title; without `tax` in it the metric is dropped on the way in and revenue
+  silently reverts to tax-inclusive. Tax defaults to 0 when absent, so a client that
+  has not been backfilled reads slightly high rather than double-counting.
+- **The new/returning split must be rebased onto the revenue line.** TW reports
+  `newCustomerSales`/`rcRevenue` on a different basis from the headline, so the raw
+  figures do not add up to it. Keep the measured *share* and apply it to `sales`.
+- **Days where cost > revenue are usually WHOLESALE, not broken COGS.** Product
+  left the building; the money arrived somewhere Shopify cannot see. `retailMargin()`
+  estimates the true retail margin from clean days only — use a LOW percentile as the
+  base (contamination only adds cost, so the median collapses once contamination
+  passes ~50% of days, as it does for Grunk). Frame this in the UI as wholesale /
+  inventory receipts, never as "your data is wrong".
+- **Fulfilment: flag what is MISSING, never what is merely surprising. Cole's call,
+  2026-08-24 - do NOT re-add the `mirrored` warning.** The only state this tool treats
+  as a problem is `uncosted`: delivery charged to customers with NOTHING booked against
+  it. That is an absence, and an absence is unambiguous - the charge is already inside
+  revenue (revenue is Shopify Total Sales less tax) so it cannot be netted back out,
+  which means contribution margin really is overstated by whatever delivery cost. Live,
+  that is The Golf Sock alone: $7,021 charged across 2,198 orders, $0 recorded.
+  There used to be a `mirrored` verdict for a cost that exactly equals the charge, on
+  the reasoning that it cannot be a real rate - the delivery charge swings with
+  destination and basket (Lucky ranges $2.00 to $34.67 per order, a 17x spread) while a
+  rate is a rule that would not follow it to the cent for sixty days. **That evidence
+  still stands, and it is still not our call to make.** The brand configures its own
+  fulfilment costs in Triple Whale; when a figure comes through it is the brand's figure
+  and this tool reports it rather than second-guessing the client's own setup. Dartee,
+  Lucky and Party Patch therefore read `measured` like everyone else. `shippingMode()`
+  still computes `charge_lo`/`charge_hi` if the question ever returns, but nothing
+  renders them, and the Costs page no longer prices an "unknown" for these clients.
+- **Never state an unobservable CAUSE as fact.** The fulfilment copy used to assert
+  "no delivery rate is configured" - something the data cannot show. It could only show
+  that cost equalled charge. Cole caught it. Where an observation carries the argument,
+  report the observation; where it does not, do not report a verdict at all.
+- **A flat margin override bypasses the whole cost chain, fulfilment included.**
+  `dayEconomics` takes `sales * marginPct` and never looks at product, delivery,
+  handling or fees, so any card describing a cost must say so when `margin_pct` is
+  set — "already inside contribution margin" is untrue for Grunk.
+- **A negative day needs a MATERIALITY FLOOR, or the test fires on rounding.** The
+  check was `margin < 0`, and Lucky's 2026-08-11 came in at gross profit of MINUS THREE
+  DOLLARS on $936 of revenue - a 0.3% miss. That one day suppressed the client's entire
+  profit reporting, and the card then explained at length that it was probably wholesale
+  orders paid outside Shopify. It was not. It was a day where product mix ran heavy.
+  Real contamination is never marginal: a wholesale order or an inventory receipt books
+  cost that is a MULTIPLE of the day's revenue. The test is now `margin < -0.05`, and
+  all six clients read `good` or `override`. **Any threshold on a money figure needs a
+  floor - a rule that fires at minus three dollars is not measuring anything.**
+- **ONE bad day is not broken data. Scale the verdict to how many days are affected.**
+  `negatives > 0` used to flip a client straight to `broken`, which suppresses every
+  profit figure - so a single wholesale order or inventory receipt in sixty days hid
+  Lucky's entire margin, while the card underneath cheerfully reported that the other
+  56 days ran a clean 79%. Suppressing a good number because of one known, explained,
+  isolated day is worse than reporting it. `broken` now needs a PATTERN
+  (`negatives > max(1, n * 0.1)`), and a handful of contaminated days lands on `noisy`,
+  which names the days and leaves the figures standing.
+- **A negative day is VARIABLE cost beating revenue, not necessarily product cost.**
+  `margin` is `gross_profit / sales`, and gross profit subtracts cogs, delivery,
+  handling AND fees. The reason text asserted "more product cost than the store took
+  in" every time, which for Lucky was simply false - its cogs never once exceeded
+  sales. `judgeCosts` now counts `cogs_over` separately and only says "product cost"
+  when product cost alone actually did it, otherwise "variable cost".
+- **Cost data is gated.** `judgeCosts()` grades the trailing per-day margin;
+  `broken` suppresses every profit figure. The Costs page must always diagnose
+  the **real** TW data (`seriesRaw`, override ignored) — grading the override
+  produces a meaningless flat line and hides whether it has been fixed.
+- **Times are CENTRAL, never UTC — in the UI and when talking to Cole.** The brief
+  send hour is stored as `settings.briefHour` (0-23, Central, default 9). Cloudflare
+  crons are fixed at deploy time and always UTC, so the trigger runs HOURLY
+  (`0 * * * *`) and the worker sends only when `centralHour()` matches. That keeps
+  the time editable from Settings and pinned to the same wall-clock hour across
+  daylight saving — a UTC cron drifts by an hour twice a year. `sendBrief` takes
+  `skipIfSent` so an hourly trigger can never post a brand twice.
+- **Weekly/Monthly Reports follow the Daily Brief's split exactly**: the tab and
+  the client archive view are here, the engine is the account-health worker
+  (see its CLAUDE.md), and the report routes are in `PROXY_PATHS`. Reports are
+  FROZEN snapshots — drafted automatically (Monday = last Mon–Sun, 1st = last
+  month), posted to the per-brand `report_channel` (INTERNAL, no fallback on
+  purpose), sent to the client's `brief_channel` only by the Send button, and
+  never editable after sending. `GET /api/report-view/:token` is the client's
+  archive (sent reports only; internal fields stripped, including `account`
+  with its act_id). `reportBodyHTML` in index.html renders BOTH the internal
+  and client pages so what you review is exactly what the client opens — keep
+  it that way. Per-brand config lives in `accounts.report_config_json`
+  ({weekly, monthly, hide:[channel ids]}), edited from the Reports tab;
+  `report_channel` is edited in Settings via `/api/client-settings`.
+- **Creative cards, not rows (2026-08-29).** "Where the budget went" renders a
+  card grid (`.ad-grid`/`.ad-card`) inside the Meta channel card: the creative
+  large, the name, then a stat grid. **▶ plays the real ad in place** —
+  `preview_iframe.php` sets NO `X-Frame-Options` and NO `frame-ancestors`
+  (verified 2026-08-29 server-side) and needs no Facebook login, so it works on
+  the client's link too. `wireAdCards()` scales the fixed 340×620 preview to
+  whatever width the card has, keeps the thumbnail in the DOM underneath, and
+  is called by BOTH report renderers after paint — listeners go on the media
+  nodes, never on `#main`. Meta's preview tokens expire on a long horizon; the
+  thumbnail is a baked data URI and always survives, which the copy says.
+  Hook/hold/CTR appear only when the payload carries them, so old frozen
+  reports render three stats instead of six. The table under the grid
+  reconciles the shown ads, the combined tail and the total to 100% of
+  ad-level spend — the "no silent partial" rule, now stated as arithmetic.
+- **The Daily Brief lives HERE but runs THERE.** Its tab is in this tool (all its
+  numbers are store-level), while the account-health worker keeps the endpoints, the
+  hourly brief trigger and the TW/Anthropic/Slack secrets. `PROXY_PATHS` forwards
+  /api/brief, /api/brief-preview, /api/brief-send, /api/briefs, /api/goal-suggest,
+  /api/tw-sync, /api/brief-time and /api/slack-channels over the `AUTH` binding. Monthly goals are
+  written locally (`PUT /api/goals`) so the month/default merge sits beside the
+  margin override in the same JSON blob — and it must preserve `cm_pct`.
+- **Plan is the ONLY place goals are set.** Every other page reports against them.
+  The Daily Brief tab shows the plan read-only with a link across; do not re-add an
+  editor there. Plan defaults to NEXT month (nobody plans a month that is already
+  three-quarters gone) and offers a month picker from last month to +4.
+- **Revenue = MER x spend: the user sets TWO, the third is arithmetic.** An earlier
+  version let you set only ONE and derived the rest from trailing aMER, which made
+  a MER you had just typed silently revert when you changed spend. Cole spotted it.
+  `PL.derive` names the calculated field; the other two are inputs, and switching
+  which is derived freezes the current values so nothing jumps.
+- **State the window on every derived number.** The Plan page mixes them on purpose:
+  revenue basis and product margin come from the last COMPLETE month, while aMER and
+  returning-per-day come from the trailing 28 days (they move). `ctx.sources` carries
+  `basis_month`, `margin_month` and `trailing_from`/`to`/`days`, and `basisNote()`
+  spells all of it out under the plan. Cole asked "is this last month or trailing six
+  months?" and nothing on screen answered him. Any future derived input must say
+  where it came from.
+- **Anything that names a month must read it from `ctx.sources`, never re-derive it.**
+  `cmHtml` picked "most recent finished month" with its own filter while the "Based
+  on" box used the server's `basis_month`, which additionally requires the month to
+  be near-complete (`days >= days_in_month - 2`). A month with a Triple Whale sync
+  gap was therefore skipped as a revenue basis but still used for the CM comparison,
+  so the plan was measured against a month missing days - understating that month's
+  CM and flattering the plan. One basis, read from one place.
+- **The monthly plan splits EVENLY across the days. Do not weight it.** Revenue/days,
+  spend/days, and MER therefore holds flat at exactly the ratio that was agreed.
+  An earlier version shaped revenue by a trailing day-of-week curve while leaving
+  spend flat, which (a) made the forecast MER swing 1.87x-2.99x by weekday, so Bonk
+  doing 2.86x against a 2.50x plan was reported as a MISS, and (b) did not even
+  predict better: measured across 6 clients x 2 months with the monthly level held
+  equal, the weekday curve was 7.6% WORSE than an even split - it helped Bonk and
+  The Golf Sock and hurt the other four. Cole called this: you set revenue, spend
+  and MER, so the plan is those three divided by the days. If day-of-week shaping is
+  ever revisited it must weight BOTH sides or the ratio metrics become nonsense.
+- **The weekday rhythm card is DESCRIPTIVE and must never feed a forecast.** It
+  answers "what did a week look like", not "what should it be" - the plan still
+  splits evenly. Four Mondays a month is a tiny sample and EVERY brand shows some
+  pattern by chance, so `weekdayRhythm()` computes one index per weekday per
+  COMPLETE month and only calls a day consistent when every month agreed on the
+  direction (`lo > 1.02` strong, `hi < 0.98` soft, else mixed). Two consistent days
+  makes a brand "reliable". On the real data that means Bonk (soft Mondays, strong
+  Saturdays), The Golf Sock (3 days) and Lucky qualify, while Party Patch (1) and
+  Dartee (0) are told plainly they have no rhythm. The dollar projection is gated
+  on `reliable` too - splitting a plan by a chance pattern is the exact failure this
+  card exists to prevent, and it is meant to be shown to clients.
+- **MER by weekday is NOT the revenue share restated, and it faces the same test.**
+  Cole challenged whether it earned its place. It does: for Bonk, Saturday is the
+  2nd-biggest revenue day (16.0% of the week, "consistently strong") but among the
+  LEAST efficient at 2.53x, because Saturday spend runs 22% above average - while
+  Sunday, whose revenue only "varies", returns 3.11x. Pacing budget from the revenue
+  column alone would push money INTO the least efficient day. Spend varies 35-99% as
+  much as revenue depending on the client, so the two columns genuinely diverge. Each
+  weekday's MER is indexed against its own month's MER and only tagged when every
+  month agreed, matching the revenue column's rigor.
+- **A RATIO IS NOT A VERDICT ON THE DAY. Never let MER stand alone.** Cole: "just
+  because a day is not as efficient as another doesn't mean it's a bad day - if the
+  CM is the best then it's the best". He is right and the data agrees: for Lucky the
+  most efficient day is Thursday (2.98x) while TUESDAY contributes more money ($687/day
+  vs $657); for Bonk, Saturday's ratio is second-worst at 2.51x yet it produces $983 a
+  day, its third-best. So the weekday card carries CM PER DAY beside MER, the tags say
+  "most/least efficient" rather than best/worst, and the verdict says outright that a
+  bigger day can contribute more at a weaker ratio. Any future surface comparing days
+  must show the money, not just the ratio.
+- **A saved plan stores the basis it was built on; say so when that basis MOVES.**
+  `p_plan.basis_sales` is a snapshot. When the revenue definition was corrected on
+  2026-08-23 every plan saved before then was suddenly built on a basis 1-13% too high
+  - Party Patch's by 13.3% - and nothing on screen said so, so months kept being
+  reported "vs plan" against numbers nobody would still agree to. `staleBasis()` on the
+  Plan page compares the stored basis with what the same basis is worth today and warns
+  above the growth chips when they differ by more than 2%. Past months are excluded:
+  their basis was legitimately a different month. Any stored snapshot of a derived
+  figure needs this treatment - the alternative is silent staleness.
+- **A month IN PROGRESS must be compared against a PRO-RATED goal, everywhere.**
+  The quarter card's headline pro-rated by days elapsed but its per-month rows divided
+  month-to-date by the WHOLE month's target, so August read `-19%` in the table while
+  the summary directly above it read `+9%` for the same month. Two contradictory
+  verdicts on one card, and the visible one was the wrong one - 23 days of revenue was
+  never going to reach a 31-day number. `mrow` now scales the goal by
+  `days / days_in_month` for `status === 'current'`, shows the pro-rated figure under
+  the target so the percentage is checkable, and grades it good / warn / bad like the
+  headline instead of a binary pass-fail. Any future surface comparing an unfinished
+  period to a target needs the same treatment.
+- **Never label a SET with a superlative.** The MER tag fires for every weekday that
+  beat this client's own average in all months looked at, and Bonk has two - so
+  "most efficient" appeared twice on one table, which Cole caught. Set labels read
+  "consistently above" / "consistently below"; only the verdict sentence, which sorts
+  and takes one, may say "the most". Same trap applies to any future badge driven by
+  a threshold rather than a rank.
+- **Guard against "-0%".** `fmtSigned` on a value a hair under parity rounds to "-0%",
+  which reads as a typo. Round first, then sign.
+- **The retrospective decomposes the miss; it does not just report it.** Revenue is
+  spend x MER, so `actual - planned` splits EXACTLY into
+  `(spendGap x plannedMER) + (actualSpend x merGap)` - verified to the cent. That is
+  what turns "missed by 23%" into "underspent by 35%, while the ads actually beat
+  plan by 19%", which is a different conversation. `retroCard()` names whichever term
+  dominates. A month with no plan shows the actuals and says so rather than inventing
+  a comparison.
+- **The Customers tab is unit economics, NOT cohorts, and must never claim otherwise.**
+  Triple Whale exposes no cohort table, no per-customer history and no CAC, so a true
+  LTV is not derivable and the page says so in its own footer. What IS derivable from
+  synced metrics: CAC = spend / newCustomersOrders, first-order AOV = newCustomerSales
+  / newCustomersOrders, and returning orders = totalOrders - newCustomersOrders
+  (Triple Whale does not send returningCustomerOrders for these shops). The number
+  that matters is PAYBACK - first-order margin over CAC - because above 1.0x the
+  client can afford to bid harder and below it the business depends on repeat. All six
+  currently sit above 1.0x, Party Patch thinnest at ~1.1x. Payback needs a trustworthy
+  margin, so it is gated on the same cost-health check as everything else.
+- **A quarter is only as planned as its months.** `/api/quarter` rolls up the three
+  monthly plans rather than introducing a quarterly goal with its own agreement flow -
+  one target, one sign-off, no second place for a number to drift. Months without an
+  EXPLICIT `goals_json[ym]` entry are named as unplanned and excluded from the total,
+  never filled from `default`. Do not add a standalone quarterly target.
+- **"Repeat share" counts ORDERS, not people, and must never be called a returning-
+  customer rate.** It is `returning orders / total orders`; one shopper buying three
+  times counts three times. A true returning-CUSTOMER rate needs per-customer history,
+  which Triple Whale does not give us. The revenue split lives beside it on Customers
+  because it is the same question in money, and the two diverge when repeat buyers
+  spend differently per order - the card states both and says which way.
+- **A control that does nothing reads as broken: hide it.** The range picker sat
+  visible on all seven tabs while only Overview, Profit and Customers read `S.days`.
+  `RANGE_TABS` gates its visibility in `show()`. If a new tab starts honouring the
+  range, add it there; if it does not, the picker must not appear.
+- **Real cohorts come from SHOPIFY, and only for connected stores.** `p_cohorts` holds
+  customers grouped by the month of their FIRST order with their all-time spend and
+  orders - Triple Whale has no per-customer history and never will, which is why the
+  rest of the Customers tab is monthly averages. The cohort card degrades to a plain
+  "not connected yet" note; nothing else on the page depends on it. CAC is still
+  Triple Whale (spend / new-customer orders), so a cohort row pairs a Shopify LTV with
+  a TW CAC - neither source can produce both halves.
+- **Measure repeat uplift INSIDE a cohort, never across cohorts.** Comparing a matured
+  cohort's LTV with a fresh one conflates age with quality: Lucky's July 2026 cohort
+  simply arrived with bigger first orders, which made the uplift read as -0% and the
+  page declare that repeat buying adds nothing. `orders_per_customer - 1` on matured
+  cohorts is not confounded that way - 1.22 orders means 22% of purchases came after
+  the first, which is the honest read. Anything under 9 months old is excluded from
+  every average, because a young cohort has not had time to come back.
+- **The cohort queries are VERIFIED against a live store, not inferred. Do not
+  "improve" them without re-verifying.** `FROM customers` is the only dataset where a
+  row IS a customer and `month` is their FIRST order month - that is a cohort for free.
+  The trap is `SINCE / UNTIL`: it filters WHICH customers by first-order date and does
+  NOT window the measures. Proved by running the same query at -400d and -30d against
+  Lucky Golf on 2026-08-24 - the 2026-08 cohort returned 318 customers / $49,335.9097 /
+  340 orders in both - so `total_amount_spent` and `total_number_of_orders` are ALL-TIME
+  per customer, which is exactly what `p_cohorts.lifetime_*` means. `repeat_customers`
+  has no metric of its own; it is the same query filtered to
+  `customer_number_of_orders > 1`. Smell test on real data: Lucky's July 2025 cohort
+  repeats at 16.1% against 6.0% for the fresh 2026-08 one. If cohorts ever come back
+  flat across ages, the SINCE semantics are the first thing to re-check.
+- **`shopifyqlQuery` fails SOFT.** A bad query returns HTTP 200 with `parseErrors` set
+  and `tableData: null`. Check both, or a typo reads as "no rows" - and `syncCohorts`
+  additionally refuses to write when the result is empty, so a silent failure can never
+  wipe a good cohort table.
+- **Cohort sync is a BUTTON, not a cron.** The account is at the free-plan trigger
+  limit, and each shop is two ShopifyQL round trips plus a D1 batch, so six in one
+  invocation would risk the subrequest cap. Settings -> Connections has a per-client
+  "Sync cohorts" button; `/api/cohort-sync?act=all` does every connected store one at a
+  time.
+- **`read_reports` is REQUIRED or cohorts silently do not work.** It is the scope that
+  grants `shopifyqlQuery`, and the cohort data comes from ShopifyQL `FROM customers` -
+  the only place Shopify exposes customers grouped by their first-order month. It is
+  easy to miss because the obvious three (orders, customers, products) look sufficient.
+- **`read_orders` only reaches back 60 DAYS.** Older orders need `read_all_orders`,
+  which is a separate approval request in the Partner Dashboard with a written
+  justification, not a checkbox. Today's cohorts avoid this because ShopifyQL
+  aggregates are not subject to the window - but anything that reads raw historical
+  orders (product-level profit, most likely) will need it, and the approval takes time.
+- **Shopify webhooks are configured in `profit/shopify.app.toml`, not in a dashboard
+  form.** Cole went looking for the form and there isn't one any more; `shopify app
+  deploy` pushes the scopes and webhook subscriptions from that file. `embedded` is TRUE
+  since 2026-10-18 (see the section at the end): the install is still the classic
+  authorization-code grant; App Bridge session tokens only authenticate the embedded page.
+- **`shopify app config link` OVERWRITES the local TOML with whatever is on the
+  remote app.** It is a pull, not a link. Run once against a freshly-created blank
+  app and it silently reset `name` to the org name, `application_url` to
+  `https://example.com`, `embedded` to true, `scopes` to `""`, `redirect_urls` to
+  empty and `use_legacy_install_flow` to false - keeping only the webhook block,
+  which is what makes it look like it worked. `deploy` then pushes that wreckage up.
+  Only run `config link` on a fresh clone, and diff the file afterwards every time.
+  `use_legacy_install_flow` must be TRUE: false enables Shopify managed installation,
+  which is for embedded apps doing token exchange, not our authorization-code grant.
+- **`app/uninstalled` CANNOT live in the TOML, only the three compliance webhooks
+  can.** `deploy` refuses outright: "App-specific webhook subscriptions are not
+  supported when use_legacy_install_flow is enabled". Anything declared with
+  `topics =` is app-specific; the mandatory privacy hooks use `compliance_topics =`
+  and are fine. Since the legacy flow is not optional here, the worker registers
+  app/uninstalled per shop in the OAuth callback via `webhookSubscriptionCreate`
+  (`registerUninstallWebhook`), which is the shop-specific alternative Shopify's own
+  error names. It is best-effort and never fails the install - a merchant must not
+  be told the connection failed because a webhook did not take.
+- **The post-install page IS the merchant-facing UI, and review requires one.**
+  "All apps in the Shopify App Store must have a user interface that merchants can
+  interact with" is a stated rejection reason, and a static "Connected ✓" note is
+  not one. The callback redirects to `DASHBOARD_URL?perf=<token>` — the client's own
+  profit page, which already existed behind share tokens. `profitShareToken()` is the
+  single mint path so a merchant and a shared link can never land on two different
+  live URLs for one client. A shop that matches no account gets an honest "not set up
+  yet" page rather than a dashboard that would be empty.
+- **Custom distribution cannot span unrelated merchants.** It covers one store, or
+  several inside ONE Plus organization. Six separate client businesses means six
+  separate apps with six credential pairs — which is why this is a public app despite
+  the review cost. The distribution method is permanent once chosen.
+- **Settings → Connections is where clients get added.** Before it, a store connected
+  only if its domain already equalled `accounts.tw_shop`, and nothing on screen said
+  whether it had — an unmatched install looked like success to the merchant while its
+  data went nowhere. `/api/connections` reports per-client status plus an `unmatched`
+  list, and `/api/connections/map` points a stranded shop at a client. Keep
+  `uninstalled` distinct from `not_connected`: only the former means data that used to
+  flow has silently stopped.
+
+- **Never pipe a secret to `wrangler secret put` from PowerShell.** It prepends a
+  UTF-8 BOM, so the stored value begins with an invisible `﻿`. The Shopify client
+  id went up as `%EF%BB%BF a204...` in the OAuth redirect, and the same corruption in
+  the API secret would have failed every HMAC while looking correctly configured. Use
+  Bash `printf '%s' 'value' | npx.cmd wrangler secret put NAME`, then verify by reading
+  the value back through something that renders it - the install redirect, in this case.
+- **`SHOPIFY_SCOPES` in the worker must match `profit/shopify.app.toml`.** Shopify
+  compares the two at install and re-prompts on a mismatch. Updating one without the
+  other is easy to miss because nothing fails until a merchant installs.
+- **Trailing aMER is a YARDSTICK, never an input.** Any plan implies a rate of buying
+  new customers: `(revenue - expected returning) / spend`. Compare that with the
+  trailing 28-day aMER and say plainly whether the plan is achievable (<=1.05x),
+  a stretch (<=1.25x) or unrealistic. Never silently force a plan to match history.
+- **`goals_json.default` is inheritance, NOT a plan.** `goalsFor()` merges it under
+  every month, which made unplanned future months look planned. The API returns
+  `planned` (an explicit `goals_json[ym]` entry) and the UI must key status off that.
+- **An inherited plan must announce itself.** `briefData` returns `goals_planned`
+  (an explicit `goals_json[ym]`) and `goals_inherited_from`. When false, the Slack
+  brief appends a note naming the month the numbers came from, the prompt tells
+  Claude not to call them this month's goal, and the Brief tab shows a warning with
+  a jump to Plan. Without this, the 1st of a month silently re-uses last month's
+  target and the brief reports "vs plan" against something nobody agreed.
+- **`GET /api/profit/:token` is client-facing: everything about THEIR business, none
+  of our workings.** It carries the month-to-date headline numbers against the
+  pro-rated plan, the full revenue-to-CM waterfall, the daily revenue-vs-spend series,
+  the new/returning split, their weekday rhythm and recent months. What it must never
+  carry: another account, cost-health verdicts, the margin override, wholesale
+  diagnostics, or the plan's internal agreement state. Contribution margin and the
+  waterfall are gated on the same trust check the internal pages use (`cm_ok`) - a
+  client must never be the first person to see a number the Costs page calls broken.
+  It was originally five stat cards and a month list; Cole rightly called that too
+  thin for something meant to be read by the client.
+- **Past months are read only** and must not show inherited defaults as if they were
+  that month's plan — say "no plan was set".
+- **The plan is agreed with the client, never auto-applied.** `PUT /api/plan` writes
+  `accounts.goals_json` (the one field every tool reads) AND a `p_plan` row for the
+  story: basis, growth chosen, required spend, expected CM, share token, agreement.
+  Saving with changed numbers passes `reagree:true`, which CLEARS `agreed_at` — do not
+  let a plan drift after sign-off. `GET /api/plan/:token` is unauthenticated and must
+  only ever expose that one client's plan: no other account, no cost diagnostics.
+- **`PL` is a global, so it MUST record which client it belongs to.** The Plan page
+  seeds its working values only when they are empty, which meant switching brand in
+  the top-right picker kept the previous brand's revenue/spend/MER on screen — and
+  saving wrote them onto the new brand. Cole hit this saving Bonk then Dartee. The
+  month chips and the all-clients row-click already cleared the values; the picker
+  had no such hook and never can, so the guard is `PL.sales == null || PL.act !==
+  S.act` and every reset also clears `PL.act`. Any future page-level scratch state
+  keyed to a client needs the same owner field.
+- **Re-render the numbers, not the page.** Growth buttons, save and the agreed
+  toggle all update in place. Calling `renderPlan()` / `show()` from a handler throws
+  the user back to the top of the page, which makes comparing options miserable.
+- **Every tab honours the client picker.** "All clients" lists everyone; a selected
+  brand shows only that brand. Settings was the last holdout - it always listed all
+  six regardless. Global settings (the brief send time) stay visible but must say
+  "applies to all brands" when one client is on screen, or they read as that
+  client's.
+- **Do not assert wholesale for a small gap.** `retailMargin()` flags any day above
+  the clean-cost cutoff, but a day at 36% against a 20% baseline is a heavier product
+  mix, not product leaving the building. The Costs panel scales its claim: the
+  wholesale / inventory-delivery language needs `negatives > 0` or unexplained cost
+  >= 5% of window revenue; below that it says plainly that this is probably just mix.
+  Same reason the flat-margin suggestion now only appears when the verdict is
+  broken/noisy/none - the suggestion excludes flagged days, which biases it upward,
+  which is a fix when the data is broken and a trap when it is already good.
+- **`marginSVG` must not draw the axis minimum when it is zero.** `lo` is clamped
+  with `Math.min(0, ...)`, so an all-positive client puts the gray minimum label and
+  the red zero-line label within 3px of each other at x=2 and they render on top of
+  one another. Only draw the minimum when `lo < -0.005`.
+- **`.info-i` must reset `letter-spacing`, `font-style` and `text-transform`** — stat
+  labels are uppercase and letter-spaced, and without the reset the glyph inside the
+  circle is squashed and reads as broken.
+- **Name the SOURCE on every ROAS, always.** (2026-09-18: channel ROAS in briefs and reports is now TRIPLE WHALE attribution, lastPlatformClick - see account-health/CLAUDE.md. The history below is why.) Meta ROAS and Google ROAS were each
+  PLATFORM-reported (Meta's API; TW's `ga_ROAS`, which is Google Ads' own figure
+  passed through). Blended ROAS is Triple Whale's. MER is ours. Four numbers for one
+  day that all disagree by design: Grunk 2026-08-23..29 read Meta 3.81, Google 1.70,
+  TW Blended ROAS 2.96, our MER 2.50. Cole lost an afternoon to a Google guy's
+  screenshot of the 2.91 Blended headline against a 0.16 Google line in a brief. The
+  channel cards now print the source in bold and say outright that a platform figure
+  sits below TW's Blended headline by construction.
+- **TW dates: verify, never assume.** `charts.current` x is ONE-BASED day-of-year.
+  After any change to the mapping or a backfill, join `tw_daily.fb_ads_spend`
+  against `daily_insights.spend` on the same date — Meta's dates are authoritative
+  and they must match to the cent. A silent one-day shift shipped once.
+- **Triple Whale backfills are capped at 430 days and must run ONE CLIENT AT A TIME.**
+  A 400-day pull is ~25-50k rows; every D1 batch is a subrequest, and all six clients
+  in one invocation blows the Worker limit. Batch size is 150.
+- **Never depend on the Marketing Calendar.** It is a Lucky Golf internal app, not
+  a Mobius one. It was integrated and then deliberately removed; do not re-add it.
+- **The forecast is CTC's revenue cake with TWO additive layers.** returning (the
+  predictable base, day-of-week shaped) + new (planned spend x trailing aMER).
+  `newCustomerSales + rcRevenue = totalSales` exactly, so those are the only two
+  that add up. Email is an overlay, NEVER a third addend — Klaviyo revenue cuts
+  across both, and only The Golf Sock has it connected at all.
+- **`forecastFor()` must reuse `seriesFor()`**, so revenue means the same thing
+  (Shopify total sales minus tax) as everywhere else. The first version used a bare
+  netSales lookup and silently forecast on a ~7% smaller basis than it compared
+  against. `suggestGoals()` in account-health was fixed for the same reason.
+- **No cron.** The Cloudflare account is at the free-plan limit of 5 triggers.
+  `refreshIfStale()` warms `p_cost_health` on page load instead.
+- **Auth needs no new secret.** The dashboard password lives in the shared
+  `settings` table, and Google SSO is delegated to the account-health worker's
+  `/api/me` (`delegateSession`). Setting `SESSION_SECRET` to the same value as
+  the other workers makes it verify locally instead — faster, optional.
+- **Delegation MUST go through the `AUTH` service binding.** A plain `fetch()` to
+  the other worker's public workers.dev URL fails silently from inside a Worker —
+  that shipped once and produced a sign-in loop. `[[services]] binding = "AUTH"`
+  in wrangler.toml; `env.AUTH.fetch(req)`. Verify with `GET /api/auth-check`,
+  which reports `auth_binding_reachable` and `delegated_verify`.
+- **Never let the gate clear `mobius_session` on a 401.** If this tool rejects a
+  token HQ considers valid, the fault is this worker's; wiping the session just
+  sends the user back to mint another one that fails identically. Show the error
+  and offer Retry instead.
+- **Two Slack channels per brand, never one.** `slack_channel` is the INTERNAL
+  pace/KPI alerts channel; `brief_channel` is the CLIENT-FACING Daily Brief channel
+  (falls back to slack_channel). Every brand was originally pointed at an `-internal`
+  channel, so collapsing them would either hide the brief from the client or leak
+  internal KPI alerts to them. Keep them separate and label which is which.
+- **Never write HTML entities into tooltip/info text.** `esc()` escapes `&`, and
+  `helpModal` escapes again, so `&#39;` renders literally as "&#39;". Use real
+  characters (apostrophe, the word "divided by"), never entities.
+- **Tab switches must never blank `#main`.** `show()` passes a `first` flag: only a
+  truly empty page paints a spinner. Otherwise the previous tab stays visible under
+  `#main.busy` (dimmed, non-interactive) until the new one is ready. Every renderer
+  takes `first` and gates its placeholder on it.
+- **Once a renderer gates its placeholder on `first`, EVERY paint must write all of
+  `#main` — success, error and refetch alike.** Never `#main .card`, and never
+  `insertAdjacentHTML` onto whatever is already there: on a tab switch that DOM
+  belongs to the outgoing tab. Introducing `first` broke both Daily Brief renderers
+  exactly this way — they kept writing their result into `#main .card`, so clicking
+  the tab left the heading reading "Overview" with the brief's table grafted into the
+  Overview's first card, and the tab appeared not to open at all. Build the page as
+  `shell(body)` and assign it; the placeholder and the result then share one shape.
+- **Async renderers hold a RUN ticket.** `show()` bumps a global `RUN`; every
+  renderer that awaits takes `const run = ++RUN` at entry and drops its DOM writes
+  when `run !== RUN`. Without it a slow fetch let an OLD tab paint over the one you
+  had switched to (click Brief, flee to Overview, Brief's response lands 1.5s later
+  and replaces the page). The bump in `show()` matters: sync renderers like Overview
+  never take a ticket, so they must invalidate in-flight ones from the outside.
+- **Listeners go on nodes the render replaces, never on `#main` itself.** `#main`
+  survives every render, so a listener attached to it stacks one copy per visit —
+  the Profit ranking grid accumulated one `show('profit')` call per prior visit.
+- **A refetch must not blank the screen.** `renderPlan(true)` keeps the current DOM
+  and just dims the month chips while loading; only a first render shows a spinner.
+  A spinner mid-decision reads as a page reload.
+- **`repaint()` skips the focused input on purpose** (so it cannot fight your typing),
+  which means Enter would leave the value unformatted. The commit handler formats
+  that one field itself. Any new numeric input needs the same pair.
+- **A control with no visible state reads as broken.** The quick-fill chips changed
+  the value silently, so Cole reported they "don't fill in" when they were working.
+  Highlight the active one and keep it in sync in `repaint()`.
+- **A save must refresh everything it invalidated, in place.** Cole: "everything needs
+  to auto update instantly." Saving a plan changed the quarter card sitting directly
+  below the button, and the goals that Overview and the Daily Brief read out of
+  `S.accounts` - none of which updated until something happened to call `boot()`.
+  `refreshAccounts()` re-fetches the shared snapshot WITHOUT re-rendering (a re-render
+  would scroll the reader to the top, which is its own rule), and `loadQuarter()` is
+  a named closure so the save handler can re-run just that card. Every mutation must
+  now ask what it invalidated: plan save -> quarter + accounts; Triple Whale backfill
+  -> accounts, since the underlying revenue changed; brief toggle -> accounts, so the
+  Settings tab agrees. Margin and client-settings already went through boot().
+- **Nothing may scroll the page on an update.** Growth chips, switching the derived
+  field, month changes and every save update in place; `inPlace(fn)` preserves
+  scrollY across a refetch. Calling a renderX() from a handler throws the reader to
+  the top mid-decision and is the single fastest way to make the tool feel broken.
+- **In-app modals only — never `alert()`/`confirm()`/`prompt()`.** Use `noteModal()`
+  and `confirmModal()`. This is a standing Cole rule across every Mobius tool.
+- **`.unit-in input` needs `[type=text]` in the selector to win.** `.settings
+  input[type=text]` (border + 180px width) has higher specificity than a bare
+  `.unit-in input`, so inside a `.settings` table the input re-grows its own border
+  and overflows the pill — a box-inside-a-box. Selector must be
+  `.unit-in input,.unit-in input[type=text],.unit-in input[type=number]`.
+- Windows: `npx.cmd wrangler deploy` from `profit/worker/`. PowerShell 5.1 uses
+  `;` not `&&`. Cloudflare throws transient 7403 — retry.
+
+## Chrome: a SIDE RAIL, not a top bar (2026-09-08)
+
+- **`.app` is a two-column grid: `.side` (236px rail) + `.content`.** The rail is
+  `position:sticky; height:100vh` with its own overflow, so a short viewport
+  scrolls the tabs instead of clipping Settings off the bottom. Under 980px it
+  becomes a fixed off-canvas drawer toggled by `#navToggle`, with `#navScrim`
+  behind it; `body.nav-open` is the only state.
+- **The scroll-tuck is gone and must not come back.** It existed to reclaim the
+  ~110px the old sticky header cost. A rail costs zero vertical space, so there
+  is nothing to tuck, and a page that moves under the reader while they scroll is
+  a cost with no remaining benefit.
+- **Every tab selector is scoped to `button[data-t]`.** The Meta sub-tabs now sit
+  INSIDE `#tabs` (nested under the Meta button, which is what makes the hierarchy
+  readable without a second colour). A bare `#tabs button` would match them too
+  and call `show(undefined)`.
+- **`chrome(false)` / `chrome(true)`, never hand-rolled show/hide.** Six places
+  used to toggle the rail, picker, sub-tabs and sign-out individually in four
+  spellings, and each new share view copied whichever was nearest. `chrome()`
+  also sets `body.nochrome`, which collapses the grid to one column so a
+  signed-out visitor or a client on a share link never sees an empty dark rail.
+- **`main` and `footer` need `width:100%` as well as `margin:0 auto`.** They are
+  flex items of `.content` now, and an auto horizontal margin on a flex item
+  turns off stretch and falls back to shrink-to-fit. Without it main collapses to
+  the width of its widest line and sits centred. Any new full-width child of
+  `.content` needs the same pair.
+- **`.hd-title` and `.hd-right` live in `.topbar` and are load-bearing.** The
+  share views (client report link, client profit link, post-install landing)
+  write straight into both, and that row is the only chrome those readers get.
+  `.hd-title:empty{display:none}` keeps it out of the way in the signed-in app.
+- **The active tab is dark ink on the brand fill**, not white. White on #62BDEA
+  does not pass contrast.
+- **Testing note that keeps being true:** the Browser pane frequently does not
+  composite, and a stalled CSS transition then reports its START value forever.
+  A `transform` driven by a transition will read as `matrix(1,0,0,1,0,0)` and
+  look like a broken rule. Set `style.transition='none'` before measuring, or
+  measure a property nothing animates.
+
+### Rail, second pass (2026-09-08) — after "this side bar looks like shit"
+
+- **Only `.side-scroll` scrolls.** `.side` is `overflow:hidden` with the brand
+  row, the client picker and `.side-foot` pinned (`flex:none`) and the tab list
+  taking the overflow. The first version let the whole rail scroll, which pushed
+  Settings AND the Sign out button off a 720px viewport. Navigation you have to
+  scroll to reach is the exact failure a rail is supposed to fix.
+- **Icons are not decoration, they are the aim point.** Ten bare labels made
+  every selection a read. One 16px stroked `<symbol>` per tab in a sprite at the
+  top of `<body>`, referenced with `<use>`. Keep the stroke weight identical
+  across all ten or the column stops reading as one set.
+- **ONE active language, two levels.** The brand pill (`.on`) marks the page you
+  are looking at. Meta is never that: it is a section, so it takes the raised
+  `.sec` treatment and the pill goes to its open sub-tab. `show()` decides this
+  (`cur && tab !== 'meta'` vs `cur && tab === 'meta'`). Two pills meant neither
+  read as the answer.
+- **Row height is 30px and the vertical budget is real.** Ten tabs + five Meta
+  sub-tabs + four captions + header + picker + footer is ~700px. It fits a 720px
+  viewport with Meta closed and scrolls the middle when open, which is why the
+  numbers are tight. Anything added to the rail has to come out of that budget.
+- **`show()` scrolls the current tab into view** only when it is actually out of
+  the scrolled area, with `block:'nearest'` so it never moves the page.
+- Contrast measured, not eyeballed: active pill 8.93:1, idle label 7.5:1,
+  group caption 5.04:1.
+
+## Client-facing pages and creative formats (2026-09-08)
+
+- **`ads.media_type` is the ONLY source of a creative's format**, and it means
+  exactly what Meta reports: video / image (shown as "Static") / carousel.
+  Nothing is ever read from ad names. The `format` / `format_kind` fields the
+  API still returns come from the name tag and **nothing renders them** - a
+  card that printed "UGC" was printing a style, not a format, and a UGC ad IS a
+  video.
+- **The column fills in LAZILY and that is a trap.** It is written as a side
+  effect of `adThumbnails`, which resolves ten ads per page view because it also
+  downloads images, so a large account sits mostly NULL and every unresolved
+  card falls back to a delivery-data guess that can never produce a carousel.
+  `GET /api/ads-type-backfill?act=<id|all>` on the account-health worker fixes
+  an account properly: creative type is one field, so 50 ads resolve in ONE
+  batched call. A failed chunk is SPLIT, never abandoned, because one deleted ad
+  fails the whole batched call. Driven by the "Fetch missing formats" button in
+  Settings; it is not a cron because the account is at the 5-trigger limit.
+- **The client profit link takes its window from the QUERY STRING, never the
+  token.** `p_profit_share` is one stable URL per client and must stay that way,
+  so `?from=&to=` carries a picked range. No params means live month-to-date,
+  which is what a bare token has always meant, and forwarded links keep that.
+- **On a fixed window the plan comparison is WITHHELD, not pro-rated.** A plan
+  is agreed per month; "last 30 days" can straddle two, and pro-rating one
+  month's target across it invents a comparison nobody signed off. The heading
+  names the window it actually covers rather than always saying the month.
+- **Any chart on a client-facing page needs `wireSalesSpend`.** The client
+  profit chart shipped drawn but inert - no crosshair, no readout - on the one
+  page we hand over and cannot talk someone through. Use the shared helper so
+  the client view and the report view cannot drift. The client payload carries
+  money only and no ratios, so MER is derived in the formatter.
+
+## Ambassadors: the creator link (2026-09-16)
+
+- **What it is.** One public page per brand, `tools.go-mobius-digital.com/angles/<slug>`,
+  that the brand's TRYBE creators read instead of a PDF brief. Staff edit it on the
+  **Ambassadors** tab (Creators group in the rail). The PDF uploaded to TRYBE only
+  explains the link, so it never goes stale. Modelled on the Lucky Golf creator app's
+  "What to shoot" hub (canvas https://claude.ai/artifact/5U7YKC3LU2Hpp6eAnkmnsn).
+- **Files.** `profit/amb.js` (staff UI, own closure like meta.js),
+  `profit/worker/src/amb.js` (routes), `angles/` (public page: edit `app.src.js`,
+  then `python angles/build.py`, which writes `app.js`, the per-brand shells and the
+  root `404.html` fallback), `profit/worker/migrations/amb-001.sql` (tables, also
+  appended to schema.sql). Tables: `p_amb_brand`, `p_amb_section`, `p_amb_angle`,
+  `p_amb_proof`. Uploaded clips live in R2 `mobius-amb-media` (binding `MEDIA`);
+  the Worker body cap means 95MB max.
+- **NO MONEY ON THE PUBLIC LINK. Cole's rule.** `publicPayload()` never sends spend,
+  revenue, ROAS or typed sales. Tagged Meta ads reach creators as playable proof
+  labelled "Ran as a paid ad". Scores live on the staff tab only. Typed VIEWS are
+  public and labelled typed.
+- **Ideas-bot clips (2026-09-30).** The account-health worker binds the same `mobius-amb-media` bucket
+  (`MEDIA`) and stores every reference clip the ideas bot watches (Atria mp4, Slack upload, TikTok / Instagram
+  download; never YouTube) at `amb/<act_id>/idea-<id>.<ext>`, 95MB cap. Its Creator link button files them as
+  `p_amb_proof` kind **`upload`** with `who = "Another brand (inspiration)"`, so they play through the normal
+  `/api/angles-file/<proof id>` route; the public page (`angles/app.src.js`) shows an upload whose `who` says
+  inspiration / another brand with the Inspiration label. Nothing in this worker changed for it. Deleting such an
+  angle on the Ambassadors tab deletes the object like any upload; the ideas bot checks the key before reusing it.
+  `.dd p` / `.overlay p` on the page are `pre-line`: do / don't / on-screen text may hold one item per line.
+- **Playback on the link** goes through the account-health worker with
+  `?angles=<slug>`: it authorises only Meta ads shown as proof on that brand's LIVE
+  page (same rule as share tokens), and `ad-creatives` returns covers and copy only.
+- **Look = the Lucky Golf hub (Cole, 2026-09-16).** Archivo, labelled single-line pill rows,
+  black primary buttons, no dropdowns. Since 2026-10-14 the page is ONE video board in Frost
+  Buddy's shape on the Locus v2 look (see the 2026-10-14 section at the end); on a phone the
+  player rises from the bottom, like every Locus phone surface. The PDF is ONE dark page: link as a button + QR, no angle list (a list
+  was tried and rejected). The season chart is thin bars like the canvas, season colour
+  and a spike limit (`season.color`, `season.cap`) set on Link and brief.
+- **TRYBE SHOWS THE PDF'S TEXT LAYER, NOT THE PAGE.** It extracts the words in draw
+  order and formats them as the brief. `makePdf()` draws text in reading order, whole
+  sentences, steps as "1. ..." on their own lines, no decorative words; verify with
+  pypdf `extract_text()` after any layout change. PDF wording is per brand
+  (`p_amb_brand.pdf_json`, edited on Link and brief); `briefText()` is the same copy
+  as plain text for the Copy brief text button.
+- **Logos (2026-09-17).** `logo_url` shows in the link header and at the top of the PDF.
+  `logoData()` redraws it through a canvas as PNG (jsPDF cannot read WebP or SVG) and trims
+  clear margins; the page trims the same way on load (`LOGO_TRIM`). The host must allow
+  cross-origin reads (Shopify `/cdn/shop/files` does); if not, the PDF shows the name only
+  and the page shows the untrimmed image. The "<brand> creator brief" text line stays under
+  the logo so TRYBE still reads the name first. Logos set in `migrations/amb-logos.sql`.
+- **Season chart can be drawn** (`season.mode = 'custom'`, `season.custom` = 0-100 per ISO
+  week, 25 = normal). A drawn chart is titled "When to film" and never shows numbers.
+- **The season chart is relative.** `seasonShape()` = last year's weekly `netSales`
+  for a year (13 weeks back, 38 ahead, `now_index`), divided by the median week. Never dollars. The season card
+  text is staff-written; it must not claim a sales multiple the chart does not show
+  (Party Patch Oct 2025 was only ~19% above Sep; December is the real peak).
+- **Icons are Lucide** (lucide-static 1.46.0 on jsDelivr, the set the Lucky app uses).
+  A section stores `icon_svg` so the public page needs no icon library.
+- **Clean links.** GitHub Pages has no rewrites: `angles/<slug>/index.html` shells
+  (listed in `SLUGS` in build.py) give a 200 for link previews; any other slug still
+  works through `404.html`. Add a brand to `SLUGS` when it goes live.
+- **Staff preview of a switched-off link (2026-09-17).** `/api/angles/<slug>` with a valid
+  Locus session (`Authorization`, checked by `isAdmin`) returns the full page with
+  `preview: true` and `Cache-Control: private, no-store`. The page sends `pf_token` or the
+  shared `mobius_session` from localStorage (same origin as Locus), shows a yellow
+  "Preview" bar, and loads covers and video through the signed-in `/api/ad-creatives` and
+  `/api/ad-video` routes, because the slug only authorises ads on a LIVE page. Creators
+  have no session and still see "being set up". Locus labels the buttons "Preview the
+  link" while the link is off. Local testing: `?api=http://127.0.0.1:8799` works on
+  localhost only; the local `ADMIN_TOKEN` is not valid on account-health, so covers 401
+  locally and load for real sessions.
+- **Grunk Dolfer** was seeded from `migrations/seed_grunk_dolfer.py` (research and angle list
+  in `docs/angles-grunk-dolfer.md`), left OFF for Cole's review. Do NOT re-run it either.
+- **Dartee Golf** was seeded from `migrations/seed_dartee.py` (research and angle list in
+  `docs/angles-dartee.md`), left OFF for Cole's review. It replaced a blank row made on the tab
+  (slug `dartee-golf`) and kept its TRYBE link. Do NOT re-run it.
+- **Party Patch** was seeded from `migrations/seed_party_patch.py` (Chris's Sept-Dec
+  emails, the account's best ads, the Mobius angle framework). Do NOT re-run it: it
+  replaces the brand's sections, angles and proof.
+- **Local testing without Cole's sign-in:** `profit-worker-dev` in `.claude/launch.json`
+  runs `wrangler dev --remote` on :8799 with a throwaway `ADMIN_TOKEN` in the
+  gitignored `profit/worker/.dev.vars`; point localStorage `pf_worker` at it. It reads
+  and writes the REAL shared D1. The Browser pane stops painting once scrolled; hide
+  the content above instead of scrolling to screenshot lower sections.
+
+### 2026-10-06: the creator link rebuild (read before touching angles/ or the Ambassadors tab)
+
+- **Why.** Cole: creators get a wall of sub-sections and samey angles, the copy reads like AI, most ideas
+  have no video behind them, and nobody is taught how to hold attention. Our own numbers agree: TRYBE
+  creator videos were the worst ad type on Party Patch (0.13 to 0.65x), Grunk and Dartee (about $75 a
+  purchase vs $35 in-house) and the BEST on Ice & Gold (3.3x). Research per brand plus a cross-category
+  hooks study is in `docs/research-2026-10-06/` (one doc per brand, plus `hooks-and-rehooks.md`).
+- **Schema** (`migrations/amb-003.sql`): `p_amb_angle.visual_hook` (what is physically on screen in
+  the first second), `rehook` (what happens at 3 to 8 seconds to keep them), `why` (the proven shape
+  it is built on), `inspo_json` ([{brand, what, url}], other brands' videos to steal the shape from);
+  `p_amb_brand.guide_json` ([{title, text}], the "How to keep them watching" card). All public.
+- **v12 (same day, after Cole read v11 as a creator: "all over the place"):** THREE SCREENS, one job
+  each, as tabs under the top bar: **Ideas** (intro, "Pick one for me" = a random idea leaning to Hot,
+  the What's working lane, lane pills, the lanes), **Watch examples** (every proof video and every
+  other-brand reference in one grid, each naming its idea), **Before you film** (what it is, say it
+  right, stop filming these, keep them watching, the season). An idea page reads in the order a
+  creator works: idea, Watch first, How to film it as numbered steps (The first second, Say this
+  first, At 3 seconds, Middle, Close), text on screen, other lines, do / don't, why. The deck card and
+  the guide card on the Ideas screen are gone. **Public proof is VIDEO only** (`publicPayload` drops
+  Meta ads whose `media_type` is image; staff scores still count them). Routes: `#ideas` `#watch`
+  `#rules` `#a=<id>` (`&pick` marks a random pick). `visual_hook` / `rehook` are written as plain
+  instructions ("Open on...", "At 3 seconds, ...") after Cole could not follow the camera-note versions.
+- **v13 (same day): other brands' videos play on the page.** account-health `POST /api/atria/clip-to-angle`
+  {act, angle_id, ad_id (m...), who, note} (admin; atria.js) reads the ad through the Atria MCP, downloads
+  its video into R2 `amb/<act>/atria-<ad>.mp4` (95MB cap) and files it as `p_amb_proof` kind `upload` with
+  `url` = the Atria link and `who` = "<brand> (inspiration)". Idempotent per angle + link. The public
+  payload hides an `inspo` link once a clip with the same `url` exists, and the page shows "Watch first"
+  in two groups: From <brand> (meta + uploads + posts) and Other brands doing the shape well (clips).
+  The Watch examples screen does the same across every idea. Staff: the idea editor's inspiration rows
+  have a **Pull the video in** button (calls account-health directly with the session token, like
+  brand.js) and show "Video in" once stored. The editor itself is laid out in the page's reading order
+  (The idea, How to film it 1 to 4, Watch first, Why it works) with the same labels as the page.
+  Bulk import on 2026-10-06 ran through the local `ah-worker-dev` (Cloudflare 403s a Python user agent;
+  send a browser one). Public proof is video only; the Open beat is hidden in the editor because step 1
+  "The first second" is the same thing.
+- **v19 (2026-10-14): one video board.** The Ideas / Watch examples / First seconds / Before you film tabs
+  below are history (and so is v18's two-tab feed); the link is one page of videos + 4 steps + the
+  checklist. Details in the 2026-10-14 section at the end of this file. Every field below is still
+  stored and edited the same way.
+- **v17 (2026-10-06): First seconds.** Was the fourth tab on the link: the bank of ways to open a video,
+  `p_amb_brand.hooks_json` = [{title, how, kind 'shared'|'brand', url, clip (a stored upload proof id)}],
+  seeded per brand from scratchpad hook_bank.py (16 shared openers copied into every brand + 6 made for
+  each brand; clips attached where a stored Atria clip matched). Shared rows are COPIES per brand on
+  purpose: rewording one changes one brand. Each idea has `alt_hooks_json` ([string], 2 alternates)
+  shown under step 1 as "Or open with", with a link to the tab. Editors: Link and brief ("First seconds:
+  ways to open a video", one row each) and the idea editor ("Or open with", one per line). The pinned
+  lane reads "Film these first" (it used to claim "What's working"). Each brand was trimmed to 20 LIVE
+  ideas on 2026-10-06; the other 9 or 10 are `status='draft'` in Locus, not deleted.
+- **The v11 page** (`angles/app.src.js`), top to bottom (superseded by v12 above): jump links; **Film this one** (one idea at
+  a time, Hot first then sections, opens on a random one so creators do not all film the same idea,
+  "Show me another" deals the next: the Lucky hub's NextVideo); **What's working right now** = the
+  pinned Hot lane, every card shows up to three playable proof thumbs (`proofStrip`, covers loaded in
+  one `loadCovers(proof)` call); **How to keep them watching** (the brand guide, folds after 4);
+  season + about; stop filming + rules (`#rules`); then the section lanes. The format pill row is
+  GONE: tapping a format chip on a card filters and shows one "Skit x" pill to clear it. The angle
+  page adds "The first second" / "Keep them past 3 seconds" cards, "Why it works", and "Steal the
+  shape from these" (inspo). Cards show the visual hook under the title.
+- **Staff editor** (`profit/amb.js`): the four new angle fields (inspiration as brand / what / link
+  rows) and the guide editor on Link and brief (title + one line per rule).
+- **Seeding**: `migrations/amb_seed_lib.py` + one `seed_amb_<slug>.py` per brand builds a SPEC and
+  writes SQL. It REPLACES sections and angles, keeps the brand row (slug, live, submit link, PDF),
+  the pinned Hot section, and any old proof named in a new angle's `keep_from` (old angle title).
+  `check()` refuses a spec with em dashes, more than 6 sections, fewer than 3 openers or shots, or an
+  angle with no proof and no inspiration. `create: True` makes the brand row for a brand with no
+  page (Ice & Gold). Run each SQL once; never re-run after the team edits in Locus.
+- **Seeds RUN on 2026-10-06 (do NOT re-run any of them):** `seed_amb_dartee` (6 lanes, 30 ideas),
+  `seed_amb_grunk_dolfer` (6 lanes, 29), `seed_amb_party_patch` (6 lanes, 29), `seed_amb_ice_and_gold`
+  (6 lanes, 30, brand row created, `live = 0`, no TRYBE link yet; `ice-and-gold` is in build.py SLUGS).
+  Grunk's old Masters section and Party Patch's Halloween six were folded in or dropped; the old seeds
+  (`seed_party_patch.py`, `seed_grunk_dolfer.py`, `seed_dartee.py`) are history only. D1 refuses
+  `BEGIN TRANSACTION`, so the lib emits no transaction; wrangler runs a `--file` as one batch.
+- Atria note for the team: `creator-links/rebuild-2026-10-06.md` (Atria notes, read by its agent).
+
+## Brand: research, angles and the creative roadmap (2026-09-24)
+
+- **What it is.** The Brand tab (Creative group in the rail) replaces each brand's Google Sheet.
+  Views: Roadmap, Angles, Research, Onboarding, Profile. Files: `profit/brand.js` (UI, own
+  closure), `profit/worker/src/brand.js` (routes, `p_br_*` tables), `onboard/index.html` +
+  `onboard/questions.js` (the client's public form; the question list is shared with the
+  staff view, so change questions ONLY in questions.js), `account-health/worker/src/research.js`
+  (the AI: research steps, duplicate check, onboarding help box, website pre-fill).
+  Tables: `migrations/brand-001.sql`.
+- **Nothing gets cut because a brand left it empty (Cole, 2026-09-24).** Every sheet field has a
+  home. Only data Locus already has live (daily log, monthly totals, KPI snapshots) is not
+  re-typed.
+- **Hierarchy:** brand > product LINE (products bought for the same reason; the research unit,
+  e.g. a strip brand's energy / sleep / beauty strips are three lines) > persona > angle
+  (logged once) > concept > batch (ONE test: angle | concept | variation | offer; an offer is
+  its own field, never an angle) > ads.
+- **Ads link by the number that STARTS the ad name** (`batchNumOf`: "326-5 | Still" -> 326,
+  "GD_283" -> 283; "Tiktok #25" does not match on purpose). A match only counts when that batch
+  exists. Ads with no number show under "Ads with no batch number" and are tagged by hand
+  (`p_br_adtag`, which wins over the name). Results are Triple Whale `lastPlatformClick`.
+- **The verdict is the media buyer's call.** Locus only SUGGESTS once a batch passes the brand's
+  test rules (Profile: judge after $X or N days, winner/loser ROAS; `p_br_doc` key `rules`,
+  defaults from `accounts.target_cpa/target_roas`). "Needs a call" lists batches that passed
+  with no verdict. A call on thin spend is allowed and flagged. Closing a test requires a
+  one-line learning.
+- **AI drafts, people approve.** Research writes `status='draft'`, `source='ai'`; a re-run
+  replaces only the AI's own drafts. Angle ideas land as `status='proposed'`. New angles go
+  through `/api/research/dedupe` (falls back to word overlap if the AI is down).
+- **The browser calls the account-health worker directly** for research (NDJSON stream with a
+  10s ping), because the PROXY_PATHS proxy buffers the body. A full step can take 5-15 minutes.
+  Cost per run is logged in `p_br_run` (Opus 5 $5/$25 per MTok, search $10 per 1,000).
+- **Onboarding link** `tools.go-mobius-digital.com/onboard/?t=<token>` (token in
+  `p_br_onboard`). Public routes `GET/PUT /api/onboard/:token`, uploads to R2 `MEDIA` under
+  `onboard/<act>/`. The help box is `/api/onboard-help` on account-health (token-checked). Never
+  ask clients for passwords; the Access step explains how to invite us.
+- **Grunk Dolfer** was imported from its sheet by `migrations/seed_brand_grunk.py` (227 batches,
+  15 clustered angles, the Weekend Warrior, onboarding answers). Do NOT re-run it.
+- **Viktor's research** (Party Patch, Bonk, Dartee, Grunk, then Lucky Golf with `--brand`; 2026-09-29)
+  was loaded into the research tables by `migrations/viktor_import.mjs` (data in `migrations/viktor/`).
+  Rows are drafts with `source 'viktor'` or ids `vk_...`, so staff approve them like AI drafts; the
+  header of that script has the one-query removal SQL. It refuses to run twice per brand; do not
+  re-run it blindly. Lucky is research only (its voice is the synced repo skill). The superseded
+  lines Party Patch "Daily Wellness", Bonk "Course Accessories", Dartee "The glove" and "Hats" were
+  deleted by `migrations/line_cleanup_20260929.sql` (nothing referenced them).
+- **Local testing:** `profit-worker-dev` (:8799) + `tools-static` (:8788), localStorage
+  `pf_worker=http://127.0.0.1:8799`, `pf_token=<.dev.vars ADMIN_TOKEN>`. Research locally:
+  `ah-worker-dev` (:8798, `wrangler dev --remote`, same throwaway ADMIN_TOKEN in
+  account-health/worker/.dev.vars); the deployed Anthropic key is available there.
+
+### 2026-09-24 (later): ASANA IS THE ONLY PLACE ANYONE TYPES. Read this before touching the Brand tab.
+
+- Cole rejected the in-Locus roadmap/board: Asana already runs production (Creative Brief,
+  Creative Studio, Ready to Launch, Analyze Results, Completed) and strategists complained about
+  entering tests in several places. **Locus is the memory and fills itself.** The Brand tab is
+  now three views: **Test library** (search + angle list + test drawer), **Research**, **Brand
+  info** (profile, test rules, onboarding). Do not bring back a board or a "new batch" form.
+- Engine: `account-health/worker/src/asana-brand.js`. Hourly tick (`brandAsanaTick`, inside the
+  hourly cron before the Meta sync) and the UI's "Sync now" both run: sync tasks (number in the
+  task name, same rule as ad names) -> tag (AI files each test under an angle, reading the brief
+  Google Doc via the `GOOGLE_SA_KEY` service account with domain-wide delegation, as Cole then
+  Ahsan) -> results (a test in Analyze Results past the rules gets Result + Learning fields set and
+  a comment with the TW numbers, @mentioning the assignee) -> close (a completed task's Result +
+  Learning become the verdict).
+- Four workspace custom fields, created once and added per project: Angle, Testing, Result,
+  Learning (`settings.brandAsanaFields`). Brand -> project link is `p_br_doc` key `asana`
+  (matched by name on Connect). `ASANA_TOKEN` is Cole's personal token, so posts show as Cole.
+- **Everything written into Asana is visible to the client** (Cole: "visibility for all").
+  Backlog tagging runs with `warn:false`; fields are only written on OPEN tasks, never on
+  completed ones (that would only notify people about history).
+- Angles are created by the AI as it files tests (`source='ai'`); people rename, retire or MERGE
+  them (`/api/brand/merge`). Cole wiped the sheet-clustered angles on 2026-09-24.
+- **Judging (2026-09-24, Cole):** CPA FIRST against the brand's target CPA (Brand info → Test rules),
+  then CTR, hook rate, cost per add to cart and CPM against the account's own recent ads (terciles,
+  never fixed benchmarks). Results are Winner / Keep running / Loser; "Moderate" and "Variation" are
+  retired (Mobius framework: Angle, Concept, What We're Testing). Keep running carries a reason and
+  a Check again date (7 days by default) and Locus re-posts a scorecard on that date. **No target CPA
+  = no suggested calls** for that brand. `add_to_cart` per ad was added to `ad_daily` (ADS_METRICS_VERSION 4).
+- **Auto-numbering:** an open task in a creative section without a number gets the next one. A brand-new
+  EMPTY brief in Creative Brief gets the framework template (`BRIEF_TEMPLATE`). A brand's FIRST connect
+  runs quiet: backlog tagged with `warn:false`, results posted with no @mention.
+- A pinned "📌 Brand kit" task in each project's Client Resources holds what never changes per test;
+  Grunk's was written 2026-09-24.
+
+## 2026-09-25: onboarding Access rebuilt + the brand voice loop (How we write)
+
+- **The Access step now matches the Asana template word for word** (the "Client Responsible"
+  tasks and their Looms). Constants live ONCE in `onboard/questions.js`: `MOBIUS` (Business ID
+  695359915477596, domain go-mobius-digital.com, cole@ + ahsan@, the Calendly link) and `LOOM`.
+  Meta = Partners + our Business ID + Full control on every asset. Google = Allowed domains FIRST,
+  then invite both emails as Admin. **Shopify is a collaborator request FROM us**: the client
+  gives their .myshopify.com address (+ request code) and approves; never ask them to add staff.
+  A `check` field can carry `steps`, `copy` ([label, value] chips), `loom`, `go` (buttons) and
+  `link: 'drive'` (the brand's Drive folder, set in Brand info > At a glance, served as
+  `links.drive` by `GET /api/onboard/:token`).
+- **New first step "Getting started"**: invoice, agreement, Slack hello, strategy call, Drive
+  content upload. It shifted every saved `step` index by one; harmless.
+- **The voice loop (Lucky Golf's process, for every brand).** `onboard/voice.html?t=<onboarding
+  token>` is a talk-don't-type interview (browser SpeechRecognition; keyboard dictation as the
+  fallback), 12 topics, the AI follows up on thin answers, then writes sample lines in 8 formats
+  that the client rates Sounds like us / Close / Not us (+ why). Finish writes "How we write" as a
+  DRAFT. Engine: `account-health/worker/src/voice.js` (public routes by token, staff routes
+  `/api/voice/staff/*` admin). Docs in `p_br_doc`: `voice_interview`, `voice_guide`,
+  `voice_bank`, and the old `voice` card is refreshed from the guide.
+- **The bank is the learning.** Client yes/no ratings and every Keep/Reject on Locus's Copy desk
+  (Brand info) land in `voice_bank` with the reason; the guide rewrite and the desk both read it.
+  All bank writes go through account-health (read-modify-write) so the two sides never clobber
+  each other. "Download as a Claude skill" builds a SKILL.md from the guide + bank.
+- Slow AI writes (samples, guide, desk) stream NDJSON with 10s pings (Cloudflare cuts a silent
+  response at 100s). Local: `pf_ah` in localStorage points brand.js at a local account-health.
+- **2026-09-25 (later): the Asana template has TWO client tasks, and they run themselves.**
+  Cole: the onboarding link is the one place a client does setup, so "MD - Template 2026 v2"
+  (gid 1218874412343799) has only "Start here: your onboarding link" and "Help us find your
+  voice" under Client Responsible. `onboardAsanaTick` (asana-brand.js section 6, inside the hourly
+  brand tick; `POST /api/brand-asana/onboard` runs it now) finds projects made in the last 120
+  days with a "Start here" task, creates the onboarding row (a PENDING id `asana_<project gid>`,
+  named after the project, until the brand's Meta account exists), writes the link into the
+  task description AND a comment, reads the Drive folder from the "Google Drive" task, ticks
+  "Start here" on Send, posts the voice link on Send, and ticks the voice task on Finish. When a
+  Meta account with the same name appears (or the brand is connected to that project), it
+  connects and `adoptPending` moves the row and docs onto the real act_id. Onboarding lookups by
+  token LEFT JOIN accounts with `COALESCE(a.name, o.name)` so pending links work. Pending clients
+  show on the Brand overview ("New clients, not in Locus yet"). Flags in
+  `p_br_onboard.flags_json` make every post happen once. A project made from the template for any
+  other purpose gets a link too: archive it (discovery skips archived projects).
+- **Asana cannot edit a project template.** Make a project from it, edit, then
+  `POST /api/brand-asana/save-template {project_gid, name}` (admin) and poll `/api/brand-asana/job`.
+- **2026-09-25 (later still): a brand's FULL copy skill lives in Locus** (`account-health/worker/src/skill.js`,
+  `p_br_doc` key `voice_skill` = instructions + every reference file). The Copy desk hands the model
+  the whole skill (SKILL.md body, then each file in a `<file path>` tag, prompt-cached), plus the bank,
+  so Locus writes like Claude with the skill loaded. **Lucky is SYNCED:** the Lucky repo's
+  `.git/hooks/post-commit` runs `profit/scripts/sync-copy-skill.py` whenever a commit touches
+  `.claude/skills/lucky-golf-copy`, posting every file to `/api/voice/skill-sync` (Bearer
+  `SKILL_SYNC_TOKEN`; the local copy is `~/.config/mobius/skill-sync-token`, outside every repo). A
+  synced skill is read-only in Locus, and the interview never overwrites its guide (it writes
+  `voice_guide_suggested` instead). The hook is LOCAL to this machine because the Lucky skill's
+  current commits live on an unpushed branch; run the script by hand after editing elsewhere.
+  **Every other brand:** "Build the full skill" drafts all seven files (facts read from the website
+  with web_fetch) using Lucky's matching file as the model of SHAPE only; what the data cannot answer
+  becomes `gaps`, and "Ask the client these" puts them at the front of the voice interview
+  (topic `gaps`, asked in order). The interview gained `specs` and `culture` topics for the facts and
+  customer-language files. "Download the Claude skill" is a zip (SKILL.md + references + examples.md).
+- **2026-09-25: THE SPEAKER. Copy is a person talking, not rules followed (Cole's core principle).**
+  Every brand has a speaker: a first-person portrait of the ONE human the brand sounds like, built
+  from the owner's own SPOKEN words (voice interview verbatim; for Lucky, Cole's 129 messages from
+  the Lucky voice sessions), with verbatim "How I actually sound" samples and "Say it like me"
+  scenes. Lucky's lives in the repo skill (`references/the-speaker.md`, SKILL.md opens with the
+  method); other brands' in `p_br_doc` `voice_speaker` (and as a file in a built skill). The copy
+  desk runs the METHOD in skill.js: become the speaker, SAY IT to one person in one moment
+  ("Who's it for" field; the spoken take is shown), write down what was said, then READ IT BACK as
+  the speaker, with deterministic AI tells (`TELLS`) pointing at lines that read like writing. The
+  checks and bans run only at read-back, never as the way to write. The interview gained
+  role-play "Say it" topics, and the client's Close/Not us box and the desk's "Say it your way"
+  store PAIRS (our line + how they would say it, `said`), which the prompts weight above yes/no.
+
+## 2026-09-26: Studio (AI makes the ad, people fix only what they want)
+
+- **Files.** `profit/studio.js` (UI, own closure, `window.StudioTab`), `profit/worker/src/studio.js`
+  (routes), `migrations/studio-001.sql` (`p_studio_ad`, `p_studio_cfg`). Images in R2 `MEDIA` under
+  `studio/<act>/<id>/{full,plate,final}.png`, served publicly by the 24-hex id (`/api/studio/img/...`).
+- **Cole's flow, do not "improve" it into something else.** The image model (OpenAI GPT Image, newest
+  id discovered from `/v1/models`) draws the WHOLE ad, words included, in a type style picked per
+  creative (not one brand font), 4:5 with everything inside the 1:1 square. Review = Approve / Edit /
+  Redo / Delete. ONLY the first Edit spends: the model erases the words (the plate, `input_fidelity:
+  high`) while a vision model reads each line's box, colour and closest font from `FONTS`; the browser
+  tightens each box against the full-vs-plate pixel difference (`tighten`, grows a row band and stops
+  at the first empty row so neighbouring lines never merge). From then on moving, retyping, deleting,
+  restyling and adding text are free. Title art (stylised lettering) stays in the picture; `/art`
+  redraws only that. Save exports 1080x1350 from the plate + boxes (`renderPng`) as `final.png`.
+- **Positions are % of the 4:5 frame** (cx, cy = centre; size = % of width), so stage, export and a
+  reopened edit agree. Fonts must be loaded BEFORE measuring (`setup`), or sizes come out small.
+- **The OpenAI key is connected from the Studio screen** (stored in `p_studio_cfg`, never returned).
+  Cole pastes it himself; Claude must never handle it. `imageCall` retries without a rejected
+  optional param (4:5 size, input_fidelity, quality) so a model change cannot break Make.
+- **Make takes (2026-09-26, Cole):** up to 4 products (each with chosen photos, 8 photos max), up to 3
+  inspiration images (uploaded to R2 `studio/ref/`, served at `/api/studio/ref/<id>.<ext>`; the prompt
+  says which attached images are product vs INSPIRATION ONLY and never to copy the inspiration's
+  products or words), callouts (up to 6, badges/labels, also erased on Edit), and free "Anything
+  else" notes. EVERYTHING is optional except one starting point: a product or an inspiration image.
+  No words at all = the copy desk writes a headline before making.
+- **How Edit finds and erases the words (measured on a real ad, do not simplify):**
+  1. `/api/studio/read`: the vision model names each line, font, colour and box. **It answers in
+     PIXELS whatever the schema says** (a button at y 1093-1172 on a 1280-tall ad); `readText`
+     converts to 0-1000. Before that fix every box sat low and the erase hit the wrong places.
+  2. The browser tightens each box with Tesseract.js OCR (`locate`: whole page, both polarities,
+     then a zoomed sparse-text read around anything unmatched). An OCR match overrides the AI's box
+     ONLY if it covers the whole line (>=85% of the letters); half a line gave half a box.
+  3. `/api/studio/lift` erases with a MASK of those holes. GPT Image still redraws the whole
+     picture (the club moved, the clover vanished), so `composite()` keeps the ORIGINAL pixels
+     everywhere and takes the erased version only inside the feathered holes.
+- "Write for me" and "Rewrite" call the account-health copy desk (`/api/voice/staff/desk`, format
+  "Ad headline") with the ad's product, look and who-it's-for.
+- Not built yet (blueprint https://claude.ai/artifact/TuFSFdBySvWpQjfZ2ys4sR): weekly plan (Gate 1),
+  Asana hand-off, push to Meta, templates lane, reason-on-reject learning.
+
+### 2026-09-27: Studio v2 = BATCHES (read this; it replaces the one-idea form and the text editor)
+
+- **Cole's model: Studio makes a BATCH from a brief, ONE AD PER NUMBERED LINE** (Mobius framework:
+  Angle, Why, Concept, What We're Testing, lines). "Versions" of one idea were removed: Meta treats
+  look-alikes as duplicates and they teach nothing. Redo is the backup for a bad ad.
+- **Flow:** New batch (from Asana: `/api/studio/asana` lists open p_br_batch tests; the brief is
+  usually a Google Doc link, opened by account-health `readDoc` / or paste a brief or a whole BFCM
+  plan) -> `/api/studio-ai/brief` (account-health `studio-ai.js`) lays out batches; post copy goes
+  to `brief.post_copy`, never a line; "N iterations" become N lines -> product + swipe file + per-line
+  "look like this" inspiration -> `/api/studio-ai/plan` (the art director, system prompt = the
+  brand's copy skill) -> Make -> review -> Send to Canva.
+- **2026-09-29: the BRAND BRAIN.** Both Studio AI steps, the copy desk and the Strategist's angle
+  writer now also get `account-health/worker/src/brain.js`: one cached block with everything Locus
+  knows about the brand (staff rules, personas, customer quotes, market stage, past tests with TW
+  results and learnings, creator link, GAPS) plus the SPECIFICITY rules (tie every line to a
+  persona, quote, test or fact; the swap test). Details in account-health/CLAUDE.md "Brand brain".
+- **Testing inside a concept (headlines/offer/reviews/hooks/copy) = line 1 is made, the rest are
+  `/api/studio/vary` edits of it that change ONLY the words**, so it is a clean test. Concepts, looks
+  and format = genuinely different ads, made two at a time from the page (keep it open).
+- **Product accuracy (Cole's hard rule):** generation uses `input_fidelity: high` on the product
+  photos; every ad is checked by `productCheck` (strongest gpt-5 on the key, silhouette first) and
+  redone ONCE if it looks off; the card shows "Product checked" / "may be off". Measured on #412
+  (Eclipse Mallet): fidelity fixed 3 of 4; the check still passed one wrong-shaped head, so it is a
+  net, not a guarantee. Tell the team to tick clean studio shots of the product.
+- **The art director drew descriptions as text** when it put an idea in `art` (title art). Title
+  art is now max 3 words and the prompt says scene notes are never written on the ad; every label
+  must fit. Callouts max 4, about 6 words.
+- **The in-Studio text editor is REMOVED** (Cole: retyped text never matched the AI's lettering and
+  the erase was slow). Edits = "Change with AI" (`/api/studio/change`, an instruction redraws only
+  that change; old version goes to Deleted) or Canva. The lift/read routes remain but nothing calls them.
+- **Canva:** Connect API with PKCE (`/api/studio/canva/setup|start|send`, public callback
+  `/api/studio/canva/callback`). Cole must create a Canva developer integration once (scopes asset,
+  design content, folder read/write + design meta read; redirect URL shown in the modal) and paste
+  the client id + secret in Studio. Send = a folder per batch, one 1080x1350 design per ad (approved
+  ones if any). Untested end to end until Cole connects it.
+
+### 2026-09-27 (later): 4:5 guarantee, product fingerprint, house style (after Cole: "not our putter", "text outside the safe zone", "looks like AI slop")
+- **1:1 safe area is GUARANTEED, not asked for.** Prompts saying "keep words out of the top/bottom tenth"
+  failed on 3 of 4 ads. Every ad is now made SQUARE (1024), then the browser (`extend()`) places it in a
+  1024x1280 canvas with transparent bands, `/api/studio/extend` has the model fill only the bands
+  (the transparency is the mask, quality medium, ~8c), and the browser puts the original square back
+  on top with a 24px feather and saves it via `/api/studio/finalize` (the square is kept as
+  `square.png`; vary and change edit the square, then extend again). Compositing happens in the
+  browser on purpose: the Worker is on the free plan's CPU limit.
+- **Product fingerprint** (`/api/studio/dna`, stored in `p_studio_cfg` as `dna:<act>:<handle>`): the
+  strongest vision model writes checkable facts from all product photos (silhouette, cut-outs, where the
+  neck/shaft joins, logos and positions). Editable on the batch; it rides in every prompt, the art
+  director's plan and the product check. Measured on #412: before it, none of 4 heads was the real
+  Eclipse Mallet; after, 3 of 4 clearly were (cross-section included). It can still be wrong (it called
+  the gold shaft black), which is why the team edits it.
+- **House style:** the art director sees the brand's top 5 static ads by TW revenue (120 days, from
+  `ad_creative.thumb`) and gets hard type rules (flat, crisp, no bevels/glows/3D/fake badges, real
+  photography). Image prompts carry the same rules.
+
+- **Connect Atria (2026-09-29):** a second button in the Studio top bar (`#stAtria`, next to Canva,
+  visible once a brand is picked). One workspace-wide connection for the Slack ideas bot, not per
+  brand. The UI calls the ACCOUNT-HEALTH worker directly (`/api/atria/status|start|disconnect`,
+  admin Bearer); the OAuth client, tokens and the public callback (`/atria/callback`) all live there
+  (`account-health/worker/src/atria.js`, rows `atria_*` in the shared `p_studio_cfg`). No profit
+  worker change. Details in account-health/CLAUDE.md "Ideas bot", Atria bullet.
+- **Canva status (2026-09-27):** app "Locus Studio" created in Cole's Canva developer account (App ID
+  AAHOGFM5NCI, Public, Draft). REST API setup is BLOCKED until Cole turns on MFA on his Canva account
+  (Canva's rule; Claude must not change account security settings). Then: Outside Canva -> Start
+  integrating, scopes, redirect `https://mobius-profit.mobius-digital.workers.dev/api/studio/canva/callback`,
+  Cole generates the secret and pastes id + secret in Studio. Until connected, "Send to Canva" downloads
+  the batch and opens a blank 1080x1350 Canva design. Folder structure: Locus Studio / <Brand> /
+  "<#> · <batch name>", designs "<#>-<line> · <headline>"; folder ids cached as `canva_folder:<path>`
+  (Lucky + #412 were created through the Canva MCP connector and seeded into the cache).
+
+- **Exact product (2026-09-27, clubs first):** `setup.exact` defaults on when a product's Shopify type/title
+  matches `HARD` (wedge|putter|hybrid|driver|iron|club...). White-background studio photos are cut out in
+  the browser (`cutoutOf`: flood fill from the edges, islands under 6% dropped) and uploaded as
+  `setup.cutouts`; the art director picks `photo` (0 = AI-drawn, flagged), `place`, `size` per ad.
+  Order that works: `/api/studio/make-exact` makes the scene + words with the product box EMPTY and no
+  product (checked by `emptyCheck`, redone once), the browser places the real cut-out, `/api/studio/harmonize`
+  adds a contact shadow in a ring (only the ring is kept), the browser locks the product pixels, then 4:5.
+  Measured on #412: a single-hero-product ad is right (real clover, milling, heel/toe callouts on the face);
+  concepts that ask for several objects (a cast-vs-milled comparison) still get extra clubs or labels
+  hidden behind the product. Letting the model SEE the product made it draw more copies; do not go back.
+
+- **2026-09-27 (final): Cole: "go back to full AI, just make it correct."** Exact-product mode is switched
+  off and its UI removed (code kept: make-exact, harmonize, cutouts). What made full AI right on #412:
+  (1) tick 5-6 clean STUDIO shots of the product as references (not the 3 lifestyle shots the picker
+  defaults to), (2) the fingerprint, (3) each ad scored 0-10 by the check model, up to 3 attempts, best kept,
+  score on the card ("Product 9/10 · best of 2"). Result: 4 of 4 read as the real Eclipse Mallet
+  (clover at the heel, offset neck, fang cut-out, dense milling), text inside the 1:1 area.
+
+## 2026-09-29: the ideas bot (Slack idea -> brief)
+A tag of @Mobius Digital on an idea thread in a brand's -internal channel drafts a teardown plus a
+creator-link angle, an Asana brief and a Studio batch; approver buttons write them into
+`p_amb_*`, the brand's Asana Creative Brief section and `p_studio_batch`. It lives in
+account-health (`src/ideas.js`); read account-health/CLAUDE.md "Ideas bot (2026-09-29)" before
+touching the creator link, Studio batches or Asana briefs from anywhere else.
+
+## 2026-10-02: New client (one button sets a client up everywhere)
+
+- **Where:** Settings > **+ New client** (`profit/newclient.js`, own closure, `window.NewClient`). Engine:
+  `account-health/worker/src/newclient.js`, table `p_newclient` (created on first use), routes
+  `/api/new-client[/options|/run|/step|/mark|/remove]` (admin). "+ Add a brand" stays for a client whose Meta
+  account Locus can already see.
+- **Shape:** the form makes a row, then the SCREEN asks for one step per request (`asana`, `onboard`, `drive`,
+  `slack`, `summary` on the worker; `ledger` and `prefill` from the browser, reported with `/mark`), so each
+  line shows its own result and has its own Retry. A step that lacks a permission FAILS WITH THE REASON and
+  the by-hand fallback. Never fake a step.
+- **asana:** `instantiateProject` on "MD - Template 2026 v2", the picked team + Cole added (the client is
+  invited later, by the welcome email), Website filled, the Marketing Plan task deleted, the old Onboarding
+  subtasks replaced by the 5 things a person still does.
+- **onboard:** runs `onboardAsanaTick` now, so the brand lives under the pending id `asana_<project>` until its
+  Meta account is added. `research.js context()` accepts a pending id, so the website pre-fill works before Meta.
+- **drive:** creates the client folder (Agreements + From the client, see "Drive has jobs" below) beside
+  "# Client Template Folder", as Cole. Uses the `drive` delegation scope.
+- **slack:** two PRIVATE channels, `<slug>` and `<slug>-internal`, only the picked team invited. Slack Connect
+  invite (`conversations.inviteShared`) is attempted; on 2026-10-02 Slack answered `not_allowed_token_type`, so
+  the note tells Cole to invite the client from the channel. Channel ids land on `accounts.slack_channel` /
+  `brief_channel` when the pending brand is adopted (`adoptNewClient` in asana-brand.js), never over a set one.
+- **email:** the welcome email is sent from Cole's Gmail ONLY from the Send button with the text on screen
+  (`approved: true`). Needs the `gmail.send` delegation scope; until then Copy.
+- **Team roster:** `ROSTER` in newclient.js (Asana emails; Noma and Ravo are on personal addresses), or the
+  setting `newClientTeam`. Slack ids fall back to a first-name match.
+- **Hourly:** `newClientTick` posts in the internal channel when the onboarding form is sent.
+- **NOT built:** auto research on submit (Cole chose a button for now). Everything else from the first list was
+  built later the same week (sections below).
+- **Form (questions.js v3, same day):** Access is step 2 ("Access and content") and carries `content_link` +
+  `content_shared` (the client shares their own library; uploading into ours is the fallback). The teammates
+  list is gone (`approver` instead; they add people in Slack). New: `ad_spend`, `success_90`, `tried_failed`,
+  `key_dates`. Low-value questions moved to a last optional step `extras`.
+- Tested 2026-10-02 against the real services with "ZZ Locus Test": asana, onboard, slack, summary, pre-fill
+  ($0.58) all ran; drive failed on the scope as designed. The email Send and the Ledger write were not exercised.
+
+### 2026-10-02 (later): Stripe invoice-then-autopay, and the agreement signed in-app (no DocuSign)
+
+- **Stripe** (`newclient.js`, step `stripe`, never automatic: the Send the invoice button + confirm). One
+  product "Mobius Digital retainer" (`settings.stripeProduct`), a per-client monthly price via `price_data`
+  (subscriptions reject `product_data`; the product must exist), subscription `collection_method send_invoice`,
+  7 days, `save_default_payment_method on_subscription`; the first invoice is FINALIZED then SENT (a draft
+  cannot be sent). `/stripe/webhook` (public, above the admin gate, Stripe-Signature HMAC, 5 min window) on
+  `invoice.paid` flips the subscription to `charge_automatically` and posts in the internal channel; the
+  endpoint is created via the API on first use, secret in `settings.stripeWebhook`. Removing a run cancels an
+  UNPAID subscription and voids its invoice. Secret `STRIPE_SECRET_KEY` (sk_live): the first paste through
+  PowerShell stored a lone Ctrl+V byte (code 22), so the key is cleaned to printable ASCII and `/options`
+  reports `stripe_key` (masked) + `stripe_raw` {len, codes} for exactly that diagnosis. Put it with
+  `(Get-Content -Raw key.txt).Trim() | npx.cmd wrangler secret put STRIPE_SECRET_KEY`. Tested live: invoice
+  sent to Cole; the paid webhook flip is NOT yet exercised (Cole chose not to pay the $1; first real client
+  will prove it, the screen's "Check if paid" refreshes from Stripe either way).
+- **Agreement** (`account-health/worker/src/contract.js`, table `p_contract` keyed by the onboarding token,
+  page `onboard/sign.html?t=`). Text = the "Mobius Digital Services Agreement - Brand" doc with blanks from
+  the New client form (`contractDefaults`); Cole edits client_name / start_date / term / payment on the setup
+  screen (Preview = `/api/new-client/contract-preview`), "Send for signature" (step `contract`, approved)
+  freezes the HTML, stores a SHA-256 of its text, records Cole's signature (name, time, IP) and emails the
+  client the link from his Gmail. Client: full name (2+ words) + consent tick -> `POST /api/sign/:token`
+  (public) records name, email, time, IP, UA, re-checks the hash, emails both sides a copy, and ticks
+  `st_agreement` in their form (which links to the page via `links.sign` from the profit worker's GET
+  /api/onboard). Signed text can never change (send refuses on a signed row; sign refuses twice). Section 9
+  (electronic signatures) was added to the doc's wording. The page prints to PDF. Drive scope
+  (`auth/drive`) and `gmail.send` were added to the Mobius Tools delegation on 2026-10-02 and the Gmail API
+  enabled on the Cloud project; both tested live.
+- **AI contract editor (same day):** "Anything different for this client?" on the setup screen -> `POST
+  /api/new-client/contract-ai {id, vars, instruction}` -> `aiEdit()` in contract.js on `claude-haiku-4-5-20251001`
+  (about a cent): changes only what the instruction says, returns the whole `<article>`; stored as `vars.html`, which
+  `sendContract` and the preview use as is (fields then no longer apply; "Back to the standard text" drops it).
+- **Frame:** Cole's Frame is V4 (next.frame.io), so `frame.js` uses Adobe IMS OAuth (Connect Frame on the setup
+  screen, `/frame/callback`). Step `frame` makes one project per client and writes Asana Client Resources > Frame.
+  V4 has no collaborator route: the team is added in Frame by hand. Tested live on both first clients.
+  **Layout since the 2026-10-03 cleanup: NO PODS.** One project per current client (Ad Concepts + Clips/B-Roll,
+  made by the step), former clients are folders in "Past Clients", plus "MD - Internal" and "# Cole Organic".
+  Admin routes in frame.js: `/api/frame/tree?depth=`, `access`, `audit`, `share`, `children`, `move`, `rename`,
+  `folder`, `project`, `project-update`, `project-user`. Frame allows 10 moves a minute.
+  **NEVER DELETE A FRAME PROJECT OR FOLDER THAT HELD WORK, EVEN EMPTY.** Review links belong to the project:
+  deleting the emptied pods on 2026-10-03 killed ~110 live review links (Frame has no restore API; only Frame
+  support can restore a project). The delete routes were removed. Ahsan and Noma are PROJECT members, not
+  workspace members: the New client step puts the picked team on each new project (`project-user`).
+- Setup screen also has "Remove this client" (voids an unpaid invoice, cancels its subscription, forgets the row).
+- **2026-10-03 round (Cole's 11 points):** roles strategist / buyer / editor (Ravo) / designer (William), each a
+  comma list (multi-select chips); the pickable team lives in `settings.newClientTeam` (Locus: "Edit the team list",
+  `POST /api/new-client/team`). Step redraws only touch `#ncStepList`, so typing or voice-typing in the AI / agreement
+  / email boxes is never wiped. New Biz (`C0BV9L8NV33`, #mobius-newbiz) gets name, site, start date, team as @mentions
+  and the agreement type: **never money** (Cole). The internal summary no longer carries the client's private link.
+  **Client welcome** is posted AS COLE (`SLACK_USER_TOKEN`), pinned, only once a member from outside our workspace is
+  in the client channel (hourly `newClientTick` -> `welcomeOnJoin`; detection via `users.info` team_id / is_stranger,
+  NOT yet seen live), with the onboarding, Asana, Drive and Calendly links and @mentions. `/api/new-client/unwelcome`
+  retracts one. Client pages (form, sign, voice) use the Mobius blue palette and `brand/` logos (light/white).
+  Default term is month to month. Frame link + the client's content link (on submit) fill Asana Client Resources.
+- **Amendments:** a signed agreement shows "Amend the agreement": Haiku drafts Amendment No. n from plain words
+  (`aiAmend`, asks QUESTION: when facts are missing), Preview, Send for signature (`sendAmendment`). Stored as a
+  p_contract row with token `<token>a<n>` (still hex, so sign.html serves it unchanged; letterhead says the number).
+  The signed original never changes. Stripe is NOT changed by an amendment: a price change must be made in Stripe.
+- **Drive has jobs (Cole, 2026-10-03: "a drive in case, but with a use case"; Frame stays review-only).**
+  Per client: `Agreements` (Cole + the client as viewer, NEVER the team; `saveSignedToDrive` in contract.js files
+  every signed agreement and amendment there as a PDF the moment it is signed), `From the client` (client and team
+  can add; the form's drop link and `profile.drive` point here). `Final ads` was dropped. Nobody but Cole is on the
+  root, so never link `drive_url` to anyone else. Asana Client
+  Resources > Google Drive carries both client links. `stepDrive` is idempotent and also took back the root
+  share the first two clients (Ice & Gold, Yak Sports) had. Folder ids are on `steps.drive.folders`.
+- Client welcome: `member_joined_channel` (needs that bot event subscribed in the Slack app) -> IDEA_Q job
+  `{kind:'welcome'}` with `delaySeconds: 60` -> `welcomeOnJoinByChannel`; the hourly tick stays as backup.
+  `/slack/owns` answers true for a new client's channel until its welcome is posted, so the router forwards it.
+- **Your ads page (2026-10-03):** `tools.go-mobius-digital.com/yourads/?t=<the brand's report token>` (the same
+  stable token as the report archive). Every ad with spend in the last ~13 months, newest first, "Running now" when
+  it spent in the last 3 days, filters All / Running now / Videos / Images, tap to play or view, Download. No money.
+  Account-health routes: `GET /api/your-ads/:token` (list; ad names cleaned: test numbers, format tags, creator file
+  names), `/api/your-ads/:token/thumb?ad=` (cached creative image, `&dl=1` downloads), `/api/ad-video?yours=` (plays
+  only that brand's ads), `GET /api/your-ads-link?act=` (admin). Locus: Meta > Creative > "Copy Your ads page link".
+  The client's Slack welcome includes it once the brand's ad account is connected. Partnership (creator page) ads
+  cannot give us the file: they show Meta's own preview with "ask us for the file" (Grunk: 21 of 40 videos).
+  Drive: the "Final ads" folder was dropped the same day; finals live in Frame and on this page.
+- **Hands-off additions (2026-10-03, later):** `autoConnectMeta` (worker.js, hourly + `POST /api/new-client/meta-now`)
+  switches a pending new client's ad account on when exactly one untracked account name matches (normalised:
+  "Ice and Gold New" = Ice & Gold), after a readable-insights check; sets name, both Slack channels, tw_shop from the
+  form's store; posts to Cole in the internal channel (or tells him to assign the Mobius Tools system user when Meta
+  refuses). Ice & Gold connected this way on 2026-10-03. `shopifyHeadsUp` (newclient.js) posts the store address +
+  request code the moment the form has it (Shopify has no API for collaborator requests) and fills tw_shop.
+  The form's "Pay the first invoice" and "Say hi in Slack" boxes tick themselves (`tickForm`); the internal channel
+  hears when an agreement or amendment is signed (`signedPing`). The Asana checklist dropped the steps Locus does.
+- **2026-10-03, evening round:** welcome email FIRST: the client's Asana invite and Drive shares wait for it
+  (`stepInvite`, run by `stepEmail` after the send); the setup screen numbers Welcome 1, Invoice 2, Agreement 3.
+  All client email goes through `mail.js` `sendMail` (HTML + Cole's branded signature with
+  `brand/mobius-logo-email.png`; the Gmail API never adds Gmail's own signature). Gmail copy-paste page:
+  `brand/signature.html`. The welcome lists every link (onboarding, Calendly, Asana, From the client, Slack).
+  Signed agreements are kept in Drive as **PDF** (doc made, exported, doc deleted). Shopify heads-up is a Block Kit
+  card: store + code, "Open Shopify Partners", and **"I sent the request"** (`nc_shopify_sent`) which tells the client
+  to approve (in their Slack channel as Cole if they joined, else by email). Slack router forwards `nc_*` to Locus.
+  Meta fallback: a never-seen ad account that matches no waiting client is put to Cole in #mobius-newbiz with
+  "Yes, it is X's" buttons (`nc_meta_yes` -> `connectMetaFor`); the setup screen has a picker (`/api/new-client/
+  meta-accounts`, `/connect-meta`). Yak Sports = "Hockeyak" (connected by hand 2026-10-03). Form: `auto: true` boxes
+  (invoice, agreement, Slack) say they tick themselves and catch up on tab focus / every 20s; `links.invoice` = the
+  Stripe page; "Message the team" -> `POST /api/onboard-message` (public by token, 30s limit) posts to the internal
+  channel tagging Cole. `POST /api/new-client/meta-now` runs the whole hourly new-client pass on demand.
+- **2026-10-03, last round:** the welcome email no longer mentions Drive (clients read it as "my assets go there");
+  on form submit the voice interview link goes to the client in their Slack channel as Cole (or email), once
+  (`steps.voice_sent`); 8 least-used offer questions moved to the optional `extras` step. **Calendly**
+  (`calendly.js`): with `CALENDLY_TOKEN` set, the hourly pass makes a user-scope webhook (invitee.created /
+  canceled -> `/calendly/webhook`, HMAC with a key Locus picks, `settings.calendlyHook`); only the
+  `strategy-session` event type counts; a booking by a new client's contact email ticks `st_call` (now `auto`),
+  writes Asana Call Link, shows on the setup screen and pings the internal channel tagging the strategist.
+  Nudges: 3 days unpaid / unsigned, 5 days form not sent -> one internal message with "Send a reminder"
+  (`nc_remind`: Stripe re-send, or Gmail). Self-ticking boxes are locked to the client.
+
+### 2026-10-03 audit (independent review + fixes)
+
+- **`steps_json` is written one key at a time (`setStep`, json_set).** The screen, the hourly pass and the Stripe /
+  Calendly / Slack-join paths all write it; a whole-object write from a stale copy undid other writers' keys. Never
+  go back to `patchRun(... steps_json: JSON.stringify(...))`. worker.js `connectMetaFor` does the same.
+- **A failed step never wipes an earlier success.** `/step` keeps a done step done (error as a note) and keeps a
+  failed step's ids. Stripe saves customer/subscription/invoice the moment the subscription exists, and a retry
+  finishes THAT subscription (finalize + send a draft) instead of making a second one.
+- **`markPaid` is shared by the webhook and Check if paid:** flips to charge_automatically (payment method from the
+  subscription, else the invoice's payment intent), ticks the form, tells the team once; retries the flip until
+  `stripe.autopay`. The webhook reads the subscription from `invoice.subscription` OR
+  `invoice.parent.subscription_details.subscription` (newer API versions), else asks Stripe.
+- **The Slack welcome is CLAIMED with a conditional UPDATE before posting** (join event + hourly pass could both
+  post); a failed post releases the claim. Its links use the From the client folder (nobody can open the root),
+  and What happens next is a FIXED template with "if you have not already" (Cole: a pinned message must never
+  depend on state at the minute it posted).
+- Remove asks Stripe before cancelling (a paid invoice is never cancelled; Stripe unreachable = nothing removed).
+- Amendment base token = `vars.of`, never a regex on the token (hex tokens can end in a+digits). Signing checks
+  `meta.changes`, so a double press sends one set of copies. Calendly ignores the cancel half of a reschedule.
+- Meta auto-connect: exact normalised name first, then whole-word containment; accounts we ever synced are excluded;
+  discovery runs only for clients made in the last 45 days.
+- Form "Message the team": text escaped for Slack; with no internal channel it goes to Cole's DM, never
+  #mobius-newbiz.
+- Not changed on purpose: the Your ads page shares the report-archive token (that token only opens the client's
+  own SENT reports, which they already received). The Shopify heads-up is hourly, not instant (copy says so).
+
+### 2026-10-04: ONE PLACE FOR GOALS + the Monday test view. Read before touching targets.
+
+- Cole: "I don't want the same KPI stuff in different places." **Goal CPA and goal ROAS live only on
+  `accounts.target_cpa / target_roas`, edited only in Settings → brand → Goals** (`loadGoals` in
+  index.html). The Creative browser "Goal CPA" and Brand info "Test rules" are read-only links to it
+  (`openGoals(act)`). The AI Strategist may still PUT the same account column (same value, not a copy).
+- The brand `rules` doc (p_br_doc '' 'rules') holds TEST settings only: `TEST_KEYS` in
+  profit/worker/src/brand.js = judge_spend (0 = 3x goal), judge_days, yellow_pct (30), min_track,
+  min_spend (20), min_days (7), min_cap_pct (25). Light route `GET/PUT /api/brand/rules`.
+- The old doc copy of target_cpa wins until account-health `unifyGoals` (hourly cron) moves it onto
+  the account and strips it; log in `settings.goalUnify`. rulesFor (profit) and rulesOf
+  (asana-brand.js) must stay identical. The 1.3 yellow multiplier is now `1 + yellow_pct/100`
+  everywhere (suggest, judge, Asana ✅/⚠️/❌, cpaTone).
+- Test library rows show `Day N of judge_days` (from the first day of spend, same clock as judging)
+  and, when min_track is on, `Min $X on` / `Min $X on, take off` read LIVE from Meta via
+  account-health `POST /api/brand-asana/mins` (ad sets matched by the leading number, numOf), plus a
+  per-campaign line: minimums vs min_cap_pct of the campaign budget, with the budget that would fit.
+- **Monday test calls (2026-10-04, "stupid simple for the media buyer").** account-health `mondayTick`
+  (hourly cron, acts Mondays 8am Central, once per brand per week, `settings.mondayCalls:<act>`)
+  posts ONE Slack message to the brand's internal channel: live tests sorted Pause / Keep / Another
+  week / Not ready (same `judge` as the Asana scorecards), "take the $X minimum off" on lines past
+  min_days, minimum-cap warning, and one Ads Manager link selecting exactly the ad sets to change.
+  Per-brand switch `rules.monday_post` in Settings → Goals, with "Preview this week's message"
+  (`POST /api/brand-asana/monday`, `{post:true}` sends now). The media buyer needs nothing else.
+- **Do it button (2026-10-04).** When the Meta token has MANAGE/ADVERTISE on the account (`user_tasks`),
+  the Monday message carries one button (`tests_do`) that makes exactly the listed changes: pause the
+  loser ad sets (or ads when no ad set matched) and set `daily_min_spend_target=0` on keeps past their
+  minimum days. The plan is frozen at post time in `settings.mondayPlan:<act>:<date>`; a second press
+  says who already did it. Read-only accounts get a line saying to grant "Manage campaigns" instead.
+- **Two lines (2026-10-04, Cole).** Winner = cost per sale <= goal AND 2+ sales (make variations, minimum
+  off). Keep = <= the account average AND 2+ sales (leave running, minimum off). Pause = above the average or
+  under 2 sales once judged. Exception kept from 2026-09-24: 2+ soft metrics in the top third and CPA <= 2x
+  goal = "Another week". Account average = trailing 30-day Meta spend / Triple Whale last-click orders,
+  stored as rules.acct_avg_cpa + acct_avg_month by account-health `refreshAccountAvg` (hourly; recomputes
+  when the month changes, i.e. on the 1st). The yellow zone setting is only the fallback until the first
+  average exists. Shown in the Monday message header and Settings → Goals.
+
+## 2026-10-04: Tests is its own tab, and the rail is grouped by WHEN you use it
+
+- Cole: "this needs to be stupid simple", "hundreds in review". Measured: 284 tests sat in Asana
+  "Analyze Results" (oldest May 2025) and read as live; only 115 of 1,241 carried a verdict.
+- **Tests tab** (`show('tests')` -> `renderTests` -> `BrandTab.render({mode:'tests'})`, same brand.js
+  closure). Three boxes in the order you act: **Make a call**, **Running**, **What we learned**
+  (angle chips, 30 at a time). Search swaps the boxes for one flat list. All brands = a table from
+  `GET /api/brand/tests-overview`. The Brand tab keeps only Research and "Voice and brand info".
+- **The worker decides the box: `boxOf()` in worker/src/brand.js** (payload field `box`, plus
+  `auto_done`). A test whose ads last spent more than `STALE_DAYS` (14) ago is DONE whatever its
+  Asana column says; never-spent live tests get 30 days from `created_at` (the hourly sync bumps
+  `updated_at`, so it dates nothing). `needs_call` = `box === 'call'`. Finished tests with no call
+  show Locus's read as a dashed "Locus: winner/loser/mixed" pill, never as the buyer's call.
+  Nothing is written to Asana or D1 by this; the Asana tasks stay where they are until Cole decides.
+- **Rail groups:** Every day (Overview, Daily Brief, Tests, Meta) / Every week (Reports, Profit) /
+  Making ads (Studio, Brand) / Monthly and setup (Plan, Settings). `SECTIONS` in index.html nests
+  pages under a parent: Profit > Customers, Brand > Creator link (amb), Settings > Data health,
+  Costs. ONE `#subtabs` nav is moved under the open parent by `show()`; Meta still fills its own.
+  Old tab ids all still route (deep links, Slack buttons).
+- **Meta shows three sub-tabs in the rail** (Overview, Creative, Change Log). Today and Averages
+  ("Last 7 vs 30 days") open from buttons on Meta Overview (`[data-msub]`, delegated in meta.js)
+  and light Overview while open.
+- Phone bar: Overview, Brief, Tests, Meta, More. Proposal + SOP artifact:
+  https://claude.ai/artifact/8P1n7XmyrCZA7g2rQy229e
+- **Later 2026-10-04 (Cole: "the Meta tab is everything Meta, and attribution is always Triple Whale"):**
+  Tests is a Meta SUB-TAB, not a top-level tab (`PARENT_OF.tests = 'meta'`, rail list `META_RAIL`
+  drawn by show(): Overview, Tests, Creative, Change Log). The Meta tab's purchases, revenue, ROAS
+  and CPA now come from Triple Whale `tw_ad_attr` lastPlatformClick (account-health `twMetaDaily`,
+  `attributeRows`, `agg(rows, true)`); spend and delivery stay Meta's. The old "Meta-reported,
+  matches Ads Manager" rule at the top of this file is RETIRED for attribution. The Creative
+  browser's "Meta's own attribution" option and "Use Meta's figures instead" button are gone.
+  A day TW has not synced yet makes totals null but CPA/ROAS are taken over the synced days.
+- **Later still 2026-10-04: TWO JOBS, TWO SCREENS (Cole approved the mock
+  https://claude.ai/artifact/LAF9qCPR4zkfFQJWgg8pLK).** Media buyer = **Meta → Test calls**
+  (brand.js mode 'tests'): only Make a call + Running, no search, no learned list. Strategist =
+  **Making ads → Angles** (mode 'angles', `renderAngles`): "Have we tested this?" (account-health
+  `POST /api/brand-asana/tested` {idea}: model checks the idea against every angle AND past test
+  titles, returns verdict tested/close/new + angle + test numbers + phrasings that already ran),
+  then the angle scoreboard (tests, won of judged, best CPA, last tested, a "what to do" label:
+  Proven / Mixed / Not judged / Dead / Untested idea / Retired), then an angle's page = concepts,
+  each with its tests in order (First version, Variation: hook...). "Won" = the buyer's verdict,
+  else Locus's read of a FINISHED test (`outcomeOf`), dashed pill. Proven = won >= 20% of judged.
+- **Concepts were 1:1 with tests** because the tag prompt never listed existing concepts. It now
+  does (EXISTING CONCEPTS block in tagPass), and `POST /api/brand-asana/tidy-concepts` groups
+  same-idea concepts inside one angle (link on the Angles page).
+
+## 2026-10-04 (night): every page says who it is for; the rail filters by role; in-app guide
+
+- Cole: "my team is not going to know what each one of these tabs do." `TAB_WHO` (index.html) maps
+  each tab to everyone / buyer / strategist / owner. `crumbFor()` appends a "For the media buyer"
+  chip; brand.js, studio.js, amb.js and meta.js read it through `window.crumbFor` / `window.whoChip`
+  so EVERY page carries the same crumb + who chip. A new tab must be added to TAB_WHO and TAB_CRUMB.
+- Rail: "Show tabs for" (Everyone / Buyer / Strategist), stored in `pf_role`, `applyRole()` hides the
+  other tabs (the open tab always stays). `ROLE_TABS` is the list per role.
+- **How to use Locus** (`show('guide')`, button in the rail foot, `GUIDE` array): the SOP by role,
+  steps in order, each with an Open button (`data-go="tab"` or `"meta:sub"`). Keep GUIDE in step with
+  the rail whenever a tab moves.
+- Header buttons are words now (Tour, Metrics, Help), not icons. The fixed-window note above the
+  crumb (PB_FIXED) is no longer drawn.
+- Angles/Test calls pills use the call already POSTED in Asana (`asana_result`) before Locus's
+  recomputed read, so a pill never contradicts its learning. account-health
+  `POST /api/brand-asana/results {rejudge:true, quiet:true}` re-posts only tests whose posted call no
+  longer matches the numbers (the goal CPA changed after the call) and overwrites the learning.
+
+## 2026-10-04 (late): page-by-page hierarchy pass
+
+- **Overview** opens with a **Today** card: per role, counts that open the screen (briefs to send
+  from `/api/briefs`, tests needing a call + being made from `/api/brand/tests-overview`, reports
+  waiting from `/api/reports`, research drafts from `/api/brand/overview`). Internal-only brands never
+  count. Loaded after paint, cached 60s, honours `pf_role`. The Strategist card is one line when empty.
+- **Settings is ONE menu**: `settings` left SECTIONS; Data health and Costs are entries in the
+  Settings page list (`SET_PAGES`), `PARENT_OF.health/costs = 'settings'`, each has "← Settings".
+  (Supersedes the earlier note that they nest in the rail.)
+- **Daily Brief** order: date + quiet refresh, ONE status line (send state + data health, `.st-line`),
+  the brief with What we did and one primary Send, then "The numbers behind it", then closed
+  disclosures (Past briefs, The plan). All-brands view: status pill + one button per row.
+- **Reports**: status line with one primary Send, latest 4 report chips + "Older reports", sticky
+  "Jump to" row inside `reportBodyHTML` (so the client archive has it too; `wireReportJump()`),
+  config in a closed disclosure.
+- **Meta Overview, one brand**: verdict sentence, four tiles (spend today from `/api/pacing`, month,
+  CPA and ROAS 7d from `/api/overview`), today's pace chart and the 7 vs 30 cards inline, then
+  "Where to go next". All brands keeps the table.
+- **Brand Research**: At a glance tiles, sections as questions in strategist order (Who buys,
+  What do they say, angle ideas, market, mechanism, competitors, website), collapsed by default,
+  staff actions inside "Research tools" or quiet Edit links. 152 buttons became about 19.
+
+## 2026-10-05: second hierarchy pass (Plan, Profit, Customers, Change Log, Studio)
+
+- **Plan opens on the month IN PROGRESS when it has no plan of its own** (`planned` false), else next
+  month (supersedes "Plan defaults to NEXT month"). An unplanned month seeds at hold flat on the basis
+  month, never from `goals_json.default` (that default is still overwritten on every save and merged
+  under every month by the API: the $99,967 "Unrealistic" October was the last plan saved for another
+  month). Save sits with the three numbers; explanations are closed disclosures. Titles use a colon,
+  never an em dash ("Plan: Lucky Golf").
+- **Customers** leads with "Does a new customer pay for themselves?"; sections are questions.
+- **Change Log** ("What changed on the account"): "Changes that matter" (budget, new_campaign,
+  campaign_paused, campaign_relaunched, bid_strategy, targeting, new_creative, new_adset, manual)
+  grouped by day, then "Everything else (N)" closed. "Add why" is one dialog; ✓ is "Use this reason",
+  ✗ is "Hide". Same-object same-minute rows fold. Its CSS ships inside meta.js.
+- **Studio**: connections live behind one "Connections" button (Atria included; `#stAtria` is gone
+  from the top bar); five steps in words; one primary button per screen; Studio's brief-line class is
+  `.st-bl` because `.st-line` is the Daily Brief status line in index.html.
+- **2026-10-05 fixes:** an unplanned month now inherits from the latest PRIOR month with its own plan
+  (`inheritedGoals()` in both workers' `goalsFor`); `goals_json.default` is only the fallback when no
+  dated month exists. Tours rewritten for the new layouts (selectors `.ovd-cols`, `.st-line`,
+  `#bfPreview`, `#bfPost`, `.rp-jump`, `.pl-main`, `#plVerdictCard`, `#plSave`, `#hdPeriod`). Studio's
+  Archive this batch asks first. `/api/overview` returns the brand's `yellow_pct` for the Meta
+  Overview CPA tile. The Change Log's bare "confirm" tick was dropped on purpose (no homework buttons).
+
+## 2026-10-05: Customers = LTV:CAC and the journey; Brand = Client answers / Research / Voice; threads; AOV
+
+Cole's audit: "what's the point of the money tab and the customers tab", "I'm surprised the app
+doesn't have AOV", "the Brand tab is confusing, why is the creator link under Brand, where are
+the onboarding answers", "the Strategist couldn't answer what's the AOV", "I have to tag it in
+every thread reply", and Yak Sports asked to change the agreement before signing.
+
+- **tw_orders (account-health, shared D1).** One row per order from the Triple Whale journeys
+  response the attribution sync already pulls: `order_id, customer_id, date, total, currency,
+  products_json (add-to-cart product ids, oldest first), source (twPlatform of the
+  lastPlatformClick touch, else the raw source, else 'organic')`. `storeTwOrders` runs inside
+  `syncTwAttribution` (no extra API call); `backfillTwOrders` walks back 14 days a night per
+  brand to `TW_ORDERS_HISTORY_DAYS` (400) via settings `twOrdersCursor:<act>` /
+  `twOrdersDone:<act>`; `POST /api/tw-orders-backfill?act=&slices=N` (admin) runs slices now.
+  The response's `earliestDate` is the oldest order ON THAT PAGE, never a history limit: do not
+  stop the walk on it. `GET /api/tw-probe?act=` shows one order's fields. The journeys endpoint
+  carries NO line items: products are the cart's add-to-cart events. Shopify stays the path to
+  exact receipts; `p_shopify` is empty on 2026-10-05 (no store has the app installed).
+- **Customers (profit worker `customerJourney`, rides on `/api/customers` as `journey`;
+  `&journey=0` skips it).** Customers followed from their first order: LTV at 30/60/90/180/365
+  days (only customers old enough for the horizon), repeat rate, median days to the second
+  order, first vs repeat AOV, cohorts by first-order month with that month's CAC
+  (blendedAds / newCustomersOrders) and LTV:CAC, first product -> next product (titles from
+  the store's public products.json, cached 24h in settings `productTitles:<act>`;
+  retired products are named by hand in settings `productNames:<act>` = {"id":"name"}), order
+  sources grouped paid / email / own (`srcGroup`), and the window by people. Customers first
+  seen in the first 60 days of history are `uncertain` and left out of averages. Guest orders
+  (no customer_id) count as orders only. The page (`renderCustomers`) leads with "Is a customer
+  worth more than they cost?" and the LTV:CAC verdict (3x / 1.5x lines), then tiles, curve,
+  cohort table, journey, sources. The old Shopify `p_cohorts` card is gone from the page
+  (route kept). Lucky, measured: LTV90 $165 vs first order $154, 9% ever repeat, 1.7x in 90d.
+- **Orders and AOV** on P&L tiles, from `dayEconomics` (`orders`, `new_orders`, `email_rev`)
+  and `totals` (`orders, aov, new_aov, cac, email_rev, email_share`). ONE definition: AOV =
+  revenue / Triple Whale totalOrders, the same as Reports and the Strategist's `store` view.
+  Labels matched: "Revenue" and "Ad spend" on Overview, P&L and the Daily Brief; Overview's
+  "New customer MER" is "aMER". Profit's sub-tabs are **P&L** and **Customers**.
+- **Brand tab** (brand.js): views **Client answers** (call sheet `callSheet()` built from the
+  onboarding form by `CALL_SHEET` groups, access ticks, "ask them on the call" = not-sure and
+  blank `IMPORTANT` fields; then every answer step by step; then the voice interview
+  transcript), **Research** (unchanged), **Voice** (how the voice gets built strip, brand
+  voice, How we write, copy desk). `glanceStrip()` above all three replaces the profile card;
+  test rules are only a link to Settings > Goals. Stored `br_view` values info/library map to
+  the new names. **Creator link is its own rail tab** under Making ads (`SECTIONS.brand`
+  removed; `amb` in ROLE_TABS.strategist).
+- **Strategist threads (account-health `handleSlackEvent`).** A plain reply in a thread is
+  answered without a tag when the thread is OPEN: `askThread:<channel>:<ts>` = 1, set when
+  the Strategist answers a mention there or when the thread's root message is its own
+  (username Strategist); a thread checked and not its own is marked 0 (one Slack read, once).
+  A mention's plain-message twin counts as a mention (`<@bot>` in the text). The ideas bot
+  still needs a tag. The open-thread check runs BEFORE the claim so the plain copy cannot
+  swallow its app_mention twin. **Slack read methods go form-encoded** (`slackApi`):
+  conversations.replies refused the JSON body, so `threadTranscript` had silently returned
+  nothing. Strategist config: owner Cole, 30 turns / 2500 / 24000 chars, `strongWhen` adds
+  why|aov|ltv|cac|payback|cohort|retention|repeat|journey|scale|cut|pause. Needs the Slack app
+  subscribed to `message.groups` (the -internal channels are private) and `message.channels`.
+- **Strategist `store` view** (`storePeriod` in worker.js): revenue, orders, AOV, new vs
+  returning (customers and money), CAC, first-order margin, MER, aMER, CM, email share over
+  `days` / `month` / `from`+`to`, `compare: true` for the prior period. RULES define AOV, CAC,
+  LTV, LTV:CAC once.
+- **Agreement before signing** (contract.js / newclient.js): a `sent` row can be re-sent with
+  new text ("Change it before they sign" on the setup screen; starts from the stored html when
+  custom). `vars.version` + `vars.history[{version, sent_at, hash, html, term, payment,
+  custom}]` keep every earlier version; the client gets an "updated agreement" email; the
+  signing page sends `hash` and `POST /api/sign` refuses (409 `updated`) a signature on an
+  older text and reloads the page. `contractState` returns `html`, `version`, `history`
+  (without html). Signed rows are untouched: amendments as before.
+
+### 2026-10-05 (night): read it like a client. Copy desk is its own tab.
+Cole: "formatting issues, spacing issues, a lot of it doesn't make sense, especially Customers;
+why is the copy desk in the brand thing". Fixed by reading every screen at 1280 wide:
+- **Customers copy**: every label is a sentence ("Cost to get a new customer", "Left after costs
+  on that order", "Spent in their first 90 days", "Order again"); the verdict reads "Yes, but
+  not by much: 1.8x over their first 90 days" and explains dollars back per dollar. The bar
+  chart is a four-row table (days after first order / spent so far / ordered again / counted)
+  with one plain sentence under it; the two month tables are one ("Each month's new customers,
+  followed since", with Back per $1). "This window, by people" is gone. Customers is one column
+  (`.cu-two`), so no table scrolls sideways.
+- **Stat strip** (`.rollup`) is a grid of separate dark tiles with a 5px gap, not a wrapping
+  flex bar: seven tiles on P&L had put Contribution margin alone on a full-width second row.
+  `td.tiny` note columns wrap instead of forcing a horizontal scroll.
+- **Copy desk is its own rail tab** under Making ads (`show('copy')` -> `renderCopy` ->
+  `BrandTab.render({mode:'copy'})` -> `paintDesk` in brand.js). Brand > Voice keeps the
+  interview, guide and skill (how the voice was built); the desk is where you WRITE. Call
+  sheet blocks are two columns max and keep their tables inside (`.cs-blk{overflow:hidden}`).
+- Screens that proxy account-health (Daily Brief, Reports, Meta) cannot be audited on the local
+  dev pair (401 on the dev token): audit those on prod.
+
+## 2026-10-05 (night): Season tab, the BFCM plan in Locus. The Q4 Playbook is to be retired.
+
+- **Why.** The standalone Q4 Playbook (`2026-q4-playbook/`, Apps Script + Sheet "Q4 Playbook DB")
+  was a sixth place to look and died: last edit Aug 25, zero checklist items launched, weekend
+  numbers never set, Noma never given access. Cole: "should this be in Locus?" Yes. One tab,
+  under Every week, for everyone. Strategy page: https://claude.ai/artifact/VWugT2XKbjmkcEAeDMVVsu
+- **Files.** `season.js` (own closure, `window.SeasonTab.render/renderShare`, like amb.js),
+  `worker/src/season.js` (template, derived tasks, routes), `worker/migrations/season-001.sql`
+  (tables, also in schema.sql), `worker/migrations/season-seed-2026.sql` (what we knew on
+  2026-10-05; INSERT OR REPLACE, so DO NOT re-run after people edit in Locus).
+- **Tables.** `p_season_phase` (act, season, key, name, start, end, grp nov|bf|dec|late|vday,
+  who, offer, detail, status missing|draft|locked|skip, sort), `p_season_answer` (call sheet:
+  goal, last_year, winning_offer, floor, inventory, cutoffs, returns, gift_cards, approver; setup:
+  shape standard|blacknov|access, strategist, buyer, email_owner, in_season), `p_season_task`
+  (only rows that were ticked, re-dated, renamed, or custom), `p_season_share` (client token).
+- **The template is code, the brand is data.** `templatePhases(shape)` in worker/src/season.js is
+  the season every brand follows (early, access, bf, planb, drop, xmas, gift, boxing, ny, vday,
+  all anchored to BF = 2026-11-27). A stored row overrides a template phase by key; rows with a
+  key not in the template are custom phases (Dartee and Grunk have `cm`, Cyber Monday). Template
+  phases cannot be deleted, only skipped.
+- **Tasks are DERIVED, never typed twice.** `tasksFor()` makes, per non-skipped phase with a start
+  date: Offer locked (-30d, Cole; ticks itself when status = locked), Briefs due (-23d,
+  strategist), Ads built (-9d, strategist), Ads loaded (-4d, buyer), Live (0, buyer; auto-done 3
+  days after), plus phase extras (bf: ops -17d, spend limit + backup card -14d, ladder -10d,
+  emails -7d, site -7d; access: lock test -3d; drop: segment -7d; xmas: countdown -1d). Moving a
+  phase's start date moves all of them. Names come from the brand's answers (strategist, buyer,
+  email_owner), so change the owner there, not per task. Custom tasks: id `c:<hex>`, custom = 1.
+- **Routes** (authed, `handleSeason`): GET /api/season?act=all|<act>; PUT /api/season/phase;
+  DELETE /api/season/phase (custom only); PUT /api/season/answer; PUT /api/season/task (upsert,
+  `done_by` from the session email); DELETE /api/season/task (custom only); POST /api/season-share.
+  Public, before the auth gate: GET /api/season/:token -> phases (not skipped), the three date
+  answers, and tasks whose owner reads "Client". Same contract as the plan link: one brand, nothing
+  internal. Frontend `?season=<token>` renders `SeasonTab.renderShare` with chrome off.
+- **Screens.** All clients: strip (days to BF, offers locked, due this week, overdue), one verdict
+  sentence, Now (This week: overdue first, then by brand, tick to complete; the board: brand x
+  November / Thursday / Black Friday / December, FOUR columns on purpose so it fits 1280 wide with
+  no sideways scroll) or Week by week (every brand, the green box is now). One brand: strip,
+  Still needed (missing/draft phases + missing cutoffs/gift cards/goal), offer cards with Edit,
+  What is due by week with Add a task, the call sheet with Edit, "not running a season" toggle.
+  Top-bar actions: Copy offer sheet (plain text for Slack/Nick), Client link.
+- **Brand state** = is the Black Friday weekend locked (and November not missing). `in_season =
+  'no'` hides a brand from the board (The Golf Sock). Ice & Gold and Yak Sports sit on the board
+  with template phases; Cole switches them off from the brand page if they are out of scope.
+- **2026-10-06: goals, results, the desk, swipe files.** Cole: "anything for KPI goals? anything
+  that marks the day of automatically and tells us to scale?" Added:
+  - **Goals card** (brand page): answer key `goals` = JSON {early, bf, dec, total, be, target,
+    s50, s100, start, cap, note}; `goalsOf()` parses it, falling back to `accounts.target_roas`
+    for the target. The ladder is SEASON-ONLY on purpose (the account's target_roas stays the one
+    place for the everyday goal); the bf:ladder task ticks itself when the four lines exist. Seeded
+    from the 2025 budget sheet in `migrations/season-seed-002.sql`, every note says confirm by Nov 13.
+  - **Results per phase**: `seasonData(env, accounts, {series})` sums the host's `seriesFor` rows
+    (same revenue line as P&L) from the phase start to min(end, yesterday); `GOAL_OF` maps phases
+    to a goal (early -> early; access/bf/planb/cm -> bf; drop/xmas/gift/boxing -> dec). Only on
+    a brand page or with `?results=1`; never today.
+  - **The desk** (`deskSection` in season.js; All clients seg "Desk" + a card on every brand):
+    date chips (today + Nov 26 to 30 + any day with a check-in), three slots (8am, 4pm, 12am
+    Central), `GET /api/season/live?act=` = `twDay` for the brand's local today -> `hoursOf` ->
+    `liveFrom()`: today so far + the trailing 3 hours with data, blended MER. `ladderOf()` grades
+    the 3-hour MER (>= s100 scale 100%, >= s50 scale 50%, >= target hold, >= be pull back, else
+    rework). `PUT /api/season/checkin` upserts p_season_checkin (action, the numbers at the time,
+    the verdict, by, at). The client link shows the action lines, never the numbers or the ladder.
+  - **Swipe files**: `SWIPE` (phase -> Atria board) and `SWIPE_BRAND` (act -> "BFCM / Brands / X")
+    in worker/src/season.js; "Swipe file" on a phase card and "This brand's swipe file" load
+    account-health `GET /api/atria/board?board_id=` (new, in atria.js: `search_library_ads`
+    scope ad_board, 20 ads, links to app.tryatria.com/ad/<id>). Save ads into the board in Atria
+    and they show here. Boards made 2026-10-06 under the existing "BFCM" board: Black Friday
+    weekend, Post-BFCM drop, Order by Christmas, Gift cards, Boxing Day and New Year, Valentine's,
+    plus Brands / Yak Sports and Brands / Ice & Gold. Foreplay is no longer used (Cole).
+  - **Yak Sports and Ice & Gold** got draft phases marked "Proposed by Mobius" (gift-with-purchase
+    and bundles for Yak, list + tiered spend + gift sets for Ice & Gold) and call-sheet answers from
+    the Oct 1 and Oct 2 calls and the catalogs. They are proposals until Cole presents them.
+- **2026-10-06 (later): THE OFFERS COME FIRST.** Cole: "I still don't even see what our offers are."
+  The all-clients page had led with tasks and hidden the deal in clamped board cells. Now the
+  default view is **The offers**: one wide `.se-off` card per brand (name + state + goal + who
+  on the left; Black Friday deal in big type, November and December beside it, a compact season
+  bar underneath), brands with nothing written first; the task list and the status board moved to
+  **This week**; Week by week and Desk unchanged. The brand page leads with the big season bar
+  (`seasonBar(a, today, true)`: greedy lanes so phases never overlap, faded = missing, TODAY and
+  BF marked) and **the offers as a numbered list** (`.se-deal`, Black Friday ringed), then goals
+  + ladder, Still needed, the desk, and the weeks and call sheet as closed `<details>`. The
+  client link uses the same bar and list. `LS_VIEW` is `se_view2` so old saved views do not
+  land people on the task list.
+- **Not built yet:** Asana project per brand from the Lucky BFCM 2026 template read back into an
+  Ads plan; "Use in Studio" from a swipe board; the desk dry run (Nov 14 to 15); retiring
+  2026-q4-playbook (redirect to Locus Season) after the season.
+- **2026-10-06 (night): the real redesign, after "it's a long scroll, swipe files load weird, the bar
+  looks like Canva, I can't hover anything".** season.js v10+.
+  - Brand page order: strip, **the plan in one read** (`planLines()`: one numbered sentence per
+    phase, Black Friday in green, plus the `strategy_note` answer as "Why this offer, and the
+    risk", editable), **The season** (`gantt()`: one row per phase, month grid, TODAY and BLACK
+    FRIDAY markers, solid = locked / striped = draft / dashed outline = missing, the deal written
+    inside or after the bar, `data-tip` hover via one shared `.se-tip` element), then five in-page
+    tabs (`S.btab`, saved in `se_btab`): Offers (Still needed + the numbered `.se-deal` list),
+    Goals and results, Desk, To-do (week boxes, past weeks folded), Call sheet. Nothing below the
+    tabs scrolls forever any more.
+  - All clients: same segments as before; the per-brand card's bar is `miniBar()` (same hover).
+  - **Swipe file is a modal** (`panelModal` + `showSwipe`), never injected at the top of the page.
+    Cards with no preview say the advertiser instead of a grey box. Footer link opens
+    `showFormats()`: the 17 Black Friday ad formats from Cole's TikTok drop (`FORMATS`, 16 named,
+    the 17th never shows on screen), each with a no-discount reading. Also "Ad formats to steal"
+    on the brand Offers tab.
+  - Atria boards were cleaned: the 7 generic ads unsaved; real golf BF references (Stix, Macade,
+    Takomo) moved into "Black Friday weekend", STAX into "BFCM Sign Up".
+  - **Lucky's offer analysis** is seeded as the `strategy_note` answer
+    (`migrations/season-seed-003-lucky-note.sql`, INSERT OR REPLACE, do not re-run after edits):
+    2024 vs 2025 numbers, what sold, competitors, the verdict (the hat alone is the smallest BF
+    offer Lucky has run; Plan B is the real Black Friday offer), and the recommendation (bundle
+    from Friday 8am, a Cyber Monday step-up, giveaway entries as the KPI, $100k weekend goal with
+    the ladder, wedge-only markdown as the last fallback).
+  - `LS_VIEW` is now `se_view3`.
+- **2026-10-06 (later still): Lucky's plan, forecast and build live in the data, not the code.**
+  `migrations/season-seed-004..006` (INSERT OR REPLACE / UPDATE, run once each, never re-run):
+  004 = the first analysis note + goals; 005 = round two (no store lockdown: members-first by
+  private link; goals to the sheet; the `access` phase rewritten); 006 = "everything lands
+  mid-November, build it": new phase key `putters` (Eclipse Black launch Nov 19/20), driver +
+  irons first sale on Thursday/Friday inside the bundle, `planb` = wedge-only 30% fallback,
+  apparel Dec 4, `boxing` locked, `ny` = "New year: the full bag" (draft), goals $400k.
+  The working sheet (deals in the customer's words, per-order money, recalculating season model,
+  lockdown evidence, paid-only MER history) is a claude.ai artifact linked from the note:
+  https://claude.ai/artifact/2KAw7y5U9HJsXpyqkp8V1V. Lesson for any MER quoted anywhere in Locus:
+  Shopify net sales over Meta + Google only; the ledger's whole marketing line (Mobius, Klaviyo,
+  Vibe, affiliates) understates efficiency by about 0.5x.
+- **2026-10-06 (night): ad counts in the task names.** `ADS` in worker/src/season.js (per phase key;
+  `putters` is Lucky's custom launch phase) renames the derived briefs/built rows to "Briefs due:
+  15 ads" / "15 ads built". The Asana BFCM projects for the other six brands were created from the
+  Lucky one with the same counts and the same date rule (briefs -23d, built -9d, loaded -4d); GIDs
+  are in the bfcm-2026 memory. Asana stays the only place production is typed; Locus derives.
+
+## 2026-10-06: real photos in Studio (the ad IS the photo), own photos as the product
+- **A line can carry a photo that IS the ad** (`brief.lines[i].photo`): the image maker keeps it exactly
+  as shot and adds only the words and whatever small change the plan asks for (`basePrompt` in
+  worker/src/studio.js, `spec.base`; sent alone with `input_fidelity: high`; no product score, the card
+  says "Real product photo"). On the batch: "Use as the ad" under a line's inspiration image, × puts it
+  back. Plan rows show the photo and the look field reads "What to add or change on the photo". This is
+  the realism lever Cole asked for: nothing is rendered, so the product and scene are real.
+- **"Add your own photos"** under Product: a shoot not on Shopify yet becomes a product ("Your photos",
+  handle `upload`), drawn from, checked against and fingerprinted like Shopify photos. Products that
+  arrive with photos and no fingerprint (pushed from Slack) are fingerprinted on open (`FP_RUNNING`).
+- **Uploads are shrunk in the browser** (`shrinkImage`, 1568px, JPEG stays JPEG, PNG/WebP -> WebP so a
+  cut-out keeps alpha) and a batch's existing images are shrunk the first time it is planned
+  (`repairRefs`): a 6000px camera photo on a line killed the whole plan on 2026-10-06.
+- Testing chip "Format" = one idea, different layouts. The brief reader and the ideas bot read "N
+  variations of this" as a format test.
+
+## 2026-10-06 (late): Scenarios tab (the lead math and the ROAS math, inside Locus)
+
+- Cole: the Playbook's lead-gen calculator and the public ROAS calculator both belong in Locus,
+  prefilled with the brand's numbers, with saved scenarios, something visual, and a way to "just
+  say" a what-if. `profit/calc.js` (own closure, `window.CalcTab.render`), rail tab **Scenarios**
+  under Monthly and setup (`show('calc')`, for everyone), `worker/src/scenario.js` + table
+  `p_scenario` (`migrations/scenario-001.sql`; `GET/PUT/DELETE /api/scenario`).
+- **Leads** = the Goldilocks question. Columns (up to 4) of spend / cost per lead / % who buy /
+  AOV / margin before ads; outputs leads, orders, revenue, ROAS on the lead spend, contribution,
+  money left after the lead spend, cost per order won, and the two numbers that do not depend
+  on the budget: **pay up to $X a lead for the target ROAS** (cvr x aov / target) and the
+  **breakeven CPL** (cvr x aov x margin). Chart = ROAS vs CPL for the focus column's conversion
+  rate (and half / double), target and breakeven lines, shaded "pay up to" band. "Set as this
+  brand's lead KPI" writes `p_season_answer` key `lead_kpi` (JSON), which the Season brand page
+  shows on Goals and results; the Season Offers tab has a "Lead math" button into the tab.
+- **ROAS** = the public `/roas-calculator` model ported verbatim in spirit (modes spend+ROAS /
+  spend+orders / revenue goal+ROAS; processing, pick-pack-ship, fixed costs, rev share, agency
+  fee toggles; breakeven ROAS on contribution and net, breakeven CPA, waterfall, profit-vs-ROAS
+  curve). The public page stays as the free tool and is linked.
+- **Prefill** from `/api/customers?act&days=90&journey=0` headline (new-customer AOV, returning
+  AOV, margin before ads, CAC) + the account's `target_roas` as the target; "Put these in every
+  column". All clients = no prefill, defaults.
+- **Say it in words:** account-health `POST /api/scenario-parse` {text, kind, context} (admin;
+  Haiku 4.5, about a cent) returns up to 4 scenarios as numbers + one line of reading; the browser
+  fills the columns, nothing is stored until Save. Examples under the box are clickable.
+- `inPlace()` keeps focus on the input being typed in across a repaint (number inputs cannot
+  restore a caret, so they only re-focus).
+
+## Scenarios v2 (2026-10-06 night, calc.js?v=2)
+Cole rejected v1 ("made in Canva", no hover, text over the lines, the bar chart was unreadable, numbers ran over the table). v2 keeps the same math (leadMath / roasMath) and replaces every visual:
+- Hero card: the one answer in IBM Plex Mono (pay-up-to CPL, or what you keep), a zone pill (In the zone / Makes money, misses target / Loses money; Profitable / Near breakeven / Losing money), a plain-English reading, and an even stat grid.
+- Dials: number box + range slider per input with a one-line sublabel; `inPlace()` keeps the dragged slider focused.
+- Compare: scenario cards (max 4) with a zone dot, not a table. Click to dial, rename inline, Save / Remove per card.
+- "Where a lead pays": one strip, green to the target CPL, amber to breakeven, red beyond, every scenario a marker.
+- Curves: hover/touch crosshair + fixed tooltip (`tipShow`), gradient area, target/breakeven lines with tags in the right margin (ROAS tag pinned to its line). `paint()` calls `tipHide()` because a repaint removes the svg without a mouseleave.
+- "Where every dollar goes": stacked bar with a legend of amounts and % of revenue.
+Font: calc.js injects IBM Plex Mono from Google Fonts itself (index.html only loads Instrument). Verified on the local pair at 1280.
+
+## Season seed 011 (Lucky, Cole's answers Oct 6 night) RAN
+Giveaway `early` starts 2026-10-14 ("Four Full Bags" working name); `putters` = announced Nov 9, sold only on Black Friday, list first; `access` has no driver/irons, 24h vs 48h open; `bf` = bundle + ONE hat per order + 400 polos + Eclipse Black first sale; `ny` = The Havoc driver Jan 6/7 locked. Asana (BFCM 2026 Lucky section + Lucky BFCM 2026 project) and the plan sheet artifact (v4) match. Still open for the Nick call Oct 7: Early Bird offer, 24h vs 48h, gift-card structure.
+
+## Scenarios v3 (2026-10-06 later, calc.js?v=3): the audit against /roas-calculator
+Cole asked whether I had really gone through the public calculator before dropping things. Inventory of the public tool: AOV + gross margin sliders; optional processing (% + per transaction), fulfilment per order, fixed monthly, revenue share, ad fee (% of spend AND "applies to" % of spend); three modes; KPI strip; "Where every dollar goes" bar; per-order receipt; "Profit by ROAS" bar chart with tooltip; reset; breakeven formula footnote. v2 had dropped the receipt, the applies-to option, reset and the formula note. v3 brings those back and adds what professional tools do for clarity:
+- "What has to be true" sensitivity grid (leads: cost per lead across x % who buy down, ROAS in the cell and what is left under it; ROAS: ROAS across x margin down, what you keep). Colour depth = size of the win/loss, outlined cell = the dials, hover = the numbers, click = move the dials there.
+- "The receipt": one lead and one order won (leads); the per-order receipt (ROAS).
+- Delta against the first scenario on every compare card.
+- Reset link in the dial card; "How this is calculated" details at the bottom with the formulas.
+- Number boxes are text inputs with commas (fmtIn/parseIn); typing or dragging keeps the dial card (`inPlace` swaps the old #ccDials back in and syncs the twin control), so the caret no longer jumps and sliders drag.
+- Up to 8 scenarios (was 4).
+
+## Season seed 012 (Lucky, implemented recommendations) RAN
+Prize = THE FOURSOME GIVEAWAY ("Every Lucky club. All four of you."), `list` key = Early Bird Nov 1 to 16 "buy any club, get 10 entries" (locked), `gift` = free hat at $100, glove + hat at $200. Asana: BFCM 2026 Lucky section has the Early Bird line (1219238618492931) with the four subtasks; Lucky BFCM 2026 has the website + email tasks; gift card lines renamed. Sheet artifact v5. Open: one day vs 48h early access (Nick, Oct 7).
+
+## Scenarios v4 (2026-10-06 late, calc.js?v=4) + the share page
+- Sliders are custom-drawn (thin track, filled part via `--p`, round thumb); `setP()` keeps the fill in step.
+- Drag-safe repaint: `inPlace()` paints into a detached tree (`TARGET`, `host()`, and `$` resolves against it) and swaps every live block except `#ccDials`, so a range input never leaves the document mid-drag and the caret never moves. If the block count differs it falls back to a full swap.
+- Labels: CPL / CVR everywhere (Cole's words).
+- Share: every saved scenario has "Share link" -> `profit/share.html?s=<id>`, a read-only page (S.ro) with the hero, assumptions card, zone strip, grid, curve, dollar bar, receipt and formula note. Data from `GET /api/scenario/public?id=` (scenario.js, mounted in worker.js BEFORE the auth gate; returns the row + brand name, never the author). Only saved scenarios can be shared, by design.
+- Role chip in the breadcrumb reworded app-wide: "Shows for every role / the media buyer / the strategist / Cole only" (Cole read "For everyone" as a sharing control).
+
+## Season seed 013 (Lucky TBD flags) RAN
+Prize name, Early Bird and gift cards back to proposed/TBD until the Nick call Oct 7; strategy_note says what is decided vs open. Nick doc artifact: https://claude.ai/artifact/DKSH1u9LXUVS1prAVVUeUF
+
+## Scenarios v6 (2026-10-06, last pass): Save / Share at the top
+- Hero carries "Save" and "Share with the client". Both run `saveOnScreen(share)`: name it, PUT (upsert, keeps the id of a loaded scenario so an existing client link shows the new numbers), reload Saved, and for share copy `share.html?s=<id>`. Per-card Save and the Saved list's Share link use the same two helpers.
+- The number box is the input itself (`input.num`, `!important` to beat `main .card input[type=text]` in index.html); the wrapper has no border. That was the "box in a box".
+- Trimmed: the hint strings, the KPI button is a link, the ROAS card's bottom button row is gone, reset has no toast.
+
+## 2026-10-07: Settings > Connections, and the Strategist as one full strategist
+
+- **Connections** (Settings section between Brands and Briefs and Slack): account-health
+  `GET /api/integrations` (`src/integrations.js`, `integrationsReport`) grades every connection
+  ok / warn / bad / off with a note and the fix. Two cards: **Agency-wide (connected once)**: a
+  secret on the account-health worker or Cole signing in from Locus (Meta token, Triple Whale key,
+  Asana + its fields, Slack bot / signing secret / user token, Google service account, Claude,
+  Atria, Frame, Studio image key, Canva, Gemini, downloader, Stripe, Lucky creator app, Google
+  sign-in); **Per brand (set up at onboarding)**: ad account data + sync error, Triple Whale shop +
+  data + attribution + stored orders, Shopify install (`p_shopify`, the install link from
+  `/api/connections`), Asana project + webhook, both Slack channels, Drive folder and Frame project
+  (from `p_newclient`), creator link, onboarding, Google Ads and Klaviyo as seen through Triple
+  Whale (14-day presence). One row per brand with WRAPPING chips (a 12-column pill table scrolled
+  sideways at 1280); a chip opens its note + fix in place. Nothing on the page changes anything.
+  The Strategist has the same report as its `integrations` view.
+- **The Strategist** (account-health `strategist.js`) carries the whole creative framework, the
+  review workflow and the post-Andromeda account doctrine in its playbook, reads the test library,
+  one brief by number, customers (tw_orders), scenarios and the brand brain, and can fill or create
+  Asana briefs, save scenarios (share link), drop Studio batches and hand a media thread to the
+  ideas pipeline. Sources and the open list: `docs/strategist-brain/README.md`.
+- **Shopify post-install report (2026-10-07).** Shopify paused the review (2.1.3) because a
+  non-client store saw only "Connected". `storeViewToken()` mints a token per store in the OAuth
+  callback (`p_store_view`); non-client stores redirect to `profit/?store=<token>`, which calls the
+  PUBLIC `GET /api/store-view?s=` (before the auth gate, token is the auth) and `storeReport()` reads
+  the store live: paid orders last 30 days, revenue, AOV, new vs returning, by day, top products.
+  Client stores still land on `?perf=`. Resubmit text: `docs/shopify-app-review-2026-10-07.md`.
+
+## 2026-10-07 (later): THE HUB, phase 1. Read before touching the rail, Home, Email or the platform screens.
+
+Plan: `docs/locus-hub/plan.md` (Cole approved the rail and said "start and end everything").
+- **Rail by the QUESTION you walk in with**, not by when you look: Home (Overview, Daily Brief),
+  Paid ads (Meta, Google, TikTok), Email & SMS (Klaviyo), Store (Customers; Sales screen to come),
+  Creative (Studio, Brand, Tests and angles, Copy desk, Creator link), Reports (Weekly and monthly,
+  Season, Scenarios), Money & plan (Profit, Plan), and Settings as one row at the bottom
+  (`.grp.solo`). **Only the open group unfolds** (`show()` toggles `.grp.open` on the group that holds
+  the open page; a `button.band[data-grp]` click opens another group to browse). That is the whole
+  clutter rule: 7 headings + one open group fits a 720px rail. `SECTIONS` is empty (Customers is its
+  own page under Store; Meta still fills its own sub-tabs). TAB_CRUMB / TAB_WHO / ROLE_TABS /
+  SCREEN_NAMES / the start tour carry the new names. Phone bar: Overview, Brief, Paid, Email, More.
+- **Compare period** on the date menu (`S.cmp` = prev | yoy | none, `pf_cmp`; `rangeQ()` appends
+  `&cmp=`). `/api/overview` returns per brand `prev` (totals of the compare window), `prev_window`,
+  `series` and `prev_series` (date, sales, spend, orders; 100 points max) and `channels`
+  (`channelsFor` in worker.js: spend per platform from the platform's rows, revenue per platform from
+  `tw_ad_attr` lastPlatformClick grouped by `platform`, Email = Klaviyo placed orders split
+  campaigns / flows, "Everything else" = revenue not credited, floored at 0). `series=0` skips it.
+- **Home** (`renderOverview`): the read (`#ovRead`, filled after paint by account-health
+  `POST /api/read` with the exact facts on screen, cached an hour per facts in `settings` as
+  `read:<hash>`, Sonnet, ~1c; `OVR` caches it in the page; "Ask about this" opens the Strategist with
+  the scope prefilled), the Today card, the money row (`.rollup.hm-row`, 4 x 2: revenue, orders + AOV,
+  ad spend, MER, aMER, new customers, cost per new customer, contribution margin, each with a
+  `deltaPill` against the compare period), `paceCard` (MTD vs plan as a bar), `channelsCard` (stacked
+  share bar + table), `homeChartSVG` (same geometry as `salesSpendSVG` so `wireSalesSpend` works;
+  compare period dashed), and the ranked brand table in the agency view (click = that brand's Home).
+  The three verdict cards are gone; the stripes and the read carry the triage.
+- **Email and SMS** (`renderEmail`): tiles from `window.email_rev / email_share` + the channels'
+  campaigns / flows; all brands = a table; one brand = live Klaviyo (`GET /api/klaviyo?act&what=
+  overview|campaigns` on account-health, admin) or the Connections button when no key.
+- **Google / TikTok** (`renderPlatform(kind)`, `PLATFORMS`): "not connected directly" card with what
+  connecting adds and the Connections button, then what Triple Whale sees (tiles + per-brand table).
+  The Meta four-screen skeleton lands here once a platform is connected.
+- Local check: `tools-static` (:8788) + `profit-worker-dev` (:8799) with the .dev.vars token; the
+  read and Klaviyo answer 401 locally (account-health does not know the dev token), everything else
+  renders. `node --check` on the inline script (extract it first) catches syntax.
+- Not built yet from the plan: saved dashboards (phase 2), the read on every screen, the Store sales
+  screen, role landings, Google / TikTok direct connections (gated on Cole's Google Cloud project +
+  Ads developer token and a TikTok developer app).
+
+### Hub phase 2 (2026-10-07): saved dashboards (Reports > Dashboards)
+- **Table** `p_dashboard` (shared D1; `profit/worker/src/dashboard.js` `DASH_SQL`, also in schema.sql and
+  `migrations/dash-001.sql`, RAN 2026-10-07; both workers also `CREATE TABLE IF NOT EXISTS` on first use).
+  Routes (profit worker, authed): `GET /api/dashboards?act=`, `GET /api/dashboard?id=`, `PUT /api/dashboard`
+  (upsert; `cleanSpec` drops anything outside the vocabulary), `DELETE /api/dashboard?id=`.
+- **The spec** = `{scope: 'all'|act_id, range: yesterday|7|30|90|mtd|lastmonth, compare: prev|yoy|none,
+  blocks: [tiles{metrics} | brands{columns} | channels | daily | email | note{text}]}`; since 2026-10-10 a data block
+  may also carry its own `dates` (see "Per-block dates" further down). Vocabularies
+  `METRICS` / `COLUMNS` in dashboard.js are the words the Strategist is told to use; keep the three copies
+  (dashboard.js, strategist.js `save_dashboard`, index.html `DASH_TILES` / `DASH_COLS`) in step.
+- **The Strategist** (`save_dashboard` action, `dashboards` view) writes the spec from words; Apply inserts
+  the row with `created_by 'strategist'`; the note carries `profit/?open=dash&id=`. Playbook: a dashboard to
+  KEEP = save_dashboard; a one-off page = make_report.
+- **Locus** (`renderDash`, `DS.id` in `pf_dash`): the list (agency-wide + the open brand's) with "Ask the
+  Strategist for one" (opens the chat prefilled); an open dashboard draws every block LIVE from
+  `/api/overview?` + `dashQuery(spec)` (its own range and compare, not the picker), with a schedule select,
+  a channel select (every brand's internal and client channel), Post to Slack now (account-health
+  `POST /api/dashboard-post {id, channel}`), Delete (confirm modal). Deep link `?open=dash&id=`.
+- **Slack** (account-health `dashboardTick`, inside the hourly cron after the new-client jobs, from 8am
+  Central): daily / monday / first, once per Central day (`last_posted`), numbers from `storePeriod` per
+  brand summed by `dashSum`, Block Kit: header, context, tiles as bullets with deltas, the brand table as
+  a code block (4 columns max), email and note; channels and the chart say "open in Locus". `recordRun`
+  logs it under `ran.dashboards`.
+- **Phase 6 (same day): Store > Sales** (`renderStore`): all brands = tiles + a per-store table from
+  `S.accounts` (window + prev); one brand = `/api/client` totals as 8 tiles, new vs returning bar,
+  the hourly card on a single-day window, the day-by-day chart with the compare period, and a
+  "needs the Shopify app" card for products and refunds (`p_shopify` is empty for every brand).
+  **The read is on Home, Email, Google, TikTok and Store** (`mountRead(screen, name, scope, facts)`
+  inserts the card after the page head; `OVR_ALL[screen]` caches an hour in the page). **Role
+  landing**: pressing a role in "Show tabs for" lands on `ROLE_HOME` (buyer = Test calls, strategist =
+  Tests and angles) when the open page is not one of that role's.
+
+## 2026-10-07 (night): LOCUS V2, the graphite hub. Read before touching any screen.
+
+Cole: phase 1 of the hub had "no real substance", looked like Canva, and the rail was blue. Research,
+spec and mocks: `docs/locus-hub/spec-v2.md` (A audit, B architecture, B2 shared patterns, C screens,
+D visual system, E build order), `research-*.md`, `mocks-v2.html` (artifact
+https://claude.ai/artifact/M7EZSeAkxXXWrZE5TcXGZT). Commits f7761ce (data) and d4bc832 (front end).
+- **Visual system** = `profit/v2.css`, scoped to `:root[data-ui="v2"]` (set on `<html>`). Dark is the
+  default, `[data-theme="light"]` the other (switch in the rail foot, `pf_theme`). Tokens only: one
+  accent, good/warn/bad, the validated channel palette (Meta, Google, TikTok, Pinterest, Amazon,
+  Email; dark and light sets in the file). Inter. Legacy screens inherit the tokens; any hard-coded
+  light colour in an old file shows up as a light box in dark (season/calc `.on`, amb prefix were the
+  last ones). Audit with the luminance/contrast script pattern, not screenshots.
+- **Rail is ONE level**: Home, Paid (Meta, Google, TikTok, All channels), Email, Store (Sales,
+  Customers), Money (P&L, Plan), Creative, Reports (Daily Brief, Weekly and monthly, Dashboards,
+  Season, Scenarios); Settings and the theme in the foot. Every `.grp` carries `data-g` (the tour
+  points at it). Platform jobs are a segmented control at the top of the screen (`#v2seg`), never
+  rail sub-tabs: Meta = `META_JOBS` (meta, campaigns, adcreative, tests, changes); `PARENT_OF` maps
+  them to meta. changes / mtoday / mbrowser still render the old meta.js screens via `metaSub()`.
+- **`profit/v2.js`** = `window.V2.render(tab, H, first)`; index.html's `V2R(tab)` passes the host
+  helpers (S, api, apiAH, show, pageHead, rangeQ, ...). Screens: home, meta (overview | campaigns,
+  plus metaAll), creative, platform (google | tiktok), channels, store, email. Shared pieces:
+  `tile()` (label, source chip, value, delta, sparkline, goal bullet; narrow tiles put hints in a
+  tooltip), `delta(cur, prev, lower|'n')` ('n' = neutral, used for spend), `lineChart` (compare
+  period ghosted, shared tooltip, change-log markers, max 12), `stackChart`, bars BESIDE numbers
+  (`.v2ib`, never over them), `panel()` + `drillOrders` / `drillCustomer` (side panel), the read
+  slot (`readSlot` / `fillRead`, account-health `/api/read`).
+- **Data** = `profit/worker/src/hub.js` (`/api/hub/paid|creative|store|email|orders|customer|today`),
+  grouped queries for all brands (subrequest budget). Attribution switch `#hdModel` (S.model,
+  `MODEL_TABS`) = platform or a Triple Whale model; spend and delivery always the platform's.
+  Amazon and Email rows carry `platform_revenue: null` so no fake gap is drawn. The Shopify bridge
+  hides itself on wholesale-heavy brands (gross > 1.6x revenue + discounts, or > 2x revenue).
+- **Dashboards are editable by hand** (`dashEditor(d)` above `renderDash`): Build one by hand on the
+  list, Edit on an open dashboard; name, for, brand, range, compare, blocks in order (tiles with metric
+  chips from `DASH_TILES`, brands with `DASH_COLS`, channels, daily, email, note), up/down/remove,
+  Save = `PUT /api/dashboard`. Same spec the Strategist writes.
+- `meta.js` and index.html `AH_URL` honour `localStorage.pf_ah` on localhost (like brand.js), so the
+  Meta sub-screens can be checked against `ah-worker-dev` (:8798). Brief and Reports still go through
+  the profit worker's proxy and 401 locally: check those on prod.
+- Still on Cole: Google Ads (Cloud project + developer token) and TikTok (developer app) for direct
+  platform data; Shopify app installs for products and refunds on Store.
+
+## 2026-10-08: LOCUS V3 SHELL. Six destinations, page tabs, the ask bar. Read before touching the rail.
+
+Cole: "still clunky, too many tabs", the jobs row showed on every page, the attribution switch was a bare
+Windows select, menus did not close on an outside click, things he expected to hover did not answer, and he could
+not see an ad from Campaigns or Creative. Research: `docs/locus-hub/research-v3.md`.
+- **The rail has SIX items** (`NAV` in index.html): Home (Overview, P&L, Plan, Season, Scenarios), Ads (Meta,
+  Google, TikTok, All channels; Meta adds `META_JOBS` as a second row), Email and SMS (Klaviyo), Store (Sales,
+  Customers), Creative (Tests and angles, Studio, Brand, Copy desk, Creator link), Reports (Daily Brief, Weekly and
+  monthly, Dashboards). Settings and the theme sit in the foot. A rail item opens the page last used there
+  (`NAV_LAST`, `pf_navlast`); every old tab id still routes. `NAV_OF(tab)` is the one place a page's destination is
+  decided. The pages are tabs in `#v2seg` (drawn by `show()`), with real platform marks (`#b-meta`, `#b-google`,
+  `#b-tiktok`, `#b-shopify` from Simple Icons, CC0; `#b-klaviyo` drawn). `.v2seg[hidden]` must stay
+  `display:none`: the old rule overrode the attribute and the Meta jobs showed on every page.
+- **The role filter is gone** ("Show tabs for", the who chips): `applyRole()` is a no-op, `whoChip()` returns ''.
+- **The ask bar** (`#v2ask`, top bar): focus = four questions for the page you are on (`ASK_SUGGEST`, `{b}` = the
+  brand), type = jump to a page or brand, Enter = `AskUI.ask(q)` (new in ask-ui.js: open and send). Ctrl/Cmd+K
+  focuses it; AskUI is initialised with `hotkey:false` so the panel no longer owns the key.
+- **Top-bar menus close through ONE rule** (`closePops` + one document click/Escape listener). The period menu's
+  old per-render listener removed itself on the first click anywhere, so after one stray click it never closed.
+- **Attribution is a menu** (`renderModelMenu`, `MODELS` with a one-line meaning each), same look as the period.
+- **Hover everywhere in v2**: one fixed `#v2gtip`; any `[data-tip]` shows its text, any `[data-spk]` sparkline
+  shows the point under the pointer (tiles, small multiples). Bullets, deltas, the channel share bar, funnel bars,
+  fatigue and cadence bars all carry tips.
+- **Ads in Campaigns and Creative open a preview** (`previewAd`): cover large, Play (the real mp4 via the host's
+  `adVideoUrl`, or Meta's own preview for partnership ads), spend / CPA / ROAS, purchases (opens the orders),
+  hook, hold, CTR, CPM, frequency, the ad copy. Covers come from account-health `/api/ad-creatives`, cached for the
+  session (`THUMBS`).
+- **The Creative calls are a stated rule** (shown on the page): judged after one goal CPA spent and 3 days live;
+  Scale = 2+ purchases at or under goal; Cut = 3x goal spent with no purchase, or 2x spent at a CPA over 1.5x goal;
+  Watch = judged, neither. The old browser (meta.js, `mbrowser`) still uses its own 1.4x rule.
+- **`/api/hub/*` GETs are cached in the page for 5 minutes** (`get()` in v2.js), so Overview and Campaigns (same
+  route) switch instantly; Meta Overview prefetches Creative.
+- **Colours**: nothing may hard-code white text on a theme surface. `.rp-kv` (report tiles), `.chip.on` (the
+  report week picker), `.catpill.part`, `.shp-pill.on` and Scenarios' hero buttons were white on light grey in the
+  light theme; all are tokens now. Scenarios' dollar bar uses the channel palette, never three greys.
+- **Scenarios**: "Say it in words" is an ask bar at the TOP with example chips (Enter or a chip builds it).
+
+## 2026-10-08 (later): Google direct, What moved, the email board, creative grades, creative-call settings
+
+- **Product map: `docs/locus-hub/product-map.md`.** Every page and every planned feature, with its reader, its
+  question and its status (LIVE / BUILT / NEXT / LATER). Add a row there before building anything new.
+- **Google read directly** (account-health `src/google.js`, routes `/api/google/probe|match|link|website|search|ads`,
+  admin). Same service account as Drive and Gmail, acting as `GOOGLE_AS` (default Cole). Needs, once: the scopes
+  analytics.readonly, webmasters.readonly, adwords added to the domain-wide delegation; the Analytics Data + Admin,
+  Search Console and Google Ads APIs enabled; `GOOGLE_ADS_DEV_TOKEN` + `GOOGLE_ADS_MCC` for Ads. AdSense is not
+  needed. Per brand ids in `p_br_doc` key `google` {ga4, gsc, ads}, pasted on Settings > Connections (the generic
+  `input` rows; `/api/brand-links` takes `ga4`, `gsc`, `google_ads`). Probed 2026-10-08: all three refused (scopes
+  not delegated, no developer token). Reports cache an hour in `settings` (`g4:`, `gsc:`, `gads:`).
+- **Store > Website (GA4) and Store > Search (Search Console)** are v2.js screens (`website()`, `search()`); until
+  linked they show exactly what to do. Ads > Google adds a "Campaigns, from Google Ads directly" card when the brand
+  is linked and the token works.
+- **What moved yesterday** (hub.js `movedMany`, `/api/hub/moved`): yesterday against the same weekday over 8 weeks;
+  shown when 25%+ off AND 1.5+ standard deviations; revenue names orders vs average order, MER names revenue vs
+  spend. Card on Home under the read.
+- **Klaviyo across every brand** (v2.js `emailBoard`, Email page, all brands): revenue (flows and campaigns), live
+  flows, missing core flows, open / click against Klaviyo's averages, best flow. The Golf Sock is never flagged.
+- **Ad preview: funnel grade + Make more like this.** Hook, hold, click and purchase each graded A to F against the
+  brand's median ad in the window (`medians`), the weakest step names the iteration; the button asks the
+  Strategist for an Asana brief of three iterations.
+- **Creative calls are per-brand settings** (`TEST_KEYS` cr_* in worker/src/brand.js; Settings > brand > Goals >
+  Creative calls). The Creative page reads `/api/brand/rules` and states the numbers it used.
+- `window.V2UI` (v2.js) exposes the v2 building blocks (tile, card, spark, bullet, ib, lineChart, stackChart,
+  panel, tipAttr, chip, formatters) so every screen file draws them one way.
+
+## 2026-10-08 (evening): the ad set is the unit; Settings grouped; search; email timing; Inspiration
+
+- **Meta calls judge the AD SET first** (Cole: Meta optimises the set as one funnel; the ad taking most of
+  the budget is usually the broad opener, the small ads with prettier numbers convert people it warmed).
+  hub.js `creativeBrand` gives every ad its set's totals, `set_share`, `set_rank`, and first-click vs last
+  platform click revenue (`fc_rev`, `lc_rev`). v2.js `creative()`: the set gets the same thresholds; a set
+  that misses = Cut for every ad in it; the anchor (`cr_anchor_pct`, default 50% of set spend) in a working
+  set = Keep (replace it, never just switch it off); a small ad over the cut line = Trim; single-ad sets are
+  judged as the ad. Opener / Closer chips: first-click credit 1.3x+ the last-click credit or the reverse.
+  The preview carries the call, the why and the ad set scorecard. Settings > Goals labels which rules are Meta's.
+- **Settings is grouped**: Brands / Agency (Connections, Team, Briefs and Slack, Strategist) / Data and jobs
+  (Jobs and data, Data health, Costs) / Help. Connections cards are grouped by kind (Ad platforms, Store and
+  analytics, Email and SMS, Team and work tools, AI and creative) for the agency and for each brand.
+- **Ask bar finds any campaign or ad** (hub `/api/hub/find`); picking one switches brand and opens Campaigns
+  with it expanded, or Creative with its preview (`window.V2PENDING`).
+- **Email > Subject lines and send times** (v2.js `subjectsCard`): from the last 60 sent campaigns (Klaviyo
+  campaigns now include their subject through `include=campaign-messages`), by weekday and time of day in the
+  brand's zone, subject features (question, number, emoji, short, name, discount) against the rest.
+- **Creative > Inspiration** (v2.js `inspo`): the brand's Atria board and the season boards (from
+  `/api/season` swipe ids), "Brief one like it" asks the Strategist. Atria answered 402 (out of credits) on
+  2026-10-08: the page says so.
+- Google: `POST /api/google/enable-apis` tries the Service Usage API as the service account (project
+  mobius-tools-506114); it was refused, so Cole enables the four APIs himself.
+
+## 2026-10-08 (night): per-brand access, customer value per ad, Google live, onboarding
+
+- **Per-brand access** (`brandguard.js`, the SAME file in profit/worker/src and account-health/worker/src;
+  change both): `settings.userBrands` {email: [act_ids]}; [] or absent = every brand; the owner always sees
+  all. Both workers' `fetch` wraps `handle` with `guardBrands`: a request naming another brand (?act= or
+  JSON body `act`) gets 403, and every JSON answer drops objects whose `act_id` is not theirs (and keys that
+  are act ids). Only Cole changes it (Settings > Team > Brands they see; `/api/team` PUT `brands`). The
+  Strategist gets an ACCESS RULE line with the person's brands. Slack is not scoped (channels already are).
+- **Customer value per ad** (hub.js `ltvByAd`): customers whose FIRST order's first-click touch is the Meta
+  ad, first order 90+ days before the window end, their 90-day spend; `ltv_n`, `ltv90`, `ltv_x` per ad, a
+  "Which ads bring customers who come back" card and a line in the preview. Needs `tw_order_touch` history:
+  account-health `backfillTwTouches` (cursor `twTouchCursor:<act>`, one slice a night per brand, or
+  `POST /api/tw-touch-backfill?act=&slices=`), run in full on 2026-10-08 from the dev worker.
+- **Google is live** for GA4 and Search Console (scopes delegated, APIs on, 2026-10-08). Linked: Lucky
+  (GA4 358338096, sc-domain:luckygolf.com), Bonk (GA4 520141370), Party Patch (GA4 260098300,
+  sc-domain:partypatch.com). Google Ads developer tokens were RETIRED 2026-09-09: access belongs to the Cloud
+  project (mobius-tools-506114); the API version is v25; the manager is `GOOGLE_ADS_MCC` 5566468199 in
+  wrangler.toml; the project needs Basic access (Cloud console > Google Ads API > Overview) to read real accounts.
+- **Onboarding Access step** now asks for the Google Ads customer ID + accepting the Mobius manager link,
+  GA4 (Administrator) and Search Console (Full) for cole@ (onboard/questions.js, `MOBIUS.adsMcc`).
+
+## 2026-10-08 (late): Google Ads live, value-based goals, the photo library
+
+- **Google Ads is readable** (Cloud project on Explorer access: 2,880 production operations a day; Basic needs
+  brand verification and is not needed yet). Linked: Bonk 2589863833, Dartee 7015464946, Grunk 9147440615,
+  Lucky 6859198499, Party Patch 2167988621. Ads > Google shows "Campaigns, from Google Ads directly".
+- **Customer value is SHOWN, not automated** (Cole asked if moving the goal by rule was too much; it was: the
+  goal is agreed with the client, 90-day value lags and samples are small). Calls use the brand goal. An ad with
+  10+ known customers whose 90-day multiple is 20%+ above the brand's average ad gets a green "Customers come
+  back" tag (15%+ below: amber "Customers don't come back"), with the plain reason; the buyer decides.
+- **Photo library** (account-health `src/assets.js`, table `p_asset`, R2 `assets/<act>/<file id>.jpg`, public
+  `/assets-img/<act>/<file id>`): walks each brand's Drive folder (Connections link + `p_br_doc` 'assets'
+  folders), skips agreement/contract/invoice/legal folders, never moves files; each new image tagged once by
+  Claude Haiku 4.5 from a 640px thumbnail (~$0.0011); hourly `assetsTick` = one brand (stalest) sync + 20 tags.
+  Routes `/api/assets`, `/api/assets/sync`, `/api/assets/folders`. Page: Creative > Library (search, people,
+  setting filters). Next: Studio picks from it, then the Dress step (swap clothing on real model photos).
+
+- **The Strategist knows every platform** (strategist.js PLAYBOOK, 2026-10-08): EVERY SUGGESTION CARRIES ITS
+  REASON (what, the number and its source, why, what to watch and for how long, how sure) and HOW TO RUN EACH
+  PLATFORM (Meta, Google Ads, TikTok, email and SMS, website, organic search, store). New views `google_ads`,
+  `website`, `search` read google.js. Tested: a Google question came back with one 20% budget change, its
+  numbers, the brand-vs-non-brand reason, a 7-day watch and a chart.
+- **Ads > TikTok (2026-10-08 later):** `#v2ttc` in the TikTok cards shows Connect TikTok (account-health
+  `/api/tiktok/start`) or the setup state, and once connected a "Campaigns, from TikTok directly" card for a
+  linked brand. Ice & Gold's email tool is Attentive (Connections says so). See account-health/CLAUDE.md.
+
+## 2026-10-08 (late): What moved to Slack, scheduled questions, pin an answer to a dashboard
+
+- **What moved, posted to Slack at 8am Central**: account-health `src/moved.js` copies hub.js `movedMany` (keep
+  the thresholds in step; hub.js says so). Switch `movedPost` on Settings > Briefs and Slack ("What moved
+  yesterday, in Slack", drawn by `profit/askextra.js`). Details in account-health/CLAUDE.md.
+- **Scheduled questions**: Settings > The Strategist > "Scheduled questions" card (askextra.js `schedules`):
+  list (question, brand, when, channel, last run + status, runs used today), Add / Edit (in-app modal: question,
+  brand, how often, hour in Central, internal channel defaulting to the brand's), Run now and Delete (both
+  confirmModal). Engine and routes: account-health `askschedule.js`, `/api/ask/schedules`.
+- **Pin to a dashboard** (2026-10-08): ask-ui.js draws a "Pin to a dashboard" button under every ```chart in an
+  answer when the host passes `onPin` (Locus sets `AskUI.state.onPin` in askextra.js; Ledger and Supply get no
+  button). `AskUI.pin(mi, k)` hands {spec, question, title}; the modal picks an existing dashboard (open brand's
+  first) or makes a new one, then `PUT /api/dashboard` with a new block `{type:'chart', title, spec, question,
+  act, pinned_at}`. Pinning the same question again on the same dashboard REPLACES the old block; 10 blocks max.
+  `cleanSpec` (dashboard.js) validates it (`cleanChart`: bar|line|table, 15 labels, 3 series, numbers only,
+  20KB). `dashBlockHtml` draws it with `AskX.chartBlock` = `AskUI.chartHTML` (now exported) in a 640px box,
+  "As of <date>", the brand, the question and Refresh (`AskUI.ask(question)`; re-pin to replace). The editor
+  labels it "Pinned answer" and keeps it. The Strategist's `save_dashboard` does not write chart blocks (they
+  come from people pinning). Versions: ask-ui.js v9, ask.css v11, askextra.js v1.
+
+## 2026-10-08 (late): Studio picks from the photo library, and the Dress step
+
+- **From the library** (studio.js `libPick` / `libToUrls`): everywhere Studio takes a photo (Product: "From the
+  library" beside "Add your own photos"; each line: "From the library" beside "Add image", as inspiration OR "Use as
+  the ad"; inside Dress for the person and the product). Same search and filters as Creative > Library, plus a
+  "Made by Locus" filter, multi-select. Calls account-health directly with the session token. A pick comes from
+  account-health `GET /api/assets/file?act=&id=` (Drive's own thumbnail service at 1600px, so HEIC / RAW / huge
+  originals never reach a Worker; looks come straight from R2), then `shrinkImage` + `/api/studio/upload` exactly like
+  an upload. `upload()` now takes `{url}` items and a `{photo: line}` target.
+- **Dress a photo** (Cole's call with Nick): a REAL photo of a person + 1 to 4 product photos -> ONE GPT Image edit
+  (`/api/studio/dress`, profit worker; `input_fidelity: high`, the person photo first, output JPEG, size from the
+  person photo's aspect) that swaps only the clothing; the product fingerprint rides along when the product has one.
+  `dressCheck` scores the garment 0-10 against the product photos and says whether the person and scene were kept
+  (about a cent). The result is a **look**: stored in R2 twice (`studio/ref/<id>.jpg`, so line.photo and every Studio
+  route use it unchanged, and `assets/<act>/look-<id>.jpg`, so `/assets-img` serves it) and written to `p_asset` with
+  `source 'locus'`, `kind 'look'`, `cost`, `look_json` {url, base, products, product, note, model, check, cost}.
+  Looks never go to the client's Drive. `syncAssets` never marks a look gone. A re-dress or Redo in the same window
+  passes `replace` and the old look leaves the library. New p_asset columns are added by guarded ALTERs in BOTH
+  workers (assets.js `ensure`, studio.js `ensureLooks`).
+- **Entry points:** Studio batch screen, Product card: "Dress a photo" (prefilled with the batch's product and its
+  ticked photos). Creative > Library: a photo with people has "Dress with a product"; a look shows "Made by Locus", how
+  it was made, the check and cost, and "Use as the ad" / "Dress it again" / "Remove from the library"
+  (account-health `POST /api/assets/remove`, looks only, a status flip). "Use as the ad" (studio.js `useAsAd`) picks
+  a batch and a line (or a new line), sets `line.photo` and clears that batch's plan, like the existing button.
+  `window.StudioTab.dress(...)` / `.useAsAd(...)` are how v2.js opens them.
+- **Cost:** logged on the look (`p_asset.cost`, from the image call's `usage` at gpt-image-1 list prices, which errs
+  high, plus 1 cent for the check) and counted in Studio's "This month". Measured 2026-10-08 on Lucky (person crop +
+  3 Gold Carnation Classic Polo photos, `gpt-image-2.5-sunburst-2026-09-08`): **$0.105, 43 seconds, product 9/10,
+  person kept**; the green polo became the Carnation polo with the face, hat, glove, club and sky unchanged. That
+  test look was removed from the library afterwards (its R2 copy remains).
+
+## 2026-10-08 (night): brand settings vs agency settings, profile menu, client picker, Tour/Help fixed
+
+- **Two settings, two doors (Cole: "settings for a brand should only be about the brand").** The rail's
+  Settings button ("Brand settings") opens ONLY the picked brand: sections About the brand, Goals and rules,
+  Slack and sending, Money, Connections (that brand's cards only), Data repairs, Stop tracking, plus the Data
+  health and Costs pages. It is the existing brand row (`brandRow`) rendered open with one group shown at a time
+  (`.setpane.bmode[data-bg]`, groups carry `data-bg` from `BG_OF`), so every save handler is unchanged.
+  **Agency settings** open from the profile button at the bottom of the rail (`#pfMe`: Agency settings, Clients,
+  Team and access, How to use Locus, Sign out): Clients (every brand + New client + Add a brand; clicking a brand
+  opens its brand settings), Connections (agency card only), Team, Briefs and Slack, The Strategist, Jobs and
+  data, Guided tours. Mode = `SETMODE` (`pf_setmode`); All clients always shows the agency side.
+  `openGoals(act)` and `openAgencySettings(sec)` are the two ways in from other pages.
+- **Client picker is a menu** (`#pfPick`, search box, + New client). The hidden `#clientPick` select is still
+  the value every caller sets; `show()` calls `syncPick()` so the label never disagrees.
+- **What moved click fixed**: the global `[data-go]` handler called `show('act:...')` (not a page), which threw
+  "(intermediate value)... is not a function" with a dead Try again. It now ignores `act:`; a moved number opens
+  the page that explains it for that brand (`MOVED_TAB`: revenue/orders/AOV -> Sales, MER/spend -> All channels,
+  cost per new customer -> Customers). `show()` sends any unknown page id to Overview (`SHOWABLE`).
+- **Tour** is read off the page (`autoTourSteps`): page tabs, dates, attribution, headline tiles, then every card
+  by its own heading. Only `start` and `settings` keep hand-written steps. **Help** has a brief for every page
+  (`Object.assign(PAGE_BRIEF, ...)`); add one when a page is added.
+- **2026-10-08 (later) polish after Cole's screenshots:** every line chart and sparkline shows a dashed guide
+  line and a dot on each line at the hovered point (`markDots`, `spkMark`); every `.v2tile` without `data-go`
+  opens a side panel (the number, its line large, its Metrics glossary entry; `window.GLOSSARY`). Goals and
+  rules is five cards with aligned rows (`.g-sec`, `.g-row`). One switch style (`.toggle`: white knob, brand
+  fill). Connection logos in brand colour from cdn.simpleicons.org (Slack and Klaviyo are not in that set, so
+  they show letters). The client picker and profile classes are `lc-*` because `.pf-pick` already belongs to
+  the Profit chooser. Unmatched Shopify stores show on the agency Clients list only. "Stop tracking" is called
+  "Remove from Locus"; Data health and Costs are "Data check" and "Cost check" in brand settings.
+
+## 2026-10-08 (night): STOCK, BUYING AND DROPS (Supply moved into Locus). Read before touching them.
+
+Plan, audit and mocks: `docs/handoffs/supply-into-locus-plan.md` (progress log at the top), `supply-audit.md`,
+`supply-mock-audit.md`, `docs/locus-hub/mocks-supply.html` (artifact https://claude.ai/artifact/JttW2yBYUrYTvtPHFUiWiP).
+- **Three levels, per brand.** Stock = every brand with a stock feed (the Mobius Digital Shopify app; Lucky today),
+  framed for the ADS: Ease off (out, under 30 days, or runs out by Cyber Monday with no restock landing first), Safe to
+  scale (90+ days or a restock lands in time), Push to clear (52+ weeks of stock, or 20+ units not selling). Buying =
+  brands we buy for (`brands.buys` in the Supply D1): one card per factory order to place, orders on the way. Drops =
+  brands that design (`brands.makes`): drops, designs, keep or cut, Asana. The Locus brand -> Supply brand mapping is
+  `brands.act_id` in the SUPPLY D1 (not p_br_doc), read once per session from `GET /api/brands`, switched on Brand
+  settings > Stock and factories (`PUT /api/brand {buys|makes}`). Brands with no feed see no Stock tab; All clients
+  sees Stock (one row per client).
+- **PRODUCTS IS ITS OWN RAIL ITEM** (Cole, same night: "make Products its own tab"): `NAV.products` = Stock, Buying, Drops;
+  Store went back to Sales, Customers, Website, Search. The rail button `#railProducts` is hidden unless
+  `SupplyTab.tabOk('stock', act)` (a brand with a stock feed, or All clients); `show()` keeps it in step and loads the
+  Supply brand list once per session. The rail is seven items for Lucky, six for brands without a feed.
+- **Code:** `profit/supply.js` (IIFE, `window.SupplyTab` / `window.SupplyStock`) + `profit/supply.css` (tokens only).
+  index.html: `NAV.products` tabs stock / buying / drops, filtered per brand by `SupplyTab.tabOk` in `show()`; `SR(tab)`
+  renders with `supplyHost()`; `?open=stock|buying|drops` deep links (Asana design links arrive as
+  `?open=drops&design=<slot id>`, forwarded by `supply/index.html?slot=`; supply.js loads before the boot script so it
+  reads `design` first); BRAND_SECS `stock` = its own settings section (`#stockSet`, drawn by `SupplyTab.settings`).
+  Help, purpose and ask suggestions added for the three pages.
+- **Data:** the screens call the Supply worker DIRECTLY with the Mobius Google session (`mobius_session`), like meta.js
+  calls account-health; a password-only Locus login gets "sign in with Google" on these pages. `state` is cached 2
+  minutes and every save refreshes it. **The brain is the only place a status or date is computed**; supply.js adds
+  only the ad-facing judgement (`judge()`; account-health `stock.js` copies it: keep the two in step). Supply does not
+  enforce per-brand access (brandguard); the client picker only offers a person's own brands.
+- **Ad spend per product = Triple Whale orders, never ad names**: profit worker `GET /api/hub/stockads?act=` (hub.js
+  `stockAds`; account-health stock.js copies it): each Meta ad's lastPlatformClick orders in 30 days -> the Shopify
+  product ids in `tw_orders.products_json` -> the ad's 30-day spend shared across them. Lucky: $9.8K of $12.3K ties to a
+  product. Returns products {spend, orders, ads}, ads {ad_id: [[product, n]]}, adsets [{adset_id, name, s7, s30,
+  products}].
+- **Run-out follows the first CORE size to empty** (the brain's rule): Carver 02 Black had 615 units on Oct 8 but its
+  52 degree RH runs out Nov 27, so the product is short from then. The product chart shades from that day and names
+  the size; "Short for" in the try-an-order box uses it too. Never compute an empty day from total units.
+- **Ads:** v2.js `wireCamp` calls `SupplyStock.decorate(root, act)` (chips on ad set and ad rows: "Stock runs out Nov
+  27", "Stock OK to scale", "Overstocked: push it"); `previewAd` calls `SupplyStock.previewLine` (one box under the
+  stats when stock changes the call). Dates and units only, never revenue claims.
+- **Buying on screen:** suggested < factory minimum and the minimum is over 2 years of sales = "Skip it, or call it a
+  one-off" (button sets lifecycle drop), else raised to the minimum; past due = the weekly sales lost; In / Out per row;
+  Build this order = sizes and quantities, Save as draft or Copy the order text and mark placed (POST /api/orders).
+  Stages Placed / In production / Shipped / Landed (D1 values sent, production, shipped, landed; confirmed = Placed).
+- **Drops on screen:** a group with 52+ weeks of stock shows "Hold new <group>", 0 new to make and no next-order line
+  (Hats: 253 weeks on Oct 8). Closures shown are the drop's own factories only. Asana cards started outside a drop
+  show under "Started in Asana, not in a drop" with Make it a design.
+- **2026-10-09 REDESIGN to the v2 system (Cole: "how long the stock lasts looks super weird", "text overlapping", "I
+  can't hover over anything", "Kind of product doesn't fill in", Buying "not sure it's updated", Drops "clunky; a weird
+  refresh thing; brown vs grey bars").** Pages are `.v2 .spx` built from `window.V2UI` (tile + spark, ib, panel as a
+  SHEET), `ds-btn` / `ds-seg` / `ds-chip`, `v2tbl` with `th.v2srt` sort buttons, skeletons, `ds-empty`. Every page has
+  an "is it current" line (`updated()`: when Shopify was read, Central) and a **Refresh** that POSTs
+  `/api/shopify/snapshot` then redraws.
+  - **Stock** = lead, 4 tiles (ad spend on low stock; Ease off / Safe to scale / Push to clear with a 12-week units-sold
+    sparkline; clicking one filters the table), ONE sortable table (On hand, Sold per day, Days left with a bar, Runs out
+    on with "<size> first" when other sizes still hold stock, Restock landing with days short, Ads 30 days, Ad call chip),
+    filter seg + "Only products with ads", then "What the words mean" (every term once; clients may read this page).
+    Sort / filter in localStorage `sp_ss` / `sp_sf` / `sp_sa`. The old lanes and the runway chart are gone.
+  - **Product sheet** (`openProduct`, V2UI.panel with `panel.sheet`): verdict, 5 stats, ONE chart `stockChart()` =
+    units on the shelf for 180 days projected SIZE BY SIZE (`project()`: a size that runs out does not borrow from the
+    others; orders on the way land as steps), short period shaded from the brain's run-out (first core size) to the next
+    landing, marker names in a flag row ABOVE the plot (stacked rows, so no label touches a line), hover per day = units,
+    core sizes in stock, events. By size table (core pill, "runs out first"), Kind of product as a 4-way `ds-seg`,
+    Try an order (buyers) draws a dashed line only once a number is typed.
+  - **Buying** = 4 tiles, one card per factory order (why-now sentence, facts strip, rows with reason, top size chips
+    from `suggestedLines`, qty, In/Out seg), On the way = `steps()` stepper per order (Placed, In production, Ships,
+    Lands; each step owns a grid column) + progress bar, Drafts, landed folded, Coming up table.
+  - **Drops** = drop picker (PillMenu), Edit / New drop, 4 tiles, the drop's dates as a stepper, designs table +
+    Coming due, Asana cards, then **Keep or cut** per group: the rule in one sentence, keep / your call / cut / new
+    counts, a table with one-colour bars (units sold 90 days) and a dashed cut line, "Rule says" chip beside "Your call"
+    Keep / Cut seg and a "Use the rule" button (replaced the ↺). Size mix = single-colour bars.
+  - Order builder, order and design sheets use the same pieces (`spx-form`, `spx-in`). Brand settings > Stock and
+    factories and the Meta ad chips keep their `sp-` classes. Local check: a harness page with the Oct 8 state.json
+    and stubbed fetch, headless Chrome at 1440 and 375, light and dark.
+- Old app `supply/index.html` carries a "moved to Locus" banner and forwards `?slot=`; retire it to a redirect after
+  Lucky has used Locus for a week (plan step 5). The worker, engine and D1 stay.
+- **2026-10-12: a client owns its stock, buying and drops** (Cole: "the brand itself is the owner of the brand; buying and
+  stock changes is literally a brand thing"; replaces the 2026-10-10 read-only Stock and Drops). A client login gets
+  Products > Stock, Buying and Drops for its own brand with EVERY control the team has: build, save and place factory
+  orders, mark their stages, Kind of product, minimum, lead time and notes, keep or cut, New / Edit drop, add and edit
+  designs, Make the Asana task, Refresh, Add to an order, the Shopify link, and Brand settings > Stock and factories
+  (the Buying and Drops switches, factories, groups, sorting Shopify types, the stock rules, Read Shopify now and the
+  2-year re-pull). `clientTabOk` lets buying through (`CLIENT_TABS` covers it); `BSECS` keeps the `stock` section for a
+  client. supply.js `isClient()` never calls Supply directly: `capi` reads through account-health `GET /api/supply/client
+  ?act=&what=brands|state` (the whole state, costs and factories included; the Slack and Asana-project wiring left out
+  there) and sends every write to `/api/supply/<route>?act=` on account-health, which pins the Supply brand to the
+  client's own Locus brand, forwards with its Supply token and names the client in X-Actor. The only things hidden for
+  a client are the agency's two cards on Stock and factories (Stock in Slack, Asana design project). The read-only
+  `slotView` is gone: a client opens the same design sheet. Ad spend per product (`/api/hub/stockads`) is on
+  CLIENT_RULES too. Tests: account-health `test-clients.mjs` (the Stock, Buying and Drops check).
+
+## 2026-10-09: THE RESTRUCTURE (Cole signed off the audit). Read before touching the rail, settings or integrations.
+
+Audit, research and every move with its reason: `docs/handoffs/locus-structure-audit-step1.md` (page
+https://claude.ai/artifact/HGz5WWWAuBZFkSMiWhvJb1); mocks `docs/locus-hub/mocks-structure.html`.
+- **Rail (`NAV`)**: Home (Overview, Yesterday, P&L) / Ads (Today, Meta, Google, TikTok, All channels, Tests and angles) /
+  Email and SMS / Store / Products* / Creative (Studio, Library, Inspiration) / Brand (Goals = `plan`, Client answers =
+  `answers`, Research, Voice, Creator link) / Reports / the season item* (War room `war`, The plan `season`) ; foot: Tools
+  (Scenarios `calc`, Platform status `pulse`), Brand settings, profile. `*` = conditional.
+- **Old ids still route**: `mbrowser` -> adcreative, `brand` -> the last brand view (`BRAND_VIEW_TAB`), `tests` (Test calls)
+  still renders (opened from Call rows on Today, not a Meta job any more), `copy` is Studio's Words mode (`STUDIO_JOBS`),
+  `mtoday` still renders (linked from Today for one brand). `?open=` accepts the new ids.
+- **Season item**: `SEASON` + `seasonOn()` + `seasonRail()` in index.html; settings `seasonTab` {label, mode auto|on|off} on
+  account-health `/api/settings`; auto = six weeks before the first season phase to a week after the last (`/api/season`).
+  Edited from the War room ("Name and when it shows") and Agency settings > Clients (desk.js `seasonCfg`).
+- **desk.js** (new, own closure, `window.DeskTab`): Home > Yesterday (`/api/hub/yesterday` + account-health `/api/market`),
+  Ads > Today (`/api/hub/today` + `/api/brand/tests-overview`; Done = POST account-health `/api/activities` manual line,
+  Not now = localStorage until tomorrow), War room shell (`/api/season`, `/api/season/live`), Platform status (Pulse
+  `https://mobius-ad-status.mobius-digital.workers.dev/api/status`, public). **`/api/hub/today` is the buyer list now;
+  the top-bar chip reads `/api/hub/live`** (old shape, also `?live=1`).
+- **hub.js**: `yesterdayMany` (14-day verdict grid, links cpm/ctr/cvr/aov/sp, changes minus automatic audience rows,
+  market = our own brands' CPM moving together; attribution not landed = `attr_pending`, CPA checks wait) and
+  `buyerList` (ad set first, brand rules from `rulesFor`, anchor never cut in a working set, stake ranking). The judge
+  is a copy of account-health `moved.js` `verdictOf`: keep them in step.
+- **Slack 8am post (moved.js)** posts ONLY on a bad day now ("Bad day yesterday: <brand>"), with one market line
+  (Pulse outage or Breezeway BAD), button to `?open=yesterday`. **market.js**: Pulse incidents for the date, Breezeway's
+  public `cpa_z_data.json` (unofficial; a hint), and a once-per-date Claude Haiku + web search for advertiser chatter
+  (cached `chatter:<date>`, ~3 to 5 cents a date, switch `marketChatter`).
+- **Settings**: brand = About (name, tz, currency, Archive at the bottom), Integrations, Ads rules (`goals` key; targets
+  moved out), Slack and sending (+ Monday test calls switch `data-mon` and every automatic post), Stock and factories,
+  Data and costs (`data`: data check + cost check pages, margin override, re-pulls, Meta Sync now, cohorts). Agency =
+  Clients (+ season tab), Integrations (+ Every brand grid), Team and access, Slack and sending, The Strategist, Data and
+  jobs (+ link to the Data health page). Tours live in How to use Locus; scheduled questions on Reports > Dashboards.
+  Goal CPA / ROAS are on Brand > Goals (`addGoalTargets` after `renderPlan`).
+- **Integrations** (account-health integrations.js): per brand groups Ads / Store / Website / Email and SMS / Work; one
+  Google Ads card with `levels`; `options` pick lists (manager accounts, GA4 properties, GSC sites, TikTok advertisers,
+  free Meta accounts) PUT to `/api/brand-links`; email card `tool` klaviyo|attentive (`email_tool`); state `part` =
+  through Triple Whale only. Agency: one Google card with `checks`. Slack channels, creator link and onboarding left.
+- **Platform tabs per brand**: `/api/overview` accounts carry `conn_kinds` and `email_tool`; Google / TikTok / Website /
+  Search tabs hide where the brand has neither the connection nor spend; Email tab reads Attentive where set.
+- **Strategist**: PLAYBOOK "WHERE THINGS ARE IN LOCUS" block (strategist.js) with every page id.
+- **Later 2026-10-09 (Cole's second pass):** Yesterday is named **Day check** (page id still `yesterday`); it opens with
+  **The verdict** (account-health `POST /api/daycheck`, Sonnet, cached per date + facts: headline, scope market/some/none,
+  why, what to do today, and a `client_line` safe to tell a client, never naming other brands or Breezeway). Settings
+  `marketHandles` = X handles the daily chatter search reads first. **Goals moved to Home** (`plan` is Home > Goals;
+  Brand = Client answers, Research, Voice). **Creative = AI ads (`studio`), Creators (`amb`), Library, Inspiration**;
+  Templates come from a separate chat (docs/handoffs/creative-templates.md). **Home has "Needs you today"** (desk.js
+  `needs`: ad sets to change, accounts to fix, tests to call, briefs and reports to send, research drafts, season live /
+  next change), drawn under the Day check line.
+- **PAID ORDERS ONLY (2026-10-09).** `totalOrders` / `newCustomersOrders` in tw_daily are paid orders now (account-health
+  `paidOrdersOnly` at sync, history converted by `account-health/worker/scripts/paid-orders-migrate.mjs`); the raw counts
+  are `totalOrdersAll` / `newCustomersOrdersAll`. Every reader (AOV, CAC, orders, Day check, briefs, reports, the
+  Strategist) uses paid orders without a code change. Costs come from TW's cost metrics, so seeding still costs money.
+
+## 2026-10-09: THE CALENDAR (Lineup moved into Locus). Read before touching calendar.js.
+
+Audit, goal and the approved mock: `docs/handoffs/lineup-audit.md`, `docs/locus-hub/mocks-calendar.html`
+(https://claude.ai/artifact/Umoq9q2cYe1n889Sdo7RLV). The goal: the dates customers see drive the work that must be ready.
+- **Rail item Calendar** (`NAV.calendar`, one page id `calendar`, icon `#i-cal`), between Brand and Reports. `CALR(first)` in
+  index.html hands the host helpers to `window.CalendarTab.render`; `?open=calendar&act=<brand>&ev=<date id>` opens a date
+  (`window.CAL_OPEN`). PAGE_BRIEF / TAB_PURPOSE / TAB_CRUMB / TAB_WHO / TAB_TITLE / ASK_SUGGEST have `calendar` rows.
+- **calendar.js** (own closure, CSS injected as `#calcss`, tokens only). All clients: head line, four tiles, lanes (13 weeks
+  from this Monday, nav +-4 weeks, layer switches saved in `cal_lay`; a brand's Black Friday plan phases within BF+-3 days
+  merge into ONE bar; one-day dates are labelled pins; a sale with no end draws 4 weeks fading; a date with a teaser gets a
+  striped lead-in that opens the same date; Klaviyo sends are dots), and "Work due this week" = every countdown step due in
+  7 days plus anything late, grouped by day and step. One brand: the month (week rows with spanning chips, 4 lanes then
+  "+N more", drag a typed date to move it, click an empty day to add), warnings (no end date, no offer, a drop just before Black
+  Friday, two offers at once), Coming up. The side panel uses `V2UI.panel`; modals are `.modal-wrap.cal-m`. Klaviyo names
+  lose their filing prefix (`mailName`). Do not use the class `.vd` (global verdict pill; it uppercased the panel once).
+- **Month layout (2026-10-15, Cole: hover lit part of a day, squished next to Coming up).** v2.css has a GLOBAL
+  `.wr{display:flex;gap:14px}` that opened 14px gaps between the calendar's day cells; `.cal-mo .wr` now sets gap:0. Hover
+  is JS (each week row tracks the column under the pointer, class `.hov`) because chips sit on a layer above the cells. Rows
+  grow to the lanes they use (up to `LANES` = 4, `--rh` on `.wr`); past that, "+N more" is a button that opens the whole day
+  (`dayPanel`, the side panel = a bottom sheet on a phone). Coming up sits beside the month only when `.cal-tw` (a
+  container) is 1180px+, otherwise below it as a card grid. Under 560px of month width (container `calmo`) chips become
+  coloured dots per day and a tap opens the day.
+- **ONE CALENDAR (2026-10-15, Cole approved).** Work > Tasks lost its own calendar view (List / Board only, plus a
+  "Calendar" link that calls `CalendarTab.focus('tasks', 'month')` and opens this page). Views: 13 weeks (all clients
+  only, the lanes) / Month / Week (`cal_view`); filter chips All / Marketing / Tasks (`cal_f`). Tasks = `/api/actions`
+  open items with a due date (briefs left out), as chips with a small box (late = warn), in the day sheet, and in
+  `taskPanel` (Mark done with Undo, Move the due date, Open in Tasks via `ACT_OPEN`); dragging a task moves its due
+  date (`/api/actions/edit`). A client login (`CLI()`) never requests /api/actions and never sees the chips: Tasks is
+  an AGENCY_TABS page. The how-to line under the chips says what Marketing vs Tasks means.
+- **Data** = account-health `GET /api/calendar` (see account-health/CLAUDE.md "THE CALENDAR"); writes go to the same worker.
+  Cached 2 minutes per scope in the page (`ST.data`), dropped on every write.
+- **Home**: v2.js home() draws `<div id="v2cal">` (Live now + Coming up 14 days, `CalendarTab.homeCard`) and shades each
+  drop or sale on the revenue chart (`V2UI.addBands(id, rows, bands)`, same geometry as `lineChart`; bands come from
+  `CalendarTab.bandsFor(act, from, to)`, a `lite=1` read of exactly the chart's range).
+
+- **Day check normal = the brand's own LAST 28 DAYS (2026-10-09, tested).** On Mar to Oct 2026 across six brands the
+  same-weekday-over-8-weeks normal missed a day's revenue by 39% on average, the last 28 days by 30% (MER 31% vs 28%);
+  bad days fell from up to ~6 a month per brand (Bonk, Grunk) to ~1 to 3. hub.js `yesterdayMany` and account-health
+  moved.js `movesFor` both use it (min 20 days of data). The page is client-ready: a single-brand viewer never sees the
+  "Our other brands" box; no "team only" label (Cole: Locus is for clients too).
+- **DAY CHECK = "WAS IT A BAD DAY ON META?" (2026-10-09, final, Cole: "the goal is Breezeway's").** One answer a day from
+  four signs (account-health market.js `metaDay`, `GET /api/metaday`): our brands' Meta cost per sale (Meta's own count,
+  each brand vs its last 28 days, averaged; a sign when in our worst 15% of days), Breezeway BAD/VERY BAD, Meta posting
+  an ads problem (Pulse), advertisers complaining online (chatter). Normal / mixed (1 sign) / bad (2+) / very bad (3+,
+  or ours in its top 1%). Calibrated Feb to Oct: ours and Breezeway agreed on ~1 in 4 of their bad days; 2+ = ~1 a
+  month. Page: the answer, 30-day squares, the four signs, our brands that day (desk.js). 8am Slack: ONE post to the
+  agency channel (strategistChannel, else slackChannel) only on a bad/very bad Meta day (moved.js `movedTick`); the
+  per-brand bad-day posts are gone. `/api/hub/yesterday` (per-brand verdicts) stays for the Strategist but no page uses it.
+
+## 2026-10-09: Ads > Creative does what Motion does
+
+Cole: "ideally this would replace Motion". Backend in account-health `creative.js` (read its CLAUDE.md section).
+- Gallery: Sort by (spend, purchases, ROAS, CPA, hook, hold, CTR, 90-day value, newest; ratio sorts only rank ads
+  past the judging bar, stated under the row with a link to Goals), "Each ad / One card per creative" (`groupAds`,
+  on `asset_key`), tick 2 to 4 cards to Compare (wide side panel, best per row in green), "Save this view to a
+  dashboard" (an `ads` block: act, sort, group, tag, ids, n; drawn by `V2.adsBlock` with the dashboard's dates).
+- "What is working, by tag": AI tags per creative, spend / CPA / ROAS / hook per tag value; a row filters the gallery.
+- Preview: tags, "Where people stop watching" (3s / 25 / 50 / 75 / end as a share of the curve's own peak, because
+  short videos pass 25% before 3 seconds; dashed = the brand's average judged video), "Where it ran and who saw it"
+  (placement, age x gender), Play = Meta's preview at 340x620, and "Make iterations in Studio" on statics
+  (`StudioTab.fromAd` -> /api/ad-original -> Studio ref -> the Use as the ad batch picker).
+- Cards show the whole ad (`background-size: contain`); "No goal CPA" instead of "Not enough spend" when a brand
+  has no goal; "no sales" on a spent ad with no purchases.
+- **No separate 8am post (2026-10-09, Cole: "we already have a daily report").** moved.js `movedTick` returns early. On a
+  bad or very bad Meta day the Daily Brief v2 says so in one sentence (account-health `metaDayFor`, cached
+  `metaday:<date>`, passed to `writeBriefNarrativeV2` as META THAT DAY). The agency "What moved" switch is gone.
+
+## 2026-10-09: Ads and Home pass (every tile has its line, menus, skeletons, Google jobs)
+
+- **Every headline tile carries its day line** (v2.js `tspark`, compare period dashed, hover reads each day). Home = 8
+  tiles (`.v2tiles.home8`): revenue, orders + AOV, ad spend, MER, aMER, new customers, cost per new customer, CM;
+  `/api/overview` series now carry `new_orders`, `new_rev`, `cm`. Meta, Google, TikTok and All channels share
+  `paidTiles` (spend, purchases, revenue, ROAS, CPA, CPM, CTR) and `paidChart` (spend vs revenue, compare dashed).
+  hub.js returns the day series everywhere: `metaMany` (one grouped query), twPlatform rows carry impressions /
+  clicks, `channelRows` has `series` / `prev_series` (store revenue, blended spend, paid purchases, impressions,
+  clicks) and `paid` / `prev_paid`.
+- **Today on the hub screens**: Meta's account totals come from `daily_insights` (ad rows land overnight); a today
+  with no Triple Whale attribution rows is `attr_pending` and reads "–" with "credits land overnight", never 0.
+- **Period change** (`periodChanged` in index.html): dims the page and runs the top bar at once; hub screens
+  (`HUB_TABS`) repaint straight away while `/api/overview` refreshes behind; Home / P&L / Customers wait for it.
+  It used to await boot() with nothing on screen and then render twice.
+- **One menu helper**: index.html `PillMenu` (`pillMenu` / `pillMenuInner` / `wirePillMenu`) draws the attribution
+  switch and Creative's Sort by / Show / Tag; every menu closes through `closePops`.
+- **Ads order**: Today's calls (page id `today`), All channels, Meta, Google, TikTok, Tests and angles. All channels
+  says which platform tabs are hidden for the brand and why.
+- **Google jobs** (`GOOGLE_JOBS`, only with a `google_ads` connection): Overview (`google`), Campaigns
+  (`gcampaigns`, `/api/google/ads`), Ads (`gads`, `/api/google/ads-ads`: top 20 ads by spend, headlines as chips,
+  descriptions, final URL, ad strength; Performance Max asset groups as a table), Search terms (`gterms`,
+  `/api/google/ads-terms`: top 50 by spend, brand vs the rest, "no conversion" marked) and Changes (`gchanges`,
+  `/api/google/ads-changes`: Google's change history in plain words, grouped by day, Changes that matter first,
+  the rest folded; Google keeps 30 days only). v2.js `gads` / `gterms` / `gchanges` share `gStart` / `gFail` /
+  `gStyle` (CSS `#v2gcss`). Conversions, value and ROAS on these screens are Google's own and say so on every number.
+- **Skeletons** (`skPage`, `skTiles`, `skCard`, `skGal`) on every v2 first load. Email paints first and loads the
+  Klaviyo cards on their own (`klaviyoCards`, not awaited, error + Try again). account-health klaviyo.js serves an
+  expired copy at once and refreshes behind (`waitUntil`), keeps the last good copy when a refresh fails, and keeps
+  reads 10 minutes in memory.
+
+## 2026-10-09: Export and share (share.js). Show a client a view without "go to this tab, then that tab".
+
+Research: docs/strategist-viktor-grade-plan.md section 15 (Triple Whale's per-section Export menu, Hyros's print view).
+- **The address is the view.** `profit/share.js` (`window.LocusShare`) writes `?page=&brand=&period=` (or `from=&to=` for
+  Custom) `&cmp=&model=&camp=&ad=` with `history.replaceState` at the end of every `show()` (`LocusShare.sync(tab)`), and
+  v2.js calls `setExtra({ad})` in `previewAd` (cleared when the panel closes) and `setExtra({camp})` when a campaign row
+  opens. `boot()` calls `LocusShare.init(shareHost()); readURL(qs)` before anything loads: a link or a refresh restores
+  the page, brand, dates, compare, attribution, the open campaign and the open ad (through `window.V2PENDING`; Campaigns
+  now opens a pending ad too). Defaults are left out of the link, so on a view link a missing cmp / model / brand means
+  prev / last platform click / All clients, never what that browser last picked. Brand limits still apply (renderPicker
+  drops a brand the person cannot see). `?open=&act=` links keep working.
+- **One Export menu per card** (`PillMenu` with the new `o.icon` option: an icon trigger, items with an icon as the 5th
+  element, no picked state). share.js decorates every `.v2card` / `.card` in `#main` that has a title (`.v2h h3`,
+  `.bf-top h3`, or a first-child h3) on `SHARE_TABS` (v2 screens, Brief, Reports, P&L, Customers, Dashboards, Day check,
+  Today) through a MutationObserver, so no renderer changed. Stable card id = the title as a slug, digits dropped, `-2`
+  for repeats (`data-card`). Items: **Copy as image** (2x PNG to the clipboard; the promise goes straight into the
+  ClipboardItem for Safari; falls back to a download), **Download PNG** (`brand-card-from-to-to.png`), **Send to Slack**,
+  **Copy link to this section** (the view URL + `#card=<id>`: on load the page waits for that card, scrolls to it under the
+  top bar and rings it for 2s). The page head gets an "Export this page" menu: copy link to the page, the headline tiles
+  as an image or to Slack, Print or save as PDF.
+- **The picture**: modern-screenshot 4.6.8 (jsdelivr UMD, loaded on first use). The card is CLONED into an off-screen frame
+  that carries the LIGHT theme's tokens (read from the page's own `[data-theme="light"]` rules), so it is light even in
+  dark mode; ids in the clone are renamed so chart gradients point at the copy; wide tables are drawn full width. Frame:
+  brand, page and card title, the dates and the compare window (only on pages that read the period picker), the
+  attribution model where it applies, "Locus by Mobius Digital" with the mark. Checked: a chart card, the Campaigns table
+  (captured from dark mode, came out light) and the Home tiles.
+- **Send to Slack**: in-app modal with the picture, the brand's Internal channel (default) or Client channel (amber, "The
+  client will see this", button reads "Send to the client"), an optional line. Account-health `GET /api/share/slack?act=`
+  (channel names) and `POST /api/share/slack {act, to, text, title, page, dates, link, filename, png}` (admin, brandsFor
+  limits, PNG checked, files.getUploadURLExternal + completeUploadExternal, text escaped so a typed line can never mention
+  or link; the Locus link only goes to the internal channel). Channels come from `brand_accounts` server side; the browser
+  never names one. A client channel equal to the internal one counts as none.
+- **Print or save as PDF**: `beforeprint` switches to the light theme and puts the page title, brand, dates and compare at
+  the top of `#main` (`.lx-print-h`); `afterprint` puts it back. v2.css print rules hide the rail, top bar, page tabs,
+  menus, panels and toasts and keep cards, tiles and table rows whole.
+- Public no-login snapshot links: BUILT the same day (section below). The chart's area gradient does not come through in the
+  picture (the line does); everything else matched.
+- Files: share.js (new), index.html (`pillMenuInner` icon option, `shareHost`, boot + show hooks), v2.js (ad / campaign
+  hooks), v2.css (block at the end), icons.js (`share`, `printer`), account-health worker.js (`/api/share/slack`).
+
+## 2026-10-09: Ads screens, Cole's pass (sort, columns, edit in place, export frame, Day check, parallel jobs)
+
+- **Tables you can sort and shape** (v2.js `TBL`): click any header to sort, again to flip (arrow on the column; CPA,
+  CPM, CPC and cost columns sort low first); the **Columns** menu (top-bar menu style, `.v2cols`) ticks columns on or off
+  and moves them up/down; "Back to the default". Saved per table in localStorage `pf_tbl_<id>` (`meta-camps`,
+  `google-camps`). Meta columns = everything `metaMetrics` returns (spend, purchases, Meta says, revenue, Meta revenue,
+  ROAS, CPA, CPM, CTR, CPC, frequency, impressions, reach, link clicks, hook, hold, add to cart, cost per ATC, click to
+  cart, cart to purchase) plus Status and Budget; the same columns and sort apply to ad set and ad rows (sorted inside
+  their parent). polish.js skips header icons on sortable tables (`th.v2srt`).
+- **Edit in place on Ads > Meta > Campaigns** (only the Campaigns job; Overview's table stays read only): a status
+  switch per campaign / ad set / ad, the budget (daily or lifetime, wherever Meta holds it), an ad set inside a campaign
+  budget shows its min / cap (click to set), and the row's ⋯ menu = Rename, Copy this ad set (paused), Open in Ads
+  Manager. Every edit opens one in-app modal (`editMeta`) with before -> after in dollars and %, a warning over 50%, then
+  writes, updates the row in place and shows a toast with Undo; the last change also sits in the table bar with Undo for
+  24h (`pf_mw_last`). Live status and budgets come from account-health `GET /api/meta/live?act=` on load (Meta's own
+  values; D1 can be 6h old); a read-only account says why on every control (the metaCan fix text).
+- **Google > Campaigns**: same table, plus a status switch and daily budget edit (`gEdit`, account-health
+  `POST /api/google/write`). Shared and total budgets are refused with the reason. Google ACCEPTS our mutates (checked
+  2026-10-09 with `validateOnly` on Lucky: pause and budget both validated). Undo = the toast writes the old value back.
+- **Jobs are parallel**: Meta = Overview, Campaigns, Ads (the creative gallery, page id still `adcreative`), Changes;
+  Google = Overview, Campaigns, Ads, Search terms, Changes. TAB_TITLE: Meta campaigns / Meta ads / Meta changes.
+- **Export frame** (share.js `frame`): the mark is drawn at its own shape (20 x 13; it is 2000 x 1294, it used to be
+  squeezed into 18 x 18), a 4px line in the mark's colours on top, the page as a small label over the brand, dates on
+  the right, a hairline footer with the mark, "Locus by Mobius Digital" and the attribution. The table bar and row ⋯
+  buttons are dropped from the picture. `LocusShare.picture(el)` returns the PNG blob (to check the frame by eye).
+- **Day check strip**: the chosen day is an inset ring at the square's own radius (was an offset outline cut by the
+  scrolling strip); tooltip = "Monday, Oct 5 / Mixed signals · 1 of 4 signs".
+- Not tested live: an actual Meta or Google write from the screen (all dry / validate only, so no client account was
+  touched); the write path is the Strategist's tested `metawrite.js` code (`node test-metawrite.mjs`).
+
+## 2026-10-09: EMAIL AND SMS, AS STRONG AS ADS (charts, flows, campaigns, and changing Klaviyo from Locus)
+
+Cole: "Should I be able to edit email stuff the same way I can edit ads? Am I missing stats or charts? Should campaigns
+and flows have charts the way revenue does?" References read: Klaviyo's own dashboards (business performance,
+deliverability hub, list growth), Triple Whale's email/SMS view, Polar's Klaviyo connector, Lifetimely, Hyros. Kept
+what a strategist acts on. Backend: account-health/CLAUDE.md, same date. v2.js email block (`klGet` to `klaviyoCards`).
+- **One brand, top to bottom:** Triple Whale tiles (each with its line and the compare period) and "Email and SMS
+  revenue by day" (`emStack`: flows and campaigns stacked, the compare window's total as a dashed line, hover
+  reads both); then from Klaviyo itself (`klaviyoCards`, loads on its own): four tiles (SMS share, revenue per email
+  with Klaviyo's $0.10, placed order rate with 0.08%, list growth), **Engagement and deliverability** (flags in plain
+  words first, `klFlags`: spam over 0.1% / 0.03%, bounces over 2% / 1%, unsubscribes over 0.5%, opens down 15%, list
+  shrinking, a flow that is off but earned, missing core flows; then six rate lines, open / click / placed order /
+  unsubscribe / spam / bounce, each with Klaviyo's average as a dashed amber rule, `rateSpark`), **List growth**
+  (`growthChart`: joined up, left down, net line), **Email vs SMS**, **Flows** (status menu per flow, revenue 90
+  days, the flow's line over the window from `by_flow`, rates; the chevron opens each message with its own rates and
+  subject), **Drafts and scheduled** (Schedule / Unschedule / Cancel / Duplicate / Open in Klaviyo, New draft
+  campaign), **Campaigns sent** (the Ads tables' `TBL` helper: sort on a header, Columns menu, saved as
+  `pf_tbl_kl-camps`; After send = revenue on each of the 14 days after the send, `afterSend`; Duplicate per row),
+  then Subject lines and send times and What Klaviyo is running. Days need 200+ emails received to draw a rate; over
+  45 days the lines go weekly (`klBucket`).
+- **All brands:** the TW table gains a line per brand; the board (`emailBoard`) reads overview + flows_report + daily
+  per brand and shows Klaviyo revenue (flows, campaigns), SMS share, per recipient, placed order, open, click, unsub,
+  spam, bounce (each coloured against Klaviyo's average), list growth, live flows, missing core flows and "Needs a
+  look" (the flags as a tooltip). Attentive brands get one line from Triple Whale. The Golf Sock is never flagged.
+- **Attentive brand (Ice & Gold):** the TW part, then "Attentive, as Triple Whale sees it" (what=attentive) and a
+  plain "not connected directly" note.
+- **Edits** (`klWrite`): preview from POST /api/klaviyo/write, an in-app modal (`klModal`) with a Now -> After table
+  and what happens, confirm sends `expect` = the summary shown, a Done modal with the Klaviyo link, then the cards
+  reload. `klNewDraft` = the labelled form (name, send to, leave out, subject, preview, sender, template; searchable
+  lists). `klSchedule` = a datetime in the viewer's zone, 15+ minutes ahead. A key without the scope shows a "read
+  only" note with the exact scope and hides the controls. **Real finding on the first local run: Lucky's "Welcome
+  (NEW) - Email [BHM]" flow is DRAFT and earned $11.8K in 90 days** (the flag catches it).
+- CSS at the end of v2.css (`kl-*`). A checkbox inside `.modal` needs `width:auto` (the modal stretches inputs).
+  index.html: v2.css?v=24, v2.js?v=35. Screens were checked on the local pair (worktree statics + `ah-worker-dev` +
+  `profit-worker-dev`) for Lucky, Party Patch, Ice & Gold and all brands; no write was applied live.
+
+## 2026-10-09: Public snapshot links ("Share a public link" in every Export menu)
+
+Cole approved section 15 step 3 of docs/strategist-viktor-grade-plan.md: one card or a whole page, frozen, no login.
+- **Freeze, never live.** share.js `freeze(el)` clones the card (or `#main` for the page item), turns canvases into
+  images, drops menus / controls / skeletons / scripts / inputs, strips handlers and `<a href>`, makes src URLs absolute,
+  copies the sprite symbols its `<use>` point at, and collects ONLY the CSS rules the element or its ancestors use
+  (`usedCss`, read with the page switched to light for that instant). Selectors on `:root` / `html` / `body` are rewritten
+  to `.lxs-html` / `.lxs-body`, the wrappers the snapshot carries (with the ancestor chain as `.lxs-w` divs), because the
+  public page draws it in a SHADOW ROOT. Brand, title, page, dates, compare and attribution ride as meta.
+- **One brand per link.** All clients is refused (modal and server). The worker refuses a view whose text names another
+  client from `brand_accounts` (`otherBrandIn`), and scrubs scripts, handlers, javascript: URLs and `act_` / `brand_` ids.
+  A limited user (brandguard `brandsFor`) can only share, list and turn off their own brands.
+- **Worker** (`src/snapshot.js`, table `p_snapshot`, `migrations/snapshot-001.sql`, also created on first use):
+  `GET /api/snapshot/:token` PUBLIC, before the auth gate (32-hex token; 404 when missing, revoked or expired; counts a
+  view; 60 a minute per IP per isolate; never returns who made it or any id); `POST /api/snapshot` {act, kind, title,
+  page, dates, cmp, attr, html, css, root, days 7|30|0} (1.8 MB cap); `GET /api/snapshots`; `POST /api/snapshot/revoke`.
+- **Public page** `profit/s.html?t=<token>`: light, Locus header (page label, brand, dates, compare), "Numbers as of ...
+  They do not update", Print or save as PDF, footer with the attribution. The frozen markup goes through DOMPurify 3.1.6
+  (cdnjs) into a shadow root: its CSS cannot leak out, nothing in it runs, links out are dropped, folded sections open.
+- **Create modal**: expiry 7 days / 30 days (default) / never, the note "Anyone with this link can see these numbers as
+  they are now", then the link with Copy (copied on create) and Open it.
+- **Agency settings > Shared links** (`SET_SECS` `links`, host `#snapList`, filled by share.js `links()`): title, brand,
+  who, when, views (+ last view), state, Copy / Open / Turn off (confirm modal).
+- Tests: `node test-snapshot.mjs` (profit/worker; token required, revoked 404, expired 404, payload has one brand and no
+  author or ids, other-brand refusal, brand limits, views, rate limit). Checked in the browser against a local mock: a
+  card frozen from dark mode came out light, a page with tiles, chart and a wide table, 375px wide with no sideways
+  scroll, the modal and the list. Not checked with a real signed-in session (no prod sign-in here).
+- `LocusShare.freeze(el)` returns the payload a link would carry, to check by eye.
+
+## 2026-10-09: CLIENT LOGINS = THE BRAND EDITION (2026-10-10). Clients sign in to Locus. Read before touching the rail, show() or Settings.
+
+The rules live on the server (account-health/CLAUDE.md "CLIENT LOGINS", `brandguard.js`); the editions and the per-page
+table are `docs/locus-hub/editions.md`. Cole, 2026-10-10: "Locus is literally everything now. A client should have access
+to absolutely everything." A client gets the same screens the team sees for its own brand; there are no client-only
+layouts any more (`ClientsTab.reports` and `ClientsTab.creators` are gone; Reports and Creators are the normal pages).
+- **How a client gets in.** Cole: Agency settings > Clients > "Client logins" card (or Brand settings > Client access, or
+  New client "4. Their Locus login") > Invite a client: emails, first name, brands > Next: the email (editable, Copy, "Give
+  access, no email", Send invite = Cole's Gmail after a confirm). No switches: everything is on. The client opens
+  tools.go-mobius-digital.com/profit and continues with Google.
+- **What a client sees** (index.html `isClient()`, `AGENCY_TABS`, `clientTabOk`, `applyClientMode`): every page except
+  `AGENCY_TABS` (Agency economics, Team workload). Products follows `SupplyTab.tabOk` (Stock, Drops; Buying is the team's,
+  the Supply worker knows no client). No All clients in the picker, no picker with one brand, no role filter. The ask bar
+  is on (the same engine, $2 a day; `AskUI.state.intro` names only their brands). `CLIENT_TABS` and `clientCan()` remain as
+  always-true shims for older callers.
+- **Settings for a client** = Brand settings of its own brand (`BSECS`: About without Archive, Integrations (its brand only,
+  agency part empty, paste boxes take its own keys), Ads rules, Data and costs without the data repairs, Client access read
+  only) plus **Your profile** (`ClientsTab.profile(host)`: name, brands, sign out, the daily limits). Slack and sending and
+  Stock and factories are not shown; Agency settings never opens (`SETMODE` forced to brand).
+- **The review is the agency's**: the Daily Brief page shows sent briefs ("Sent to you" or "No brief sent for this day"),
+  Reports shows sent reports with Copy client link; Send, Rewrite, Edit, Don't send, What we did and the report sections
+  are hidden by `body.is-client` CSS in clients.js (the server refuses them anyway).
+- **Role checks elsewhere (kept minimal):** calendar.js (no ticks or Asana; Remove, season and drop links are on),
+  share.js (no Send to Slack), desk.js War Room (edits its plan; the season item's name, alerts and the stock check stay
+  the team's), requests.js (the client's side of the same list), supply.js (Stock and Drops read only).
+- **profit/clients.js** (`window.ClientsTab`): card (read only for a client), invite, welcome, profile, `AGENCY_ONLY` text.
+- **Local check (2026-10-09):** both dev workers from the worktree with SESSION_SECRET = the dev ADMIN_TOKEN in the
+  gitignored .dev.vars, a temporary `clientUsers` row (removed after), headless Chrome over CDP. Not repeated for the
+  2026-10-10 brand edition (not tested live).
+
+## 2026-10-09: the top loading bar, Scenarios and Platform status on v2, Dashboards ask-first, spacing pass
+
+- **The top loading bar (`body.pf-loading`) has its own ticket: `loadBar` in index.html** (`start()` returns a ticket,
+  `end(t)` clears only the latest, `clear()`, 15s safety timer). Cole saw the line "always pulsating": `show()` cleared it
+  only when `run === RUN`, but most renderers take their own ticket (`const run = ++RUN`), so RUN had moved on and the bar
+  never cleared (Dashboards, Settings, P&L, every `++RUN` renderer). `show(tab, {bar})` adopts a ticket (periodChanged
+  passes its own); a repaint of the page already open that was not caused by a click or key (`window.event`) is QUIET:
+  no bar, no dimming. Never add `pf-loading` by hand again; call `loadBar.start()` / `loadBar.end(t)`.
+  Checked headless: 30 page switches, 30s idle, a period change: bar always clears, longest on 1.5s.
+- **Scenarios (calc.js?v=11)** on the v2 spec without touching the math: cards 20px / `--r-lg`, tiles 26/650 with the
+  label 12.5/500, card header = title then the answer sentence on its own line, the mode picker is a segmented control,
+  cost switches are `input.lx-sw` (a checkbox drawn as the app switch, defined in v2.css), tooltips are surface + hairline
+  like the menus, charts drawn at 1120 wide so the axis text is not blown up, dotted grid, dashed hover guide, skeleton
+  while loading. share.html loads only /mobius.css, so every value in calc's CSS keeps a fallback.
+- **Platform status (desk.js `pulse`, desk.js?v=12)**: the answer sentence, four tiles (problems now, working of N, problems
+  started in 7 days, last checked), every platform with a feed as a card (logo, services checked, status chip, the
+  services with a problem, status page link), problems first, feedless platforms as link chips, "The last 14 days" bars
+  (hover = which platforms), "Recent changes" as a table with a platform filter (`ds-seg`) and "lasted N" on each fix
+  (a resolved row closes the latest earlier incident on the same service). "Check again" re-reads Pulse. CSS `#pucss`.
+  Never give a card the class `bad` / `warn` / `good` (global text colours): use `pu-bad` / `pu-warn`.
+- **Dashboards: ask first.** The list opens with a composer (`dashComposer`, `.ds-composer.de-ask`): words + example chips,
+  Build it = `AskUI.ask("Build a dashboard and save it with save_dashboard (...): <words>")`; Apply in the chat saves it.
+  An open dashboard has "Change it with the Strategist" (prefills the chat) and "Edit by hand".
+- **The hand editor is a sheet** (`dashEditor`, `.de-scrim` > `.de-sheet`, CSS at the end of v2.css): left = name, for,
+  brand, dates, compare (`ds-seg`), then the blocks as collapsible rows; right = the dashboard drawn LIVE with the real
+  `dashBlockHtml` (overview reads cached per query in `DASH_PREVIEW`, 220ms debounce). Blocks reorder by the grip
+  (`.de-grip`): pointer drag (pointer capture, the others slide, `html.de-nosel` stops text selection) or focus + arrow
+  keys (announced in `#deLive`). Every option the spec allows: block titles, up to 8 metrics / 8 columns as numbered chips
+  in pick order, note text, a saved ads view's sort / how many / one card per creative; chart blocks are kept read-only.
+  **Per-block dates (2026-10-10):** the dashboard has one range and compare, and any DATA block (tiles, brands, channels,
+  daily, email, ads; never note or chart) may carry `dates: {range, from?, to?, compare?}` that overrides it for that
+  block only. range = a dashboard preset, a whole number of days 1..90, or `custom` with from/to (YYYY-MM-DD, at most 366
+  days); compare left out = the dashboard's. `cleanDates` (dashboard.js, exported) cleans it; anything invalid is
+  dropped and the block falls back to the dashboard's dates; no `dates` = exactly as before. Locus: `dashEff(spec, b)`
+  is the spec a block reads with, `dashLoad` reads `/api/overview` once per distinct range, `dashBlockFrom` draws a
+  block from its own read, and a block whose range differs says it under its title (`.ds-rng`). The editor has
+  "Dates: Same as the dashboard / Its own" inside each data block (range, compare, From/To for custom). The Strategist's
+  `save_dashboard` takes `dates` per block (imports `cleanDates` from dashboard.js) from words like "last 7 days for the
+  CPA tiles". The Slack post (account-health `dashNumbers` / `dashBlocks`) reads storePeriod once per distinct range and
+  puts the block's range in italics under its title. Checks: account-health/worker/test-dashrange.mjs. Escape or Cancel closes.
+- **Spacing pass** (block "SPACING PASS" at the end of v2.css): brand settings groups (`.setpane.bmode .brow-grp`) were
+  cards with 2px top/bottom padding inside the old accordion body's 14px 16px inset, so the cards sat 16px right of their
+  section title and inner boxes touched the card edges (Cole's Archive box). Now: body inset 0, group 4px 20px 20px,
+  inner boxes (`.dc-block`, `.brow-danger2`) 16px 20px, 12px apart, the archive box tinted. The Slack and sending post
+  table wraps instead of running 110px past its card; settings cards are 16px apart (`section > .set-card`); Ads rules
+  cards pad 20px; Shared links table scrolls inside its card; Brand > At a glance facts line up. Probe used to find these
+  (a boxed child within 8px of its boxed parent's edge, tables wider than their card) found nothing else on Settings,
+  Integrations, Calendar, Reports, Dashboards, Brand, Creators, Library, Inspiration or Studio at 1440.
+- **Local check recipe used:** a python static server on its own port from the worktree, `profit-worker-dev` (:8799) and
+  `ah-worker-dev` (:8798) with the dev token, headless Chrome over CDP (Node 24 has WebSocket built in). The scratchpad is
+  shared with other jobs: keep scripts in your own subfolder.
+## 2026-10-09: THE WAR ROOM (Triple Whale's BFCM Command Center, done in Locus). Read before touching desk.js war*.
+
+Cole: "the war room should be like Triple Whale's war room, full on plans and everything, the actual war room", and the
+title had "war" in lower case. Reference: docs/triplewhale-reference/. Page names in the season item are Title Case now
+(War Room, The Plan; TAB_TITLE / TAB_CRUMB / NAV.season in index.html). Other page names were left as they are.
+- **Server** (worker/src/season.js, "THE WAR ROOM" block): `GET /api/season/war?act=all|<brand>[&live=1]`, `PUT /api/season/war
+  {act, patch}`. The plan lives in `p_season_answer` key `war` (JSON: goals [{metric,target}] up to 5, budget {total, channels
+  [{id meta|google|tiktok|other, unit $|%, value, metric roas|cpa, target}]}, sale {start,end}, baseline {from,to}, baseline_ok,
+  thresholds, alerts [{kind,id}], stock_ok); the PUT merges known keys server side. The ladder stays in key `goals` (one place).
+  `saleOf` = saved dates, else the access/bf/planb/cm phases, else Nov 26 to 30. `baselineWindow` = the same days around last
+  year's BF (`LY_BF` 2025-11-28), one day either side. `warBaseline` = seriesFor rows (P&L line, paid orders) + channelsFor +
+  top products from tw_orders (add-ons like package protection dropped). `dayPlan` splits the revenue goal and the budget by
+  last year's shape of the same days. `warSteps` = the 7 steps (baseline, goals, ladder, budget, offers = bf phase locked,
+  alerts, stock). `warLive` = the `live` dep (twDay hours with orders and Meta / Google spend, plus liveRow) against the day's
+  plan; the hourly plan curve is checknow's `cnshape:<brand>` from settings; outside the sale it is a dry run against a normal
+  day (last 28 days). `warAll` = every brand in season, steps before the sale, pace during it, riskiest first.
+  worker.js passes `channels`, `titles`, `client` (clientScope) into handleSeason. `AH_DEV_URL` (dev only, a var in a local
+  config) lets twDay call a local account-health.
+- **Page** (desk.js `war`, `warGrid`, CSS `.wr-*` at the end of v2.css): Plan = sticky step list + sections (baseline with a
+  window picker and "Use this baseline", goals + ladder, budget with "$X not allocated" and "Split like last year", offers
+  timeline from phases + Calendar pins, alert thresholds, stock on the heroes from the Supply worker). Live = six big tiles (pace
+  vs plan by now, heading for, orders + AOV floor, MER, spend vs the day budget, last 3 hours), the hour-by-hour chart
+  (cumulative vs plan, hover per hour), the desk (8am / 4pm / midnight check-ins with the ladder), spend by channel vs budget,
+  alerts fired today, stock, the Strategist's "What to do now" (account-health /api/read; a 15-minute slot in the facts,
+  Refresh adds a nonce) and the Day check's Right now card. TV mode = no chrome, bigger numbers, refresh every 5 minutes.
+- **Alerts are real p_alert rules** (account-health alerts.js): overspend (`spend` above the biggest sale day's budget x %, plus
+  `meta_spend` when Meta has a budget), MER floor, AOV floor (new metric `aov`), stock cover (new metric `stock_cover`: days on
+  the 5 best sellers via stock.js). New columns `starts` / `ends` (Central dates; `isDue` skips outside them) and `source`.
+- **Clients** see their brand's War Room read only (CLIENT_TABS 'war', brandguard rule GET /api/season/war): no edits, no ladder,
+  no alerts, stock or AI read. Live numbers: since 2026-10-10 account-health accepts a client token on
+  /api/tw-day for its own brand (cost ids stripped while P&L is off), so the live card works for clients too.
+- Checked on a local pair (account-health `wrangler dev --remote` + the profit worker local with remote D1) with real data for
+  Lucky, Bonk and all brands: dark, light, TV mode, 390px with no sideways scroll; alert create / test / delete with the new
+  metrics ran against the real tables and were removed. Stock showed "needs the Google sign-in" locally (dev token).
+
+
+## 2026-10-09: THE COMMAND CENTER (Home for All clients) and clients see everything by default
+
+- (Superseded 2026-10-10 by the brand edition: the switches below are gone, see CLIENT LOGINS.) **Client access defaults flipped.** brandguard `CLIENT_SWITCHES` = all ON (P&L, change history, Strategist, creator
+  link) for every brand and every client, existing ones included (nothing was stored on prod). `settings.clientAccess`
+  now holds ONLY overrides (`setAccess` stores a key only when it differs from the default; back to on = the row goes).
+  The client Strategist keeps its 20 questions / $0.50 a day cap. clients.js: the card and the invite say "Clients see
+  everything about their own business" with a folded "Turn something off for this client" (all four switches, on = they
+  see it, "N off: ..." beside the fold). Welcome card and profile say what is on / off. test-clients.mjs 19 checks
+  (defaults on, overrides stored alone, client refused on both command routes, command routes answer the team).
+- **Command center** (`profit/command.js`, `window.CommandCenter.render(host, H, all)`, called from v2.js home() when the
+  team is on All clients; it replaces the "Each brand" table and the Overview read there). Cards: **Focus first** (AI read,
+  account-health `POST /api/read` screen `command` = `COMMAND_SYSTEM`, returns `order` [{brand, why, do}] + lines + focus,
+  Sonnet, cached an hour per facts), **Every brand, what needs you first** (one row per brand: name + status dot, trend,
+  MTD % of plan; pills revenue / spend / MER / CPA vs goal with deltas; revenue sparkline; the reasons, 4 shown + "N more",
+  every reason a button to the brand page that shows it or the Asana task), paused brands on one unflagged line, and
+  **Setting up** (new client runs with steps left: moved here from the New client modal; Open its setup =
+  `NewClient.status`). Rows sort by severity score (bad 10, warn 4, info 1), then revenue.
+- **Reasons**: profit `GET /api/hub/command` (hub.js `commandMany`, fixed windows ending yesterday): goal (blended CPA =
+  spend / paid orders vs rulesFor target_cpa, else MER vs month plan / target_roas; rolling 3 days, 10% wrong side;
+  3+ days warn, 7+ bad), cadence (days since the last Meta `ads.created_time`, $100+ Meta spend in 7 days; 10+ warn,
+  21+ bad), fatigue (CTR, hook, frequency last 7 vs the 14 before from daily_insights; 2 of 3 moved 15%+ on $300+),
+  Day check (yesterdayMany: bad yesterday, or 3+ bad in 7), setup gaps (Triple Whale, Meta, goals, Asana). account-health
+  `GET /api/command/work` (src/command.js): Asana per brand live (open tasks of the linked project, cached 30 min as
+  `cmdasana2:<brand>`; overdue = due in the last 60 days outside parked / done / Analyze Results sections; stuck = untouched
+  10+ days in a working section; note Locus's own sync bumps modified_at, so stuck undercounts), pending new clients, alerts
+  fired in 48 hours. Month vs plan is judged in the browser from `S.accounts` (10% behind warn, 20% bad).
+- **New client modal**: "Already started" list removed; team chips use the selected style (brand-soft fill, accent ring,
+  check icon), readable in both themes (it was `--ink` on `--on-ink`, light on light in dark). Same style on the invite's
+  brand chips.
+- Local check recipe for parallel sessions: run your own ports (static 8761, `wrangler dev --remote` profit 8762 and
+  account-health 8763 from the worktree with the .dev.vars copied in) and drive headless Chrome over CDP (Node's global
+  WebSocket); the shared Browser pane is taken over by other sessions.
+
+## 2026-10-09: THE DATA BEHIND A TILE (drill-downs) + fixed expenses and Net profit
+
+Cole: the tile popup explained what a metric MEANS; he wants Triple Whale's answer, the DATA behind the number ("ad spend
+should break down Google, Meta, what was each; contribution margin should break down every part").
+- **Click a headline tile** on Home (Overview), P&L, Store > Sales, Email and SMS, Ads > All channels / Meta / Google / TikTok
+  (`DRILL_TABS` in v2.js) = the number large with its delta, the day line (blended screens draw it from the drill data with the
+  compare period dashed; ad spend is a stacked bar by platform; on one platform's screen the tile's own line), a BREAKDOWN, then
+  ONE "What it is" sentence (`WHAT`, fallback the glossary's `one`). The long glossary text lives only under Metrics now.
+  Labels map to metrics in `METRIC_OF`; any other tile (Discounts, CPM, CTR...) or any other page keeps the simple panel.
+  A tile that linked to a page (Home's `go`) now opens its drill-down and offers "Open <page> ›" at the bottom; the click
+  listener runs in the CAPTURE phase so the tile's own data-go never fires first. CSS is injected by v2.js (`#v2dcss`).
+- **Breakdowns** (`drillBody`): revenue = by channel (credited, share, change) + new vs returning + top products (one brand);
+  ad spend = by platform with share of blended and each platform's change; MER / ROAS = per-platform ROAS under the whole-store
+  MER; aMER = how it is made + first orders by source; orders / AOV = new vs returning (orders, revenue, AOV) + the last 14 days;
+  new customers / CAC = first orders and cost each by source; paid purchases / CPA = per platform; email = flows vs campaigns;
+  contribution margin / net profit = the waterfall (`drillFall`, reuses `.pnl-fall`): revenue, product cost, shipping and
+  fulfilment, handling, payment fees, gross profit, ad spend, CM, then fixed expenses (each line) and net profit; every line
+  with % of revenue and its change. A margin override shows one "product and delivery at X%" line. All brands sums one currency
+  only and leaves out brands whose cost check is broken (named), like the Home CM tile.
+- **Amazon ads sit OUTSIDE the blended total.** Measured on Bonk: Meta + Google = TW `blendedAds` to the dollar; Amazon ads
+  ($2.7K) are on top. When the numbers say so the spend table marks Amazon "not in the total" with a note, instead of shares
+  adding to 115%.
+- **Data** = `GET /api/hub/drill?act=&model=&cmp=&days|from&to` (hub.js `drillMany`, one call for every metric, cached in the
+  page): the host's own `dayEconomics` + `totals` over a grouped tw_daily pivot and grouped `daily_insights` (so the panel
+  matches the tile to the dollar), `allChannelsMany` for platforms, `storeMany` for products (one brand), `p_cost_health`,
+  fixed.js. Costs, CM and fixed ride under `profit` so **clients** get the same drill-downs and brandguard scrubs `profit` while
+  their P&L switch is off (`/api/hub/drill` is on CLIENT_RULES, `fixed` and `cost_verdict` added to PL_OUT; both brandguard
+  copies identical, test-clients 17/17). Today's window has no stored days: the panel says the breakdown lands overnight.
+- **Fixed expenses** (Triple Whale's "Edit expenses"): Brand settings > Data and costs > Fixed expenses (`loadFixed` in
+  index.html): one card per expense (name, kind, each month, from, until), Save replaces the list. Table `p_fixed_cost`
+  (`migrations/fixed-001.sql`, also created on first use by `src/fixed.js`), `GET/PUT /api/fixed-costs` (not on CLIENT_RULES).
+  `fixedFor(env, acts, from, to)` spreads each monthly amount over its month's days. **They feed ONE line: Net profit = CM minus
+  fixed**, on P&L (a Net profit tile; Orders now carries AOV so the row stays eight; waterfall lines Fixed expenses, each item,
+  Net profit; "Add them ›" when none, `openFixedCosts(act)`) and in the CM drill-down. Contribution margin, briefs, reports and
+  the Strategist are unchanged. `/api/client` returns `fixed {total, items}`.
+- Checked locally 2026-10-09 against real data (worktree statics + own dev workers on 8811/8813, headless Chrome): Bonk Home
+  tiles all eight drills match their tiles; Meta tab (spend, purchases, revenue, ROAS, CPA), Store, Email, P&L; all brands CM
+  ($69.7K, Bonk's fixed listed). Two test expenses on Bonk ($1,200 from Aug, $3,000 from Sep) gave $4,164 over Sep 9 to Oct 8,
+  checked by hand, then removed. index.html loads v2.js?v=38.
+
+
+## 2026-10-09: Email and SMS, Website and Search, Cole's pass (see the email, the funnel, sortable drill-downs, Clarity)
+
+Cole: "Am I supposed to see what these campaigns and flows look like?", the Status pill "looks really off", the little
+bars under Placed order and after send were "not good visualizations", the subject-line summary sat jammed beside its
+title, "no space between sections", the Website funnel was unreadable past add to cart, the tables could not be sorted
+or opened, a tile click only said "go to the Metrics tab", and he expected heatmaps and recordings (Microsoft Clarity).
+All in v2.js `email()` / `klaviyoCards()` / `subjectsCard()` / `website()` / `search()` and the block at the end of
+v2.css ("EMAIL AND SMS, STORE > WEBSITE AND SEARCH"). index.html: v2.css?v=27, v2.js?v=39.
+- **See the message** (`klPreview`, `pvStats`): a sent campaign row (or a subject in Subject lines) and a flow MESSAGE
+  row (inside an opened flow) open a sheet: the inbox line (from, subject, preview), the email itself in an
+  `<iframe sandbox="allow-popups allow-popups-to-escape-sandbox">` (no scripts, no same-origin, links open in a new tab
+  via an injected `<base target="_blank">`), Desktop / Phone width (`.ds-seg`), and the results beside it with each
+  rate coloured against Klaviyo's average; campaigns add "How fast the money came in". SMS shows the text in a phone
+  bubble. Data: account-health `GET /api/klaviyo?what=message&kind=campaign|flow&id=` (kept 30 days in `settings`
+  `klvmsg:*`; the template's HTML, filled by Klaviyo's template-render with sample values when it has tags). Cached in
+  the page per session (`MSG`).
+- **Status = the design-system chip** (`stChip`: `.ds-chip.lx-chip` + `.ds-dot`; `FLOW_ST`), a button when the key can
+  write, opening `statusMenu` (three choices with what each means; then the usual `klWrite` before/after modal).
+  Drafts and scheduled (`campChip`), the flags ("Fix" / "Check") and the rate cards' "Better / Worse than average"
+  use the same chip. NOTE: `.lx-st` is the snapshot links' class (share.js), so the chip is `.lx-chip`.
+- **No goal bullets on the Klaviyo tiles**: revenue per email and placed order rate say the benchmark in words
+  (`vsAvg`: "59% under the Klaviyo average ($0.10)", amber / green); share of store revenue says "In / Under the
+  healthy range (25 to 35%)". The campaign table's Open / Click / Placed order / Unsub / Spam / Bounce are coloured
+  against the average with the average in the tooltip (`rateCell`), replacing the "better than avg" pills.
+- **Money after send** (`afterSeries` / `afterSend`): the RUNNING TOTAL over the 14 days after the send as one sparkline
+  plus "80% by day N"; hover reads "Day N: $X, $Y so far of $Z". A send under 3 days old says "$X so far, just sent".
+  Reason: the question is how fast the money came in; the amount is already in the Revenue column.
+- **Layout**: `cardL(title, lead, body, cap)` puts a card's conclusion on its own line UNDER the title (`.lx-lead`); used
+  by every Email, Website and Search card. The Klaviyo part (`#v2kl`, `#v2klall`) is `.lx-stack` (16px gap; it used to
+  be a plain div so its cards touched), opened by a small-caps "From Klaviyo, read with <brand>'s own key" label.
+  Subject lines is one grid (`.lx-subj`) with a plain-English conclusion.
+- **Website funnel** (`webFunnel`): a row per step (count + change, % of the step before + pt change, % of sessions, a
+  LOG-SCALED bar with the compare period as a grey bar), the drop between steps as its own line ("91.6% left before
+  adding to cart (29,053), better than before (93.1%)"), the biggest drop highlighted, and the step that slipped most
+  named under it. GA4 counts add-to-cart and checkout as events (said on screen).
+- **Sortable tables with drill-downs** (`webTable` / `wireWebTable` on the Ads `TBL` helper, saved as `pf_tbl_web-ch`,
+  `web-lp`, `web-src`, `clarity-pages`): sessions (+ change), share, engaged, avg time, add to cart, conversion
+  (green / red against the site on real traffic), purchases, revenue, per session. A row opens `webDrill`: a sheet with
+  Summary, Day by day (compare dashed, missing GA4 days filled with zero so the lines align), Funnel, Top landing pages
+  (for a channel or source), Channels and Sources (for a page), Devices. Landing pages now use GA4 `landingPage`
+  (query strings folded; fbclid made every Meta click its own row). **Who visits** card: device and new against
+  returning, each row drills.
+- **Tiles drill properly**: Website and Search tiles open `webMetric` / the search drill (the number, its change, what it
+  means, the line large with the compare period, best and weakest day, and the same number by channel / device / new
+  vs returning, or the queries and pages behind it). The listener sits on the tile row and stops the click before the
+  app-wide glossary panel (which is someone else's code; left untouched). Rates are drawn in percent units because
+  `lineChart` floors its scale at 1.
+- **Behaviour (Microsoft Clarity)** (`clarityCard`, `#v2clar` on Website, shown even when GA4 is not linked): not
+  connected = what it adds + the steps + a token box (and optional project ID) that PUTs account-health `/api/clarity`;
+  connected = a conclusion line, four minis (rage clicks, dead clicks, quick backs, scroll depth, each % of sessions,
+  with a daily line once history builds), a sortable per-page table (red = well above the site's own rate) with a
+  Heatmap link per page (`/projects/view/<id>/heatmaps?url=`; the `url` parameter is unverified against Clarity) and
+  Open recordings. Clarity's API gives the last 3 days only and 10 reads a project a day; Locus reads at most every 8
+  hours and keeps a daily history. Brand settings > Integrations has a "Microsoft Clarity" row (group Website).
+- Checked on the local trio (worktree statics :8821, account-health dev :8822, profit dev :8823) with Lucky (email,
+  website, search), Party Patch and all brands; 375 wide has no sideways scroll. The Clarity connected state was checked
+  with a stubbed answer only (no brand has a token yet).
+
+
+## 2026-10-09: Ads > Meta > Ads (the gallery), Cole's pass, and Make iterations
+
+Cole: only the picture opened an ad, "super laggy", after closing an ad nothing was clickable, the sheet's left nav stopped
+on The call, "Make iterations in Studio" was a pop-up in a pop-up with no workflow, the tag report, scatters, fatigue and
+cadence cards were hard to read, and Overview vs Campaigns looked the same. All in v2.js `creative()` / `previewAd` /
+`panel()` / `campTable`, studio.js, and the "Ads > Meta > Ads, Cole's pass" block at the end of v2.css.
+- **The closed sheet ate every click.** `#v2panel.sheet` without `.on` sat centred over the page at opacity 0. v2.css now
+  gives a closed panel `pointer-events:none; visibility:hidden` (visibility flips after the fade), and `close()` removes
+  any playing iframe / video (Meta's preview kept playing invisibly). `panel.close()` is exposed. Checked 20 open/close
+  cycles (Escape and scrim): 0 stuck (was 20 of 20).
+- **The whole card is one button** (`.g[data-prev]`, role button, Enter/Space). Only the Compare tick keeps its own
+  click. One delegated click / keydown / change listener on `#v2galw` serves every card (it survives repaints). The
+  card's purchases number no longer drills to orders (the sheet's Purchases does).
+- **Lag:** pages of 24 cards, "Show N more" appends (never a full redraw; auto-append on scroll was itself jank, so it is
+  a click); covers load through an IntersectionObserver (1200px margin, batched 60ms); no backdrop blur on the play mark,
+  no filter / lift / shadow on card hover, `contain: layout paint` per card; the global hover tip (`tipAt`) only
+  rewrites and re-measures when its text changes. Measured headless Chrome, 4x CPU throttle, Party Patch 30 days, same
+  data, before (HEAD copy) vs after: hover + scroll sweep main-thread work ~9.0s -> ~5.4s, long tasks in the sweep 52 / 23
+  -> 0 / 1, layout in the sweep ~310ms -> ~65ms; page load long-task time ~5.2s -> ~3.4s; hover-only paint 911ms -> ~450ms.
+  `content-visibility:auto` on cards was tried and dropped (it moved the work into scrolling).
+- **Sheet scroll-spy** (`panel()`): positions from getBoundingClientRect against `.pb`, rAF-throttled, the last row wins at
+  the end, a `.v2spy-end` spacer lets the last section reach the top (`panel.refit()` after late content: copy, breakdown),
+  a click lights its row at once and holds 900ms. The Ad copy section always exists (filled when Meta answers).
+- **Make iterations** (preview "Next steps", every ad; video = a frame): the sheet becomes ONE step (`iterateStep`, no
+  modal): what Locus learned (call + why, results, weakest funnel step from `weakOf`, AI tags, the copy, the grade),
+  "What the three will test" (picked from the weakest step: hook -> headlines / hooks, hold -> looks, click or purchase
+  -> offer; changeable), an optional "What should change?", one button. `StudioTab.iterate()` (studio.js) sends a written
+  brief to account-health `/api/studio-ai/brief` (the same reader + brand brain the ideas pipeline uses; no worker change),
+  fetches `/api/ad-original` as the base photo of every line, saves the batch with `setup.from_ad` {id, name, change, at},
+  then Locus opens Studio, which opens that batch and plans it (`S.openId`, `S.autoPlan`). A from-ad batch with no ads
+  is ONE card ("Ready to make": base image, angle, why, testing, the three lines, one primary Make button) with the brief,
+  product and plan folded under it. Measured live (Party Patch, ah-worker-dev): 17s to write, 45s to planned. Test batch
+  archived after. "Brief it in Asana instead" keeps the Strategist route. `StudioTab.fromAd` still exists, unused by v2.
+- **What is working, by tag**: one ranked table per tag group (share of the group's spend as a bar, CPA and ROAS each
+  against the account, best / worst marked only when 10% better / 15% worse or no sales, among values past the judging
+  bar); the card's first line names the best and the worst across groups (both clickable). A row filters the gallery and
+  scrolls to it; a "Showing only" line clears it.
+- **Scatters** (`scatter()` / `wireScatter()`): labelled axes, gridlines, goal line, a "no purchases yet" band on the CPA
+  chart, every dot a focusable button (hover or focus = name + numbers + call, click / Enter = the preview). The hover tip
+  is mouse-only on hover devices, so a tap opens the ad at once. One legend line explains colour and size.
+- **When ads tire / Are we launching enough?** use `ccard()` (the conclusion is its own line under the title, never beside
+  it) and SVG charts: CPA by days live with the goal line in the right margin; ads launched per week as bars (left axis)
+  with spend on ads under 14 days old as a line (right axis). When every age runs over goal the line says it is not fatigue.
+- **Meta Overview = "Top campaigns"** (the 5 that spent most, total row "All N campaigns", "See all N campaigns" opens the
+  Campaigns job); Campaigns keeps the full editable tree.
+- Local check recipe used (no shared browser pane): own static server + `wrangler dev --remote` profit / account-health on
+  spare ports, headless Chrome driven over CDP from node (scratch scripts), light, dark and 375 wide. The tag tables also
+  fixed a page that was 486-525px wide on a phone.
+
+## 2026-10-10: Launch to Meta (`launch.js`)
+
+- An approved Studio ad shows **Launch to Meta** (studio.js adCard, `data-launch`). The in-app window (launch.js,
+  `window.LaunchToMeta.open`) shows the ad, its test, the ad set picker (suggested first, with why), the name preview
+  ("415 B | Still", editable), primary text, headline, button, link, description; **Check it (dry run)** shows the ad
+  set before and after, then **Create paused**. Afterwards: Open in Ads Manager, Undo (existing /api/meta/undo),
+  Turn it on now (existing /api/meta/write kind resume, dry first, then confirm).
+- Status chips (Live on Meta / On Meta, paused / In review / Rejected / Judged: Winner...) on the Studio ad card and
+  on test library rows (`.lb-row[data-b]` in brand.js, decorated by a MutationObserver in launch.js; brand.js untouched).
+  Click a chip = status window (Check status now reads Meta live). Studio calls `LaunchToMeta.watch(act, tok, paint)`.
+- Server and rules: account-health/CLAUDE.md "2026-10-10: Launch to Meta". Creator assets: `open({act, asset: {image_url |
+  video_id, handle, num}})` works, but no screen calls it yet. NOT tested live (the window was checked only against a
+  mocked API in a local page).
+## 2026-10-10: post-purchase survey card on Store > Customers
+
+- `profit/survey.js` (`window.SurveyCard.mount(host, {act, from, to, api, esc, client, onConnect})`), loaded by a script
+  tag; `renderCustomers` (single brand) adds `<div id="cuSurvey">` above the footnote and mounts it after the page draws,
+  so it never holds the page up. Reads account-health `GET /api/survey` (see account-health/CLAUDE.md, same date).
+- Card "How customers say they found you": the agreement line (same channel on X% of orders both know, and on orders
+  Triple Whale credits to an ad), the biggest gap in words when 30+ orders match, paired bars (customer said vs Triple
+  Whale credited), a table (said, credited, both agree, all answers, plus Triple Whale-only rows such as no ad click),
+  the raw answers, a question picker (team only, when the survey asks more than one). Under 30 matched orders = warning.
+- Empty state: team gets "Connect Fairing or KnoCommerce" (opens Brand settings > Integrations); a client gets a plain
+  "ask your Mobius team". The Integrations save message now names the service it checks with (was always "Klaviyo").
+## 2026-10-10: client requests and approvals (Home > Requests, `requests.js`)
+
+- **Page** `requests` = the fifth tab under Home (NAV.home), also in CLIENT_TABS, SHOWABLE, TAB_TITLE, the `?open=` list
+  and the show() map (inline `window.RequestsTab.render(host, first)`). Engine and rules: account-health/CLAUDE.md
+  "client requests and approvals".
+- **Team, one brand:** "Send for approval" (modal: Ads from this brand's Studio as a thumbnail picker, a calendar date from
+  this week on, an offer, a link or file; title + note) and "Add a request". Sections: Waiting for us (client requests
+  open + changes asked), Waiting for the client, Approved not closed; Done folded. Each item: preview, Mark done / Open it
+  again, thread with a reply box. **All clients:** every brand's items with the brand name, no send buttons.
+- **Client:** Waiting for you (open approvals with Approve / Ask for changes, a note required for changes), Your requests,
+  "Ask the team for something". Their Home shows a "N waiting for you" card (clients.js `waitingLine`, called from
+  `welcome`, so it still shows after the welcome card is dismissed); the welcome list names Requests.
+- Studio images in previews load from this worker's public `/api/studio/img/<id>/<full|final>`. No change to studio.js.
+- Not built: a count on the command center (command.js was out of scope), email for new approvals (nothing for now).
+- Checked offline: a headless Chrome render of requests.js with a stubbed host (client and team sections, escaping, the
+  decide and send modals and their POST bodies). Not tested against the live workers.
+## 2026-10-10: agency economics and team workload (`agency.js`, `window.AgencyTab`)
+
+Two pages under Tools (NAV.tools `economics`, `workload`; `AGR()` in index.html hands the host helpers to
+`window.AgencyTab.render`). Backend: account-health `src/agency.js` (see that CLAUDE.md, same date).
+- **Agency economics** (Cole only: hidden from the Tools tabs, the search list and show() for any role but owner; the
+  server refuses everyone else): month picker (last full month by default, 13 months), the one-sentence answer, four
+  tiles (paid to Mobius, team cost estimate, AI cost, margin), the Per client table (paid, tasks done, team hours and
+  cost marked est., AI with a hover breakdown, margin and %, revenue per team hour), "Ledger names to match" (pick the
+  client per unknown payer, or Not a client), the Team cards, and the "Set people's costs" modal (cost and hours a
+  month per person seen in Asana).
+- **Team workload** (team): rows = people, columns = Overdue + Mon to Sun (today tinted), each task a card with its
+  brand chip linking to Asana, three per cell then "N more", a Person filter (remembered in `ag_who`), Read Asana again.
+
+## 2026-10-10: Locus as a phone app, Stop says so, the session's fixes
+
+- **Installable (feature 8).** `profit/manifest.webmanifest` (id /profit/, graphite colours, shortcuts Home / Day check /
+  Today's calls / Calendar via `?open=`), `profit/sw.js` (scope /profit/: navigations network first with the last
+  index.html or `offline.html` as the fallback; the app's own files and Google Fonts cache-first refreshed behind;
+  never an API answer or a number), registered at the end of the boot script. Profile menu "Install Locus as an app"
+  shows while the browser offers an install (`beforeinstallprompt`) or on an iPhone / iPad not yet installed (a modal
+  with Share > Add to Home Screen); clients see it too. Bump `VERSION` in sw.js to drop every cached copy.
+- **Stop** (ask-ui.js v12, Ledger and Supply v9): pressing Stop shows "Stopping after this step..." and a disabled
+  "Stopping..." button at once (`A.stopping`); the progress poll used to overwrite it. A stop lands at the end of the
+  model's current round (about 20s).
+- **ask/engine.js streams every model call** (`readStream`, exported): a long round (a PDF report) thought past 100s
+  and Anthropic's edge answered 524. The user-facing error no longer prints the key's shape. Open Apply cards kept: 120.
+- **Pulse** is read through a `PULSE` service binding on account-health (its workers.dev URL is refused from a worker
+  on the same account; the Strategist said "Pulse returned an error").
+- **Command center "stuck"** = 10+ days since the task ENTERED its section (`cmdstage:<brand>`, Asana stories once per
+  task), not since modified_at. Calendar cards pad 20px.
+
+
+## 2026-10-10: Costs like Triple Whale (`expenses.js` front and worker). Supersedes "Fixed expenses" of 2026-10-09.
+
+Cole: brand expenses must work like Triple Whale's Cost Settings, and the brand adds its own. Research and the
+TW / BeProfit / Lifetimely comparison: `docs/locus-hub/expenses-research.md`.
+- **One Costs page per brand**, `window.CostsUI` (profit/expenses.js): Brand settings > Data and costs > Costs
+  (`loadFixed` now just mounts it) and a sheet from P&L (the **Costs** page button, "Add them ›" under the waterfall)
+  and the margin drill-down (`openFixedCosts(act)` opens the sheet for everyone, client included). Two parts:
+  1. **Where each cost comes from** (read only): product cost, shipping, handling, payment fees over the last 30 whole
+     days from Triple Whale (`costSources` in worker.js: `seriesRaw`, so the override is ignored like the cost check),
+     share of revenue, per order, the source, the cost check verdict, a link to Triple Whale (Settings > Cost Settings).
+     Flags only what is MISSING (no product cost or fees with sales; shipping charged with none booked). A margin
+     override is named ("not used while the X% margin is set"). **No second COGS editor: TW stays the source.**
+  2. **Custom expenses** (table `p_expense`, `migrations/expenses-001.sql`, also made on first use): name, category
+     (team, software, rent, agency, marketing, other), kind `monthly | once | pct_revenue | pct_spend | per_order`,
+     amount (money, or the percent), start_date, end_date (none for once), `is_ad_spend`, notes, created_by /
+     created_name ("Added by", only the name ever leaves the worker). Add and edit in an in-app modal; each save PUTs
+     the whole list (`PUT /api/expenses {act, items}`; ids keep their creator; an id from another brand becomes a new
+     row). `GET /api/expenses?act=` = items, choices, `sources`.
+- **Spread per day** (`spread()`, pure): monthly over its month's days; once on its date; % of revenue from the day's
+  revenue; % of ad spend from the day's PLATFORM spend (`base_spend`, never the expense itself); per order from
+  `totalOrders`. Removing an expense removes it from every period (TW does the same); an end date stops it from a day.
+- **Where they flow.** `is_ad_spend` rows join blended spend inside `seriesFor` (so /api/overview, /api/client, Plan,
+  forecast, Season all see it) and in the drill-down (`drillMany`), via `applyAdSpend` (rows keep `base_spend` and
+  `ad_expense`; mer, amer, cm recomputed; `totals()` carries `ad_expense` and `base_spend`). The live today row gets
+  them too in /api/client and /api/overview. Every other row = Net profit (CM minus them), `fixed {total, items,
+  ad_total, ad_items}` on /api/client. P&L: the Ad spend tile names "other marketing", the waterfall lists Ad platforms
+  and each ad-spend expense under Ad spend, then Custom expenses (each line) and Net profit; the spend drill-down lists
+  each ad-spend expense as its own row ("custom expense, counts as ad spend"); the CM drill-down does the same.
+  **Briefs and reports (account-health) do not read p_expense**: their spend and CM stay Triple Whale's. seriesRaw (the
+  cost check) is untouched. Ad-spend expenses on a day with no stored TW row are not added (no row to add them to).
+- **Old rows**: `p_fixed_cost` is copied ONCE into p_expense as monthly costs (Software->software, Salaries->team,
+  Agency fee->agency, Rent->rent, else other; end month -> its last day; `legacy_id` unique + INSERT OR IGNORE;
+  then `settings.expensesMigrated`), so a row the brand later removes never comes back. p_fixed_cost is left in place.
+  `/api/fixed-costs` and fixed.js are gone.
+- **Clients edit their own**: `GET` and `PUT /api/expenses` on CLIENT_RULES (`act: 'need', opt: 'pl'`, both brandguard
+  copies identical); the handler checks `clientScope(request).ids` again. `ad_items`, `ad_expense`, `expenses` added
+  to PL_OUT. The team edits any brand (a limited teammate only theirs, as everywhere).
+- **Tests**: `node test-expenses.mjs` (profit/worker, 9: every kind, clipping, migration once, a removed migrated row
+  stays gone, ad spend through the REAL worker /api/client and /api/hub/drill: spend, MER, CAC, CM, Net profit, and
+  switching the flag back); account-health `test-clients.mjs` 22/22 (new: client edits only its own brand, only with
+  P&L on, no email in the answer, "Added by" kept, another brand's row id cannot be taken over, team sees all).
+  expenses.js?v=1, v2.js?v=41. Not deployed.
+
+## 2026-10-11: LOCUS PERSONALITY, session D (branch locus-personality; docs/handoffs/locus-personality.md has the detail)
+
+- **The hero number** opens Home: "Yesterday you *actually* kept $X", the contribution margin the P&L computes (hub.js
+  `keptMany`, `GET /api/hub/kept`), named contribution, never profit; the bites as a stacked bar (ads, product cost,
+  shipping and handling, fees; no refunds bite, revenue is already after returns); the agency sum with a row per brand.
+  `profit/hero.js`, mounted by v2.js `home()` into `#v2hero`. Everything else on Home stays where it was.
+- **The nudge card** (`profit/nudge.js`, the badge in the top bar) is a VIEW over `/api/hub/today` and `/api/hub/moved`,
+  never a third source of truth. Pause and Scale go through `/api/meta/write` (dry, modal, write with `expect`, Undo);
+  Done writes the Ads > Today manual Change Log line; Not now snoozes 24 hours per person in the worker
+  (`/api/me/prefs`, account-health prefs.js, settings `userPrefs:<email>`), never localStorage. The helper's face slot is
+  `<span class="lx-face" data-state="asleep|thinking|found|clear">`; since the brand kit landed (branch brand-kit, merged
+  here) `profit/helper.js` fills every slot with the rendered character (`../logo/locus/character/<state>.png`, an img, object-fit
+  contain; the vector bead stays the logo and the icons) and the ask bar carries it too. `../logo/kit.css` is loaded after v2.css. The gate (the bead above the title), the favicon,
+  the rail mark, the manifest, sw.js (VERSION locus-v2) and the share pages carry the kit's icons from `logo/locus/icons/`
+  (Cole's pick per docs/brand/kit.md, relayed by the coordinator session); the intro film and the export frame keep the Mobius mark. The gate is the Locus colour field (`body.lx-gate-on`, set by
+  `renderGate`, cleared by `chrome(true)`): the character beside the name, the one line with its accent word, the white sign-in card.
+- **The morning line**: one sentence per brand built server side in `keptMany` (`line`), on Home until noon (hero.js)
+  and as a Slack DM from account-health morning.js (hourly from `morningHour` 7 Central, once per person per day,
+  the existing bot, `users.lookupByEmail`; filtered per person with brandsFor). Switch and "Send me today's line now"
+  on Settings > Your profile, which is a section for EVERYONE now (brand and agency settings, `SET_GROUPS` 'You').
+  No phone push: nothing in the repo has web push wired; it is the next step in the handoff.
+- **The accent word**: `profit/accent.js` is the one list (tab id -> words); `pageHead` wraps the first match in
+  `<em class="lx-accent">` (Instrument Serif italic, token `--font-accent` in v2.css). A title without its word gets none.
+- Tests: `node test-morning.mjs` (7), test-clients covers the new routes. Checked with Playwright against stubbed routes
+  only; nothing ran against real data or was deployed.
+
+## 2026-10-13: Meeting notes, the Monday call page, How we work (the cadence reset of 2026-10-12)
+
+(SUPERSEDED the same day by "WORK IN LOCUS, stage 1" at the end of this file: Meeting notes + Monday call are ONE page, Work > Calls; team items go to Work > Action items, not Asana; How we work lives in How to use Locus. The notes below are the first shape.)
+
+Cole reset the team's week (docs/operating-cadence-2026-10-12.md): 8am Monday call, every Locus send at 6am Central,
+the Monday review off, one agency channel for the daily drafts, the short client daily. Three team-only pages followed:
+- **Reports > Meeting notes** (`profit/meetings.js` `render`, page id `meetings`, in `AGENCY_TABS` so a client never
+  sees it): every Fireflies call Locus read (account-health meetings.js), the open Asana action items per brand at the
+  top, and the confirm screen: summary, per brand decisions, items as tick boxes (text, owner, due, kind: team task /
+  tell the client / client owes us), "This week" lines and what we need from the client. Confirm = Asana tasks in the
+  brand project's "Action items" section, this_week + need_from_you on the open weekly draft (reportBodyHTML draws a
+  "This week" card; the client send carries both lists), Requests kind `ask` (the client can mark it done; requests.js
+  shows "We need this from you" with a Done button), one Slack note per brand internal channel. `?open=meetings&meeting=<id>`.
+- **Reports > Monday call** (`renderMonday`, page id `monday`, team only): the week's theme (settings `mondayTheme`,
+  picked up by the notes), then per brand, red brands first (sorted by profit `/api/hub/command` reasons' `sev`): 1 last
+  week's open items (tick = `POST /api/meetings/done`, Asana completed), 2 the read (the weekly report draft's revenue,
+  spend, MER vs plan and prior, the summary, Open the report), 3 the plan (the strategist's reply under the weekly report
+  card, read from the Slack index `slack_msg` by thread_ts; or a long non-bot message in the channel on the Monday), 4
+  add an item (`POST /api/meetings/add` makes the Asana task now). Data: `GET /api/meetings/monday`.
+- **Agency settings > How we work** (`profit/sop.js`, section `sop` in SET_SECS / SET_GROUPS): the week, the Monday
+  call, the kickoff call agenda, revisions and due dates, with Print. Static words; change them in sop.js.
+- The start tour's Home / Ads / Creative / Reports steps describe the rail as it is now.
+## 2026-10-13: TODAY'S CALLS CAN BE MADE ON THE PAGE (desk.js `today`, nudge.js `window.LxMetaWrite`)
+- Cole: "if something's there, we can make a call right then and there, or go into Ads Manager, or link to another part of Locus for more detail... it also sends a message into Slack." Every row on Ads > Today's calls now has: **Do it** on Scale / Cut / Trim (the SAME dry-run, modal, write-with-expect, Undo flow as the nudge card and Ads > Meta: nudge.js's pause / scale were factored into `window.LxMetaWrite = { pause(host, it, opts), budget(host, it, opts), undo, toast, metaLive }`, one code path, account-health `/api/meta/write`; Scale = +20% with the number shown first, Cut = pause the ad set, Trim = pause the one ad), **Open in Ads Manager**, **Open in Locus** (ad set rows: `window.V2PENDING = {campaign, adset}`, v2.js campaigns opens the campaign and lights the `tr[data-adset]` row; ad rows: `{ad}` on Ads > Meta > Ads; Fix rows: the Meta overview), **Something else** (in-app modal: one line, owner Cole / Ahsan / Noma / William / Ravo / Radhesh / Hamza / nobody, due date -> account-health `POST /api/meetings/add {act, text, owner, due}`, the toast links the Asana task), Done, Not now. hub.js buyerList rows carry `campaign_id` now (no judging change).
+- **Call rows are ONE ROW PER TEST** (`/api/brand/tests-overview` brands[].calls: id, num, title, spend, orders, cpa, roas, goal, suggest, ads, ads_manager, asana_url) with Winner / Keep running / Loser: a one-line learning (winner / loser) or a reason + check-again date (keep) in a small modal -> profit `POST /api/brand/verdict {act, id, verdict, learning | keep_reason + check_again, who, light: true}` (`verdict: 'keep'` is new: asana_result = keep, no verdict) AND account-health `POST /api/brand-asana/result` so Asana carries it and the hourly sync keeps it. The row disappears after the call (`CALLED`); "Open the test" opens the Test calls page for the brand. Today never opens a Meta job page; the "Make the calls" row and its breadcrumb are gone. The footer says what Do it does.
+- The 8am Slack post with the same rows: account-health todaypost.js (settings `todayPost`). Script versions to bump in index.html when this ships: nudge.js, desk.js, v2.js. NOT tested in a browser: every button (stubs only in the worker tests).
+- **2026-10-15: the ad on every call.** Scale / Cut / Refresh rows show the set's main ad (`anchor.ad_id`, else hub.js buyerList's new `top_ad {ad_id, name, share}`, the top-spend ad; a row field only, no judging change), Trim the trimmed ad. Covers = `V2.thumbs(root, ids, act, host)` (v2.js loadThumbs, account-health `/api/ad-creatives`); a tap = `V2.playAd({id, name, act, note}, host, onMore)`: the cover and Meta's preview (mp4 fallback) in the side panel (a bottom sheet on a phone), playing on open, with "See its numbers on Ads". The DR host now passes `adVideoUrl`.
+- **2026-10-15: Do all N calls** (button over the list; Scale / Cut / Trim not done or snoozed): one `.modal-wrap` sheet (bottom sheet on a phone), one block per brand, every change in words and ticked ("Pause the ad set X", "Raise the budget on X 20%, from $a to $b a day" read live via `LxMetaWrite.metaLive`, "Turn off the ad Z in X"); a set on its campaign's budget is unticked with the reason. The ticked ones run one by one through `LxMetaWrite.run(host, it, {kind, amount, reason})` (nudge.js: the same dry run then write with `expect`, no modal, never throws); each line shows Done + Undo or "Not made: <why>"; one failure never stops the rest; Close re-reads the list. The morning card's "Make the calls" is `?open=today&act=<brand>&doall=1`: index.html boot sets `window.TODAY_DOALL` and desk.js opens the sheet once, never runs it. Verified on a stubbed page (desktop and 375px); NOT verified against live Meta.
+## 2026-10-13: THE SEASON ITEM IS THREE PAGES (Cole: "the war room is super confusing, not sure if you did the plan or the live")
+
+- **One job each.** `warplan` = The Plan (desk.js `war('warplan')`: six steps, one per section, numbered 1..6 with no gap:
+  last year the same days, goals AND the ladder (plus start / Meta cap / November / December / season goals, all saved to
+  key `goals`), the paid budget, the offers, the Slack alert thresholds, stock on the heroes). `warlive` = Live (desk.js
+  `war('warlive')`: tiles, ONE stock line under them, hour by hour, the desk, spend by channel, alerts fired today with
+  a caption pointing at The Plan's step). `season` = Offers and dates (season.js: Offers / To-do / Call sheet; the Goals
+  and results tab and the Desk tab are GONE because the other two pages own them; All clients = The offers / This week /
+  Week by week). `war` still renders for old links and Slack buttons (mode from `window.WAR_MODE`, then the switch).
+- **The switch and the host.** index.html sets `window.WAR_MODE = {warplan:'plan', warlive:'live'}[tab] || null` before
+  `DeskTab.render`; the in-page The Plan / Live switch then calls `show('warplan'|'warlive')` so the rail follows. If
+  `WAR_MODE` is undefined (older host) the switch re-renders in place.
+- **One offer list, one editor.** season.js exports `dealsHtml(a, {ro, results})` and `editPhase({tok,url,act,phases,name}, key)`
+  (+ `injectCss`, `seasonLabel`); The Plan's Offers step renders the same `.se-deal` cards (wrapped in `<div class="se">`
+  for the tokens) and opens the same modal. The war payload's phases now carry `detail`, `tpl`, `hint`, `swipe`.
+- **Clients read.** `ro = isCl()` in the baseline, goals and budget sections (it was hard-coded false); no inputs render.
+  The server still accepts a client PUT on /api/season/war (2026-10-10 rule): the page just does not offer it.
+- **Labels.** Headings and verdicts use the season item's name (`seasonLabel()` in both files); real dates (the BF marker,
+  the last-year row, countdowns) stay "Black Friday".
+- Checked on a local harness (scratch two-root server + fixtures + headless Chrome over CDP, team and client, one brand and
+  all, legacy `war`, renamed label, light, 390px): no exceptions; not run against the real workers.
+- (Merge note, 2026-10-13.) The War Room merge first set `ro = isCl()` on the plan sections; that was reversed on merge:
+  a client EDITS its own plan (the brand edition, 2026-10-10), so `ro = false` stays and only notes, alerts and the
+  stock check are the team's. The Season item is three pages: `warplan` (The Plan), `warlive` (Live), `season`
+  (Offers and dates); `war` still routes. index.html sets `window.WAR_MODE` in `DR()` from the page id.
+
+## 2026-10-13: Make iterations, New look / New ideas make NEW pictures
+- Cole: iterations of a winning ad came back as the same ad with the words moved. Cause: `StudioTab.iterate` put the
+  running ad on every line as `line.photo` (a photo line is kept as shot), whatever was being tested. Now only words
+  tests (headlines, hooks, offer) keep the picture. For visuals / concepts / format the lines get no photo; the ad rides
+  as `setup.from_ad.image` with `fresh: true`, and `specOf` sends it as `inspo` with `ref_use: 'own'`. The worker's
+  `adPrompt` reads 'own' as "our own earlier ad: keep the product exactly, new scene, colours, camera, layout and type".
+  The iterate step says which tests keep the picture (`ITER_TESTS[3]`, `keepsPic`). Batches made before keep their photos.
+
+## 2026-10-13: WORK IN LOCUS, stage 1. The Work rail item (Calls, Action items); action items live in Locus, not Asana.
+
+Cole's decisions and the design: `docs/handoffs/work-in-locus.md`. Stage 1 is LIVE; stage 2 (briefs and the production
+board in Locus, a one-way Locus -> Asana mirror, then cut Asana) is next, after a week of use.
+- **Rail item Work** (`NAV.work`, button `#railWork` after Calendar, icon `#i-circle-check`): pages `calls` and `actions`,
+  both in `AGENCY_TABS` (team only; the rail group hides itself for a client through `applyClientMode`). The old page
+  ids `monday` and `meetings` route to `calls` in `show()` and stay in SHOWABLE / the `?open=` list, so every Slack button
+  and bookmark still opens. Reports is Daily Brief, Weekly and monthly, Dashboards again. TAB_TITLE / TAB_CRUMB /
+  TAB_WHO / PAGE_BRIEF / ASK_SUGGEST / the start tour have `calls` and `actions` rows.
+- **Work > Calls** (`profit/meetings.js`, `window.MeetingsTab.render`; `renderMonday` is the same page with the agenda forced
+  on): the Monday agenda on top on Mondays and from Friday (next Monday's prep; "Show it now" any other day, "Hide" to
+  fold it; `AGENDA` null = by the day, from `GET /api/meetings` `today`), then the calls list and the confirm screen as
+  before. Agenda step 1 ticks `POST /api/meetings/done {id}` (a p_action row); step 4 "Add to the list" is
+  `POST /api/actions {source: 'monday'}` and the item appears in step 1 at once. The "Open action items" card is gone
+  (it is the Action items page). Confirm's result lists each team item as "on the list" with its Locus link.
+- **Work > Action items** (`profit/actions.js`, `window.ActionsTab.render`): add box (text, brand when All clients, owner by
+  first name, due), owner chips, open items grouped per brand (agency-wide first) with tick / due pill (overdue red,
+  today amber) / kind / where it came from ("From the <title> call, <date>" opens that call on Calls; Today's calls; the
+  Monday call; the Strategist; by hand) / Edit (in-app modal: text, owner, due, kind, brand, Drop), and "Done in the
+  last 60 days" folded (tick again = back on the list). `?open=actions&act=<brand>&item=<id>` (`window.ACT_OPEN`) rings
+  and scrolls to one item; a done item opens the done fold. Data: account-health `/api/actions` (see its CLAUDE.md).
+- **Ads > Today's "Something else"** (desk.js `somethingElse`) now posts `POST /api/actions {source: 'today', source_id: row key}`
+  and the toast opens the list. No Asana task is made anywhere by these pages any more.
+- **How we work** (`profit/sop.js`, `SopPage.html()`) is a section of How to use Locus (`renderGuide`, `#gdSop`), after the
+  roles and before the tours. The `sop` section is gone from SET_SECS / SET_GROUPS; a saved `pf_set_sec` of 'sop' falls back
+  to Clients. Its wording now says action items live in Locus and briefs are still typed in Asana until stage 2.
+- Script versions: meetings.js?v=3, actions.js?v=1, sop.js?v=2, desk.js?v=20. NOT tested in a browser (no sign-in here):
+  the Calls page with the agenda, the Action items page, the Today modal; worker tests cover the data and the routes.
+- Same day, second pass (Cole: "none look the best": the first run threw away what made the winner work and drew a
+  generic belt). Now: (1) the product comes from the ad's link (`/products/<handle>`, `o.link` from ASSETS in v2.js),
+  is put on the batch with its Shopify photos, and is NAMED in the brief text (else the brand brain's best test, another
+  colourway, took over the lines); (2) 'own' in `adPrompt` = keep the winner's DESIGN LANGUAGE (boldness, title lettering,
+  one colour world, product as hero), change the idea; (3) the art director gets the winner as `own_ad`
+  (account-health studio-ai.js plan step) and may give each ad its own title art. Tested live on Dartee 376-3 (Bone Dry):
+  three designed graphics (LINE UP / TEXTURE / ON THE HIP), Bone Dry on all three, "Shop Bone Dry", $0.99.
+
+## 2026-10-13 (second pass): ONE PAGE, "Action items". Supersedes the Work / Calls split above.
+
+Cole: "Work" meant nothing, the Calls confirm screen was clunky (expand to read the summary, check boxes, three dropdowns per
+row, client lines badly spaced) and nothing said what approving would DO or where a brief goes. Now:
+- **One rail item, Action items** (`NAV.work` = `[['actions', 'Action items']]`, button `#railWork` data-t `actions`). Old ids
+  `calls`, `monday`, `meetings` route to `actions` in `show()`. `profit/meetings.js` is DELETED; `profit/actions.js` is the page
+  (`window.ActionsTab.render`, CSS `#aicss`, classes `.ai-*`, tokens only). `?open=actions&meeting=<id>` (index sets
+  `window.ACT_MEETING`) rings that call's card or opens it under Past calls; `&item=<id>` rings an item (`window.ACT_OPEN`).
+- **To approve** (top, only when Locus read calls): one card per `extracted` meeting (`/api/meetings` then `?id=` for each,
+  8 max). The summary is full text, editable in place. Per brand: Decided (bullets), To do = one row per item: a TYPE pill
+  (Task / Brief / Ask the client = kind team / brief / client_owes), the words (contenteditable, Enter commits, Escape
+  reverts), an owner chip (select styled as a chip; hidden on Ask rows), a due chip (opens the browser's own date picker via
+  `showPicker`), and x to leave it out (strikes through, ↺ puts it back). The model's `client` items are moved into the
+  client block on load. The client block is a quote block: "<Brand> reads this in the weekly report, under This week" and
+  "And under What we need from you", lines editable, + Add a line. **"Approving will"** above the button is counted from the
+  card each time anything changes (tasks per owner, briefs per brand into Asana, asks in Requests, report lines, the Slack
+  notes) and ends "The client only sees the report lines and the asks." One button: Approve and send; Skip this call asks first
+  (`window.confirmModal`). After approving the card becomes a one-line receipt with the Asana links.
+- **The list**: owner chips (Everyone, each person, "(you)" on the signed-in name), one add row (text, brand on All clients,
+  owner, due, Add; Enter adds), groups per brand (agency-wide first). Rows: round tick, words (click to edit, saved on blur),
+  Brief rows link "Brief · Asana ↗", owner and due chips save on change, x drops (confirm). Meta line: where it came from.
+  **On Mondays and Friday to Sunday** (or "Show them now") each brand group also shows last week's revenue / spend / MER vs
+  plan (from `/api/meetings/monday`) and "<name>'s plan for this week" folded, red brands first (`/api/hub/command`), and the
+  week's theme card sits above the list.
+- Folded at the bottom: Done in the last 60 days (tick to put back) and Past calls (each opens to its summary and what
+  happened; skipped or failed ones have Read it again; Check Fireflies now).
+- Checked in the browser pane against a stub harness (scratchpad, not committed): approve flow payload (type change, drop,
+  in-place edit, client lines), every list action's request, done and past folds, 375px with no sideways scroll, light and
+  dark. NOT checked against the real workers (no sign-in here). actions.js?v=2, sop.js?v=3.
+- Same day, third pass (Cole: "on the hip looks AI, it doesn't match up on the person" and "these aren't in safe zones").
+  (1) Designed ads (not a photo line, not exact) are made SQUARE again (`makeOne`: `spec.square`, `SQUARE_LAYOUT`,
+  zone checked against `SQ_ZONE`), and the browser's existing `extend()` paints only the top and bottom bands, so every
+  word sits in the centre square by construction; the model ignored the 4:5 layout rule whenever it drew big title
+  art. Photo-as-the-ad lines stay 4:5. (2) The art director (account-health studio-ai.js plan) never plans an AI-drawn
+  person wearing or holding the product; only a real photo line may show a person. Tested live on Dartee 376-3: ZERO
+  BORING / TEXTURE / FIND YOUR STATEMENT, all words inside the square, no people.
+
+## 2026-10-13 (third pass): Action items built from the approved mock, after an audit. Supersedes the second pass's UI.
+
+Mock Cole approved: https://claude.ai/artifact/XtmEpeYQjhDjfywkq3DJSz. Audited against Linear's Triage (accept / decline
+fast, AI suggests and a person confirms), Asana's My Tasks (group by due), Todoist's quick add (parse owner and date from
+the words, show what was understood) and Fathom / Granola meeting action items (review before anything is sent).
+`profit/actions.js` (v=3) is the whole page; what changed from the second pass:
+- **No type pills, no browser dropdowns.** Items sit in labelled sections with column headers and one shared grid
+  (`.ai-grid`: words | owner | due | quote + ⋯), so every owner and date lines up: **Mobius does** (team jobs, list only,
+  never Asana), **New ads** (kind `brief`: numbered Asana briefs), **Client does** (kind `client_owes`: Requests asks; the
+  report's "What we need from you" is FILLED FROM THESE, never typed twice), **Client reads** (the "This week" lines). An
+  empty section is one "+ Add ..." line. Owner, due and ⋯ open Locus's own menus (`pop()` / `ownerMenu` with avatars and
+  roles / `dueMenu` with quick picks and a month calendar / `listMenu`), fixed-positioned, closed by Escape or a click away.
+- **Multi-brand calls:** each brand is a block you fold (`.ai-brand`, closed by default when a call has more than 3 brands
+  unless it has a flag) with a one-line count ("2 jobs · 1 new ad brief · 1 ask · 2 report lines") and "Leave this brand
+  out". ⋯ moves an item to another section, to another brand on the call, or to any brand (a new block), or leaves it out.
+- **Flags, not gates:** "N items need an owner · N need a date" under the summary; owner / due chips show "Needs an owner"
+  / "Add a date" dashed. Approving is still allowed.
+- **The quote:** each item's button shows the words from the call that created it and the m:ss mark (meetings.js SCHEMA
+  `quote`, `at`; older reads have none and the button is greyed).
+- **"Approving sends"** is one row of counted chips (jobs on the list, briefs to Asana, asks to the client, report lines,
+  Slack notes; each explains itself on hover) instead of a paragraph. Ctrl+Enter approves the card in focus.
+- **The card is a model** (`CARDS[id]` from `modelOf(meeting)`), drawn from data and redrawn on each structural change;
+  edits survive a list reload. Approve sends the same body shape as before.
+- **The list:** quick add parses the words as you type (`parse`: a team first name = owner; a brand's name or unique
+  first word = brand; today / tomorrow / weekday / next week / in N days / 10/16 / Oct 16 = due) into three chips you can
+  click to change (`QA`). Views Everyone / Mine / Late / Briefs with counts; Person filter and Group by Brand / Due date
+  (Late, Today, This week, Later, No date) / Person (`ai_group` in localStorage) as menus. Rows: tick, words edited in
+  place, Brief · Asana link, owner and due menus, ⋯ (open the call, change brand, drop). **Waiting on the client** =
+  account-health `/api/actions` `waiting` (Requests asks: open with days waiting, done in the last 7 days) inside each
+  brand group, or one "Waiting on clients" group. Monday numbers and the plan per brand as before.
+- No unread badge on the rail item (Cole's standing rule). Checked in the browser pane on the stub harness: menus, the
+  calendar, quote, move between brands and sections, leave a brand out, the counts, Ctrl+Enter payload, quick add parse,
+  the three groupings, views, an owner edit, 375px with no sideways scroll, light and dark.
+
+## 2026-10-13 (fourth pass): Calls, Tasks, Production. Supersedes the one Action items page.
+
+Cole: "the calls and the tasks should be separate", views like Asana and ClickUp, and ads as a pipeline. Handoff and the
+approved mock: `docs/handoffs/work-calls-tasks-production.md` (https://claude.ai/artifact/QFzWFes5eRwKNXNXm1xcPV).
+- **Rail item Work** (`#railWork`, `data-t="tasks"`) = three pages in `NAV.work`: **Calls** (`calls`, `profit/calls.js`,
+  `window.CallsTab`, CSS `#clcss`, classes `.cl-*`), **Tasks** (`tasks`, `profit/tasks.js`, `window.TasksTab`, `#tkcss`,
+  `.tk-*`), **Production** (`production`, `profit/production.js`, `window.ProductionTab`, `#pd-css`, `.pd-*`). All three in
+  AGENCY_TABS. Old ids: `monday` / `meetings` -> calls; `actions` -> calls when `window.ACT_MEETING` is set (a
+  `?meeting=` link), else tasks. `?open=actions|tasks&item=<id>` (Slack reminders, `itemUrl`) still opens the task
+  (`window.ACT_OPEN`). actions.js still loads but no page renders it any more.
+- **Calls** = an inbox. Monday block on top (Mon and Fri to Sun, or "Show them now": theme + each brand's numbers and plan,
+  red first). "Waiting on your OK" + count; the first call open as ONE table (Item / Goes to / Who / Due) grouped Mobius
+  does, New ads, Client does, Client reads, a tick per row (unticked = dropped), every cell changes in place (Goes to is a
+  menu: the task's area, another section, another brand); Approve N / Skip this call; Ctrl+Enter approves. Other calls
+  are one line with counts and Review. History table (Date, Brand, With, Length, What it made, Status, Open) from the
+  `made` / `with` / `brand_ids` the meetings list carries. The confirm body keeps the old shape plus `area` per team item.
+  The Brand filter is local (starts from the picker). The meeting's model is `notes` (never `extracted`).
+- **Tasks** = a workspace. Quick add (`/api/actions/quick`, falls back to plain `/api/actions`); View List / Board /
+  Calendar; Group by Brand / Person / Due / Area (one setting drives list sections and board columns); Only mine; Area
+  chips (Other shows only when a row has no area); all in localStorage `tk_prefs`. Board: drag a card to another column =
+  that field changes (`patchFor`); "+ Add" prefills the column's value; Late takes no drops. Calendar: Mon to Sun plus
+  Later / no date (overdue items sit there too), or the month; drag to a day = the due date. "Waiting on client" (Requests
+  asks) is the last group / column with a coral dashed tick and opens Requests. A click opens the edit window (words,
+  who, due, area, brand, Mark done, Drop it). Brief rows (`kind: 'brief'`) are left out: new ads live on Production.
+- **Production** = the pipeline over p_br_batch (account-health `/api/production`): Brief, Making, Review, Ready, Live.
+  Brand and Format chips (format colours: Static brand, Video bad, UGC `--c-tiktok`, Carousel `--c-email`), drag between
+  columns (`/api/production/move`; the toast says "Moved in Asana" or Asana's reason), "Open review" opens the file /
+  brief / Asana task, "Launch to Meta" opens `LaunchToMeta.open` when the Ready card carries `studio_ad` (newest
+  approved Studio ad of a batch tied to the test), else switches to the brand and opens Studio with a note. "+ New
+  brief" / "+ Brief" = an in-app window -> `/api/production/brief`. Live shows the newest 12 with "Show all N".
+- Checked on a stub harness (scratchpad, deleted): every write's request body, the menus, drag on all three surfaces,
+  light and dark, 375px with no page sideways scroll. NOT checked against the real workers in a browser.
+
+## 2026-10-13: THE LEAK FINDER (`profit/leaks.js`, account-health `src/leaks.js`). Read before touching it.
+
+Cole: "where things are leaking... Google Ads, PMax search terms, YouTube, TikTok, Meta, the general funnel, landing pages,
+conversion rate drop-offs against the industry... at the top of each thing." It replaces Viktor's weekly Search Term
+Report. Handoff `docs/handoffs/leak-finder.md`; approved mock https://claude.ai/artifact/BiKJGU8QkUFmCEMr1q5PFz
+(`docs/locus-hub/leak-finder-mock.html`).
+- **One list per brand** from account-health `GET /api/leaks?act=&days=30` (the engine lives there because Google Ads,
+  GA4, Klaviyo and the model all live there; the handoff's `/api/hub/leaks` was not built as a second path). Each leak:
+  area, title, number + source, benchmark + source, cost a month + how, fix, who, go (a page id), items (search terms /
+  PMax categories), apply (negatives). `areas` says per source ok / not_linked / thin / error with the note.
+- **Where it shows** (`window.LeaksCard`): `top(host, H, page)` right under the page head on Ads > Google (`google`,
+  and Search terms = `gterms`), Ads > Meta Overview (`meta`), Ads > TikTok, Store > Website, Email (v2.js `mountLeaks`
+  after each screen's render). That page's top 3 by money; NOTHING is drawn when the page has no leak. `full(host, H)`
+  on Home > Day check for one brand (desk.js `#dkLeaks`, under the day's verdict): 6 rows + "Show all N" + what was
+  checked per source + the benchmark sources line. Cached in the page 5 minutes (`CACHE`), the server an hour.
+- **Add negative** (one term) and **Add all N**: in-app modal; account-health `POST /api/leaks/apply` without confirm =
+  Google `validateOnly` (nothing written), with confirm = the write; toast Undo = `POST /api/leaks/undo`. Clients have
+  the same routes for their own brand (brandguard CLIENT_RULES, both copies), like `/api/google/write`.
+- Checked on a stub harness with Lucky's real list (deleted): dark, light, 375px (no sideways scroll), the modal.
+  index.html loads `leaks.js?v=1`, `v2.js?v=53`, `desk.js?v=21`. The modal and toast use index.html's `.modal-wrap`
+  and mobius.css `.lx-toast`; every colour in leaks.js is a v2 token.
+
+## 2026-10-13 (fifth pass): the morning card's settings (account-health morningcard.js)
+
+- Agency settings > Slack and sending: **Morning posts go out at** (replaces "Daily Brief send time"; same `#btHour`,
+  `/api/brief-time`, now one hour for the client daily, the weekly / monthly drafts and the morning card, default 5am
+  Central), **The morning card** (switch `#mcOn` -> `PUT /api/settings {morningCard}`; brand picker `#mcAct` + "Preview
+  this morning's card" -> account-health `GET /api/morning-card/preview?act=`, shown in a noteModal as plain words with
+  @names and what its thread will hold; nothing posts), **Where the drafts post** (now also the weekly and monthly drafts
+  while the card is on; shows `dailyBriefsError` when the agency channel last refused a draft). The "Today's calls in
+  Slack" card is gone (the card carries it). Engine and rules: account-health/CLAUDE.md, same date.
+- **Second pass (2026-10-13): the cross-check and Push back** (`leaks.js?v=2`). Each row carries the review's verdict
+  chip (Real / Check first / Not the cause / Measurement), an "Across channels" line (the why, citing the other
+  channels) with "Same root: X", and "Before you act" (the one thing to rule out). Every row has **Push back**: an
+  in-app modal (who says so from the team list, their role preset from the area, what they said, "every brand" for the
+  team only) that saves a lesson, shows its verdict (Holds / Partly / Does not hold, the why, "From now on") and
+  re-reads the list. The Day check card adds the review's one-line summary as its lead and a "What the team taught it
+  (N)" fold with Remove. The top-of-page total leaves out Not the cause and Measurement. See account-health/CLAUDE.md.
+- **Third pass (2026-10-13)** (`leaks.js?v=3`): chips read Worth doing / Check first / Look elsewhere first / Check the
+  numbers, the fix line is labelled **Suggestion**; the Day check card has an AI bar (when the last check ran, what it
+  cost, what each chip means, "the calls stay yours") with **Run the AI check (about 6 cents)** for the team
+  (`load(act, 'ai')` = `?ai=1`, through the card's own redraw); top-of-page cards say "AI check <date>" or "Not
+  cross-checked yet". Lessons show the **final call** (Go with the team / Go with Locus, in the fold and in the Saved
+  modal after a pushback Locus does not fully agree with). The page Cole reviews: https://claude.ai/artifact/BiKJGU8QkUFmCEMr1q5PFz
+  (`docs/locus-hub/leak-finder-mock.html`, the real leaks.js inlined on Lucky's Oct 13 data).
+- **Fourth pass (2026-10-14): the full list lives on Home > Overview, not Day check** (Cole: "it's not on the
+  overview? ... it only shows one suggestion?"). One brand: `LeaksCard.full` under Needs you today, opens on the top 3
+  to act on, "Show all N leaks" opens every leak in place (then "Look elsewhere first, or check the numbers" as its own
+  group, What was checked, the lessons, Show fewer). All clients: `LeaksCard.brands` = one row per brand with its
+  biggest leak to act on, a month, how many, when its AI check ran (each brand a plain read, three at a time; click =
+  that brand's Overview via v2.js `pickAct`). The "Across channels" line says which AI check wrote it ("AI check,
+  Oct 13"), since the numbers beside it refresh hourly. Top-of-page cards' "Every leak" link opens Overview. Day check
+  is only about yesterday again. leaks.js?v=4, v2.js?v=54, desk.js?v=22.
+
+## 2026-10-14: PRODUCTION V2 (prodsheet.js, review-ui.js, review.html). Supersedes "Open review" opening Asana / Frame.
+
+Approved mock https://claude.ai/artifact/Tw9a67Zb4qLg5ZgFDApUMj (Cole OK'd v7 after research). Backend: account-health
+CLAUDE.md, same date.
+- **Board** (production.js v2): a card click opens its SHEET (`ProdSheet.open`, V2UI.panel wide): title, owner, due, launch,
+  client approval, tabs **Brief** (kind New idea / Iteration / Resize or cut / Something else; format Static / Video / UGC /
+  Carousel; fields follow: Video hooks + script table, UGC show/say + creator/do/don't, Carousel card table, Static
+  headline/subhead/CTA/layout + optional more ads; inspiration per line and per brief = upload or paste a link; sizes; post
+  copy; "Write it with AI" fills empty fields only, marked "filled by AI"; autosave 2.5s after a change, Save now; "Send the
+  idea to the client"), **Files** (upload a new version, Review per version, send the ad to the client, copy client link),
+  **Comments** (@Name DMs). "Open review" = the review viewer when the card has versions. `?card=<id>` opens a card.
+  "+ New brief" opens the new card's sheet. The header says "Asana mirror off" when it is.
+- **Review viewer** (`review-ui.js`, `window.ReviewUI.open`): versions v1, v2, Compare (side by side); tools Pin, Box,
+  Arrow, Pen, Mark in four colours (coral, yellow, blue, green = bad, warn, brand, good tokens); the drawing is attached to
+  the next note, stored 0..1; on video the note keeps the second and the drawings show near that second; notes numbered,
+  team ticks Fixed ("Fixed in v2" on older versions); Approve / Ask for changes (a note required). Shared by Locus and the
+  public `review.html?t=` (no login, asks the viewer's name, light/dark by the device; its own tokens like s.html).
+- **Client** (brand edition): `production` left AGENCY_TABS; Work shows Production only. `ProdSheet.client` = Needs you
+  (ideas and finished ads sent for their OK) + Coming up as a list or a month calendar by launch date; an idea opens the
+  sheet read only with Approve the idea / Ask for changes, an ad opens the review viewer. Home's "N waiting for you"
+  (clients.js waitingLine) counts these too.
+- **Agency settings > Integrations**: "Asana mirror for Production" card (`#pdMirror`, `ProdSheet.mirrorCard`): On / Off
+  (confirm), what stops, "Cards not yet in Locus: N" with the list. Cole flips it; nothing in Asana is archived by code.
+- **Photos**: Production, Tasks and Calls avatars use `ProdSheet.photoOf(name)` (Google sign-in photo, else Slack) when known.
+- Checked on a stub harness in the browser pane (deleted): sheet edits, AI fill, kind/format switches, a drawn box posted
+  as a note, compare, ask for changes, client list/calendar/read-only idea, mirror toggle, 375px no sideways scroll, light
+  and dark. NOT checked against the real workers in a browser.
+
+### 2026-10-14 (afternoon): THE BRIEF IS ONE WRITTEN PAGE (mock v9). Supersedes the Brief tab above.
+
+Cole: "did you really research how these briefs should be made? ... Asana lets you bold, bullet, number, add images, link
+anything". The team's real briefs are one flowing description, so the 17-field form is gone (prodsheet.js?v=3,
+review-ui.js?v=3, production.js?v=3; backend in account-health/CLAUDE.md, same date).
+- **Brief tab** = starting-page chips (New test / Iteration / Resize or cut / Blank page; a page with no words opens on
+  New test with the card's own ad numbers, nothing saved until someone types; once words exist the row reads "Start again
+  from" and asks first), a toolbar (B I U S | Heading, bullet list, numbered list, Quote | Link, Picture, @ | Write it
+  with AI), the page (`.ps-doc`, contenteditable, `document.execCommand`), then Format (seg) and Sizes (chips) under it.
+  Grey hints (`[data-ph]`) vanish the moment they are typed over: `beforeinput` replaces the span with the typed letters
+  as PLAIN text (never inside the bold label before it; on delete a zero-width space holds the caret, the worker strips
+  it). AI words are tinted (`[data-ai]`) until edited. Pictures and videos: the Picture button, paste, or drop onto the
+  page (kind `inline`, inserted as `<img data-file src>` at the caret with a progress hint while it uploads). Links: the
+  Link button (selection or pasted), Ctrl+click opens. Ctrl+B/I/U/S. The model follows every keystroke (`sync`), no
+  repaint while typing; Format / Sizes / a starting page repaint. Clients see the page read only, hints stripped.
+- **Files tab** = a drop zone ("Drop the finished ads here", pick files, several at once, no size limit, name files with
+  the ad number), uploading cards with a per-file progress bar, then ONE GROUP PER AD ("Ad 48-3", versions newest first,
+  "Compare v1 and v2" when there are two or more; a file with no number is "The ad"). `upload(H, id, file, kind,
+  onProgress)`: up to 20MB = one XHR POST; bigger = `upload/start`, 24MB parts three at a time with retries (XHR for
+  progress), `upload/finish`. Review and Compare open `ProdSheet.review(H, id, {version, compare})`, which shows ONLY that
+  ad's versions (`ReviewUI.open` gained `start`: a version id or 'compare'); decide sends the ad's newest `file_id`.
+  `review.html` (the public link) shows one ad at a time and lists a button per ad when a test has several.
+- Checked on a stub harness in the browser pane (deleted; mocked API + XMLHttpRequest): the starting page, typing over a
+  hint, Backspace on a hint then typing, Bold, autosave, Start again label, AI fill marks, the written page with an inline
+  picture and a link, the Files groups, a drop of a small PNG and a 25MB MOV (parts) with progress, Compare opening the
+  review viewer on v1 and v2. NOT checked against the real workers in a browser.
+
+### 2026-10-14 (evening): REVIEW REDESIGN (mock "Review redesign" page, approved). Supersedes the Files tab and viewer above.
+
+Mock: https://claude.ai/artifact/Tw9a67Zb4qLg5ZgFDApUMj (page Review redesign: A Files, B Viewer, C client link).
+- **Files tab = cards** (prodsheet.js `filesHtml`): one card per ad from the worker's `ads` (newest version large,
+  4:5, the whole picture is a button that opens the viewer at that ad), status chip (Needs review / Changes asked /
+  Approved; a client sees "Waiting for you"), v badge, open-note count, Approve / Ask for changes on the card (an inline
+  note box), a decided ad shows who and Change (reopen), "Compare vN-1 and vN". Filter chips (All / To review / Changes
+  asked / Approved), Upload, Send to the client, Copy client link, Review all N (opens the viewer at the first ad
+  waiting). Files drop anywhere on the tab (or the dashed line). The tab is labelled "Ads N".
+- **Viewer** (review-ui.js, rewritten): full screen. Top bar = back, previous / next ad, "Ad 48-2, 2 of 4", format,
+  version buttons + Compare, Copy client link (team), the call for THAT ad (Ask for changes / Approve vN, or the call made
+  with Change). The ad in the middle with a floating toolbar (Note = click to pin, Box, Arrow, Pen, Highlight, 4 colours,
+  remove drawing). Strip of every ad at the bottom with a status dot; keys: arrows = ads, N = note, Space = play, Esc.
+  Right panel: Notes (Open / Resolved / All, numbered like the pins, replies threaded, Reply, Resolve for the team) and
+  Versions. Approving jumps to the next ad still waiting. API: `ReviewUI.open({ ads: [{ad, label, status, by, files}],
+  startAd, start, comments, canDecide, api: { note(fid, body, shape, at, name, parentId), decide(ok, body, fid, name,
+  reset), fixed, share, reload } })`.
+- **Client link** (review.html, rewritten): brand header, name asked once (localStorage `rv_name`), "N of M decided"
+  progress, the same cards with Approve / Ask for changes / Change, the same viewer in guest mode, "Read the brief",
+  a thank-you when all are decided. Light or dark by the device.
+- **Brief labels on their own line** (Cole: the media buyer triple-clicks a line to copy it): templates and every saved
+  page put `Headline` bold on one line and the words under it (worker `splitLabels`), and a Copy button appears beside
+  the line under the pointer in the brief (written or read only), copying the words without hints.
+- Checked on a stub harness in the browser pane (deleted): cards, every viewer action (draw + post, reply, resolve,
+  arrows, approve then next, ask for changes, reopen, compare, close refreshes the cards), the copy button, the client
+  page (name step, inline ask, error line, viewer as guest), 375px without overlap. NOT checked against the real workers.
+- **Review fixes (2026-10-14, night, Cole's list):** notes and replies show the moment they are posted and save behind
+  (the worker answers before Slack DMs and the Asana story, which run in waitUntil); Delete on your own notes, replies
+  and Comments-tab comments (the owner can delete any; a decision cannot be deleted); a pin only for the Note tool,
+  every other drawing gets a small square number tag at its corner; mark-up colours are vivid tokens `--ann-red /
+  -yellow / -blue / -green` (v2.css and review.html, the same in both themes) with `--ann-on` / `--ann-on-light` for the
+  number; Enter posts and Shift+Enter is a new line (viewer, replies, card ask box, Comments tab, client page);
+  Download on every card, in the viewer, and "Download approved (N)" (files come with a `download` link, `&dl=1`);
+  Launch to Meta on an approved card (`LaunchToMeta.open({ act, tok, workFile })`: account-health launch.js takes a
+  Production file, a picture by its signed link, a video handed to Meta once via advideos `file_url`, the id kept in
+  `p_work_file.meta_video_id`; headline and primary text read from the brief's own lines); the Send to the client confirm
+  is the sheet's own `confirmBox` (Locus's confirmModal opened behind the sheet); toasts are Locus's `.lx-toast` (the
+  viewer has its own `.rv-toast` in the same style); buttons follow the design system (`ds-btn` sizes, radius, weight),
+  versions are a segmented control, the modal has the Locus radius, shadow and a short fade.
+- **Instant (2026-10-14, late).** Cards and strips draw `f.thumb` (600px WebP), the viewer `f.view` (1600), Download and
+  Launch keep `f.url`. `keepMedia(host, repaint)` in prodsheet.js and the viewer's `paint()` keep a picture or video
+  node whose src did not change across a repaint (no blank, no re-decode, a video keeps its place). A call (Approve /
+  Change / Ask) flips the card's chip the moment it is clicked (`guess`), the answer's `ads` confirms it
+  (`applyDecision`: cards at once, the comment list catches up behind), an error puts it back with the reason; no
+  `afterRev()` reload after a call. "Approve all N" (two or more waiting; the sheet's own confirm) = one request
+  `{all: true}`. "Download all (N)" = every ad's newest version, approved or not. The viewer opens from the sheet's own
+  copy of the card (`review(H, id, {data: T.data})`, 56ms instead of a second read) and a posted note updates the strip
+  counts locally. The sheet loads the photos and the card together. Measured on the local pair against the real
+  workers: sheet open 347ms, viewer open 56ms, note on screen in 61ms, a call's chip in 11 to 48ms, no picture node
+  replaced on any repaint. index.html: review-ui.js?v=8, prodsheet.js?v=9.
+- **Launch N to Meta (2026-10-14, night).** The Ads tab's bar shows "Launch N to Meta" when two or more ads are approved
+  (team only; one approved ad keeps the card's own Launch button). `LaunchToMeta.openBatch({act, tok, cardId, onDone,
+  onBrief})` (launch.js?v=4): ad set + button once at the top (suggested set with why; changing the set re-reads
+  batch-prep so a link that came from the set follows it, typed links and the brief's own stay), then one row per
+  approved ad: tick, thumb, "Ad 5-2 · v2 · Still", Name in Meta (editable), Link (editable, "Use this link for all"),
+  Headline and Primary text READ ONLY from the brief with a source tag under each (from the brief / this ad's own line
+  in the brief / from the ad set / Write it in the brief + "Open the brief", which closes the window and opens the
+  Brief tab). A row with no headline or primary text cannot be ticked. "Already in Meta: <name> (<set>)" on a row that
+  was launched before. Pick all / Pick none. Check N (dry run) = batch-preview: the ad set before and after with every
+  new name, a row's reason when it would fail; Create N paused = batch-create; the result lists Made / Not made per ad
+  with Ads Manager and Undo (the existing /api/meta/undo) per row. prodsheet.js?v=10.
+- **2026-10-14 (late).** Ads tab card: "Delete v2" (team only, muted link next to Compare; confirm modal; the ad falls
+  back to the version before or leaves the tab) = `/api/production/file/delete`. New brief: the window closes as soon as
+  the card exists ("its Asana task is being made"); the Asana link shows on the card once the background half is done.
+  A brief made by New brief opens on the starting page with grey hints (the server reads the untouched Asana template as
+  blank). prodsheet.js?v=11, production.js?v=8.
+
+## 2026-10-15: THE BOARD, Asana-grade (production.js?v=9, launch.js?v=5). Read before touching the Production board.
+
+Cole: "ours looks like the downgraded version of Asana", and the whole of Locus on iPad and iPhone. Audit, plan and the
+approved mocks (desktop, iPad, iPhone): https://claude.ai/artifact/CiYkbvV4PUNn4tojz9r9Cn. His picks: the card sheet stays
+the centred sheet; "Delete card" = ARCHIVE (off the board, Asana task completed, restorable); the phone bar is Home, Ads,
+Work, Store, More (Reports under More); phases 1 to 4 in order. All four are built; the Locus-wide phone pass is next.
+- **Board** (`.pd-wrap` flex, `--pd-h` = what the window leaves under the filter bar): 268px columns (300 on iPad), each
+  `.pd-cards` its own vertical scroll under a sticky header, the board scrolls sideways, a column collapses to a 44px rail
+  (`pd_collapsed` in localStorage), Sort (due / number / newest, `pd_sort`), cards with rows that only show when there is
+  something to say (waiting on the client, open notes, uploads, approved, result pills). A repaint keeps every column's
+  scroll; `patch(id)` redraws one card in place.
+- **Act from the outside**: right-click, the pencil, or "." on a focused card = the menu (Open, Open in Asana, Copy card
+  link, Move to, Assign to, Due date, Format, Send to the client, Launch to Meta (Ready only), Duplicate as iteration,
+  Delete card); the avatar, the date and the format pill on the card open the same pickers (`pick(kind, ids)`); column
+  header menu (collapse, new brief, select all, sort). Keys: arrows between cards, Enter opens, D / M / A pickers, X or
+  Space selects, Shift+click a range, Ctrl/Cmd+A the column, C copies the link, Delete archives, Esc clears. Menus are
+  `showMenu()` (one helper; a bottom sheet under 600px or on a long press). Writes: `/api/production/field`
+  (owner / due / launch_on / format, one field at a time; owner and due reach Asana), `card/delete` (archive; the toast
+  has Undo = `card/restore {id, to}`), `duplicate` (an Iteration page pointing at the card, then the new card opens).
+- **Select many**: the tick on hover, Ctrl/Cmd-click, Shift for a range in a column, or Select in the bar (phone: Select
+  mode, tap to pick). The floating bar: Move to, Assign, Due, Send to client, Launch N to Meta, Copy links, Delete.
+  Bulk = the per-card routes in a loop (optimistic, each failure named in the toast). Dragging a selected card drags them
+  all. Launch N across cards = `LaunchToMeta.openBatch({..., queue, step, total})`: one window per card in turn (each test
+  picks its own ad set), Done reads "Next card (2 of 3)"; a card with nothing approved shows the reason and "Skip to the
+  next card". A single Ready card with no approved ad opens its Ads tab instead.
+- **iPhone** (under 600px): one column per screen (`.pd-seg` picker, swipe = scroll-snap, `pd_col` remembered), Filters
+  button = bottom sheet with 44px chips (brand, format, sort), long press = the menu as a bottom sheet, the bulk bar sits
+  above the tab bar. The phone tab bar is Home / Ads / Work (`production`) / Store / More.
+- Server: `setField`, `archiveCard`, `restoreCard`, `duplicateCard` in account-health production.js; `asanaUserFor` in
+  meetings.js. Tests: account-health `node test-production.mjs` (9). Checked on the local pair against real data at 1440,
+  768 and 375 (menus, pickers, selection, keys, collapse, phone picker and sheets). No bulk write was made to a real card.
+- **Polish (same day, Cole's desktop review against Asana; production.js?v=10):** the card's cursor is the ARROW
+  (`cursor:default`), pointer on its controls, and the hand only while a drag is under way (`.pd.dragging`, set in
+  dragstart, cleared in dragend; `.pd-wrap.pan` while a pan runs). Chrome's white open-hand read as a blob on the card.
+  Columns are 300px at every width (the iPad rule is gone), cards pad 11/13 with a 7px gap. The card's action (Launch to
+  Meta, Open review) is its own last row, `.pd-r4 > .pd-act`, a full-width 28px button that cannot run past the edge (it
+  used to sit on the date row and spill on Ready cards). **Sideways:** `.pd-cards` is `overscroll-behavior-y:contain`,
+  never both axes (contain on x swallowed every trackpad swipe and Shift+wheel over a column, which is most of the board);
+  `sideways(wrap)` turns a wheel over a column header or the gaps into board scroll (over the cards the column scrolls and
+  the browser chains sideways on its own), and a mouse drag on empty board space (gaps, headers, under the cards) pans
+  (`pointer capture`, the click after a pan is eaten). Left / Right with a card focused already moved between columns.
+  `scrollbar-color` keeps the thin bar visible. **Archived:** an "Archived" button in the filter bar (phone: a row in the
+  Filters sheet) opens `archivedBox()`: `GET /api/production/archived?act=` (account-health `listArchived`, team only:
+  p_br_batch rows with board_stage 'done' and board_at in the last 60 days, `was` = the column the Asana section still
+  names) with a "Put back" per row that asks which column (the one it left marked) and calls the same `card/restore`
+  the toast's Undo uses; the board reloads on close. The Delete confirm says it can be put back from Archived for 60 days.
+  Checked on a stub harness (not committed) at 1440, 1280, 768 and 375 (the phone board still snaps one column per screen).
+
+## 2026-10-15: THE PHONE PASS (`profit/phone.css`). Read before adding a phone rule anywhere else.
+
+Cole: "the entire Locus doesn't seem optimized for iPad and iPhone." Audit and the list of causes:
+`docs/handoffs/phone-pass.md`. One stylesheet, loaded LAST (`phone.css?v=1`, after v2.css, kit.css, supply.css), no
+JavaScript changed. Every page id was measured at 375 and 768 on the local pair with an in-page audit (overflow,
+outermost wide elements, taps under 32px, text under 11.5px, tables without a scroller).
+- **The top bar under 720 is rows, not a strip:** `.hd-right{display:contents}` and `order` put the helper badge
+  beside the ask bar (row 1), the period and attribution pills on row 2, and `#hdActions` (a page's own buttons,
+  filled by `pageActions`) as a full-width row 3 only when it has children. The page head wraps (title, then the
+  quiet actions; Tour hidden). 721 to 979 (iPad, rail drawer): the bar wraps only when the pills do not fit.
+- **index.html's 44px rule (`button,.btn,.chip,.ctl,select{min-height:44px}` under 720) stretches anything drawn at
+  its own size.** phone.css resets `min-height:0` on the task tick, the board's format / avatar / due buttons, the
+  switches, the table chevron / more / cell buttons, the ask bar's input and Chats, and the logo box, and gives them
+  a hit area with a `::after` under `pointer:coarse` instead. A new small control in a card needs the same two lines
+  or it becomes a tall pill on a phone.
+- **Injected page styles load AFTER phone.css** (tasks.js, desk.js, calendar.js, production.js, v2.js all append a
+  `<style>` to head on first render), so a phone.css rule of equal specificity LOSES to them. Beat them with one more
+  class (`.tk .tk-tr.tk-th`, `[data-ui="v2"] .dk .dk-k`), or set a property they do not set.
+- Rows that must wrap on a phone carry `overflow-wrap:anywhere` (ad names with no spaces, campaign names, URLs);
+  a one-column grid row is `minmax(0,1fr)`, never `1fr`, or a long word still widens it.
+- Tasks under 600 is a two-line grid (`grid-template-areas`); the How we work tables scroll inside their card at every
+  width (they were cut off on the desktop too).
+- **Everything comes from the bottom on a phone (same day, Cole: "like a native app").** `profit/phone.js` (deferred,
+  after the boot script) owns one bottom-sheet primitive, `#lxSheet` (`window.LxPhone.open/close/more/client`). Under
+  720: More in the phone bar opens the sheet (client row, the destinations not in the bar, Tools, Brand settings,
+  theme, profile items; every row clicks the REAL rail / profile button), the client picker is the same sheet hosting
+  the real `#pfPick` menu node (moved in and back, so index.html's handlers keep working), every `.hd-period.open
+  .hd-per-menu` is fixed to the bottom by phone.css with `#lxMenuScrim` behind it, `#v2panel` and the card sheet slide
+  up full screen, the brief toolbar is one scrolling row. The rail drawer is iPad-only now. The helper's face is full
+  opacity on a phone and the ask bar has none (the two faded faces read as blur). A new popover anywhere in Locus
+  should be a `.hd-period` menu or use `LxPhone.open` so it lands at the bottom on a phone.
+- **Third pass (same day): Filters, the tab hint, the viewer, Launch.** Tasks under 720 keeps View and one
+  "Filters · N" chip; Group by, Only mine and the Area chips (`data-areaf`) live in a sheet that clicks the real
+  hidden controls. A `#v2seg` row wider than the screen gets `.lxs-fade` and centres the open tab (`segFix`). The
+  review viewer's swatches, tools and header buttons are reset from the 44px rule (round swatches, 40px tools, Back
+  closes, the call buttons share a row, the stage is capped at 50vh so Notes start on the first screen). Launch to
+  Meta shows a 200px picture; a batch row is tick + thumb + name on one line, fields full width under it. Any new
+  small control inside the viewer or a Launch row needs the same `min-height:0` treatment.
+- **Fourth pass (same day): the viewer's Notes are a sheet; the Right now row.** Under 720 phone.css hides
+  `.rv-side` inside the viewer and phone.js (`reviewFix`, run by the body observer after every review-ui repaint)
+  puts a "Notes · N" pill at the end of the strip; the pill, a pin or number tag on the ad, and Ask for changes
+  host the REAL `.rv-side` in `#lxSheet` (`.lxs-notes`, z 9700; re-hosted after each paint, put back on close).
+  Enter-to-post in the hosted panel is phone.js's (review-ui's own looks inside the viewer root); review-ui.js's
+  Reply reads its box beside the button (v9) for the same reason. **A new review-ui.js handler must find its
+  inputs from the clicked element, never from the viewer root, or it breaks in the sheet.** Day check's Right now
+  actions are a full-width row under the title (`#dkNow .v2h > .find`).
+- **Sixth pass (same day): Cole's iPhone screenshots.** The "Box attached · Remove" pill in the hosted Notes panel
+  and the Keep it / Delete pair are reset from the 44px rule in phone.css's viewer block (`.rv-pend button`,
+  `.rv-del .rv-btn`; the pill is one 32px nowrap line). **Hover-only overlays must sit inside `@media (hover:hover)`:**
+  iOS keeps `:hover` after a tap, so `.ps-pv:hover .open` (prodsheet.js) and `.pv:hover .open` (review.html) stayed
+  over the card while scrolling. **`theme-color` is ONE meta set from Locus's own `data-theme`** (`syncThemeColor()`
+  in the head script, called again by `paintTheme()`); the two metas keyed on `prefers-color-scheme` followed the
+  phone, and a dark Locus on a light-mode iPhone got a light grey status-bar band. phone.css?v=6, prodsheet.js?v=12.
+- **Seventh pass (same day): nothing fixed may linger, and the top keeps its notch inset.** A closed full-screen layer
+  must be `visibility:hidden` or `display:none`, never just opacity 0: Safari tints the status-bar band from a fixed
+  layer at the top edge, and the lazily made `#v2scrim` kept the band grey after the first popup. v2.css's
+  `[data-ui="v2"] .topbar` padding beats index.html's safe-area rule, so phone.css re-adds
+  `env(safe-area-inset-top)` on the top bar (under 980), `#v2panel` and `.rv-scrim`; a new full-screen layer
+  needs the same inset or its first row sits under the status bar blur. In the installed app (`display-mode: standalone`,
+  status bar outside the page) the top bar starts 24px down because iOS blurs the page's top edge. phone.css?v=8.
+- **Ninth pass (same day): Ask is the middle tab and the chat is a phone sheet.** `#tbAsk` sits between Ads and Work
+  (the helper face, lit while open); `#ask` is a large bottom sheet sized to the visual viewport with a phone header,
+  an empty state of four `askList()` questions, bubbles only for your questions and a 16px pill box with a send arrow.
+  ask-ui.js is unchanged: phone.js adds `.lxa-*` pieces inside #ask and phone.css hides the originals under 720.
+  phone.css?v=10, phone.js?v=4. (Superseded eighth pass:)
+- **Eighth pass (same day): on a phone Ask is at the bottom.** The top-bar ask bar is hidden under 720; `#tbAsk` (a round
+  button at the end of `#tabbar`, shown with the ask bar) opens `AskUI`, and `#ask` slides up full screen with a
+  one-row 34px header. The desktop and iPad keep the ask bar at the top. phone.css?v=9.
+- **Fifth pass (same day): review.html has the phone layer.** The public client link loads `phone.css?v=5` after its
+  own `<style>` and `phone.js?v=3` deferred after review-ui.js, and its `<html>` carries `data-ui="v2"` because that
+  attribute is the key phone.css uses for the viewer block (nothing else on the page reads it; the page keeps its own
+  token set). phone.js's Locus parts are inert there (no `#tbMore`, `#pfPick`, `.hd-period`, `.tk`, `#v2seg`); the
+  viewer gets the same pill, sheet and Enter-to-post. index.html's 44px rule does not exist on review.html, so the
+  `min-height:0` lines are no-ops there (measured). The sideways-pill hide rule is `.rv-strip .lxs-notes-btn` (two
+  classes, or review-ui's injected `.rv-btn` display wins). A new phone rule for the viewer belongs in phone.css's
+  viewer block and lands on both hosts; a new phone rule for the review page itself goes in review.html's own style.
+
+## 2026-10-14: THE CREATOR LINK IS ONE VIDEO BOARD (angles/app.src.js v20). Read before touching angles/.
+
+- **Why.** Cole walked Frost Buddy's creator hub (notes: `Lucky Golf/Creator Playbook/source-notes/
+  07-video-ideas-simplify.md`). Their Video Ideas page is just videos: "Watch these. Make your version.",
+  products as filters, ONE starred card, four steps, the checklist under it. v18 (a feed with How panels,
+  an opener row, two tabs) and v19 (a five-column grid with 13 stars) were both rejected the same day:
+  "simple is king". Cole's rule for the page is memory `creator-link-video-board`.
+- **Layout = Frost Buddy's, measured 2026-10-14 in Cole's signed-in Chrome** (portal
+  affiliate.frostbuddy.com/portal/video-ideas; Tailwind): `main max-w-3xl px-4 md:px-8`, grid
+  `grid-cols-2 sm:grid-cols-3 gap-3` (2 columns under 640px, 3 above, never more), cards `aspect-[9/16]
+  rounded-2xl` with everything ON the video (star top left, product top right on black/55, white play
+  button, caption bold 11px + creator 9.5px at the bottom over a black fade), 30 of 50 then "See more",
+  the four steps as one strip, the checklist as six green tinted boxes then pill lists. Ours copies that
+  (`.col` max 832px, `.grid` 3/2 columns, `.tile` IS the video, 24 then "See all N videos").
+- **The page, top to bottom.** Top bar (logo, "Before you film" jump). One-line hero + "Read Before you
+  film first". Category chips = the brand's enabled non-pinned sections that have videos, with counts,
+  only when 2+ (renamed to creator words 2026-10-14, `migrations/amb-005-section-names.sql`, e.g. Muni
+  belts, Gifts, On the course; the team can rename in Locus). The grid. The steps strip (Pick one, Copy
+  it, Film it right, Submit on TRYBE) with the ONE submit button under it. The checklist card: Please
+  stop filming these (red), the `guide` as tinted boxes, Always say / Skip these (`rules` split by
+  `SKIP_RE`).
+- **A tile.** Our video: caption = the idea title, line = "Ran as our ad" / "Our video". Another brand's
+  clip: caption = the proof `note` (the team's "steal this" line), line = "<brand>, not us". Category name
+  top right. Exactly ONE "Start here" star: the very first tile. Tap = the player (bottom sheet on a
+  phone with grab handle and swipe down, a card on desktop) with Previous / Next video (arrow keys) and,
+  for other brands, "Not our brand, but they did it well. Take the idea, film it with <brand>."
+- **Two board modes, per brand** (`p_amb_brand.board_mode`, `board_n`, migration `amb-004.sql`; pickers
+  "Board", "Rank top ads by" and "How many" under "Videos on the board" on Link and brief, profit/amb.js v21;
+  the last two are disabled while the board is hand-picked):
+  - `picked` (default, every brand today): every playable proof attached to the ideas, dealt round-robin
+    across ideas (each idea's lead video first, flagged "Film these first" ideas at the top), our own
+    before other brands' inside an idea.
+  - `auto`: `autoBoard()` in worker amb.js ranks the brand's own Meta VIDEO ads (`ads.media_type =
+    'video'`, last 30 days) by what staff chose in "Rank top ads by" (`board_sort`, migration amb-006,
+    2026-10-15, Cole: "we should be able to choose what we sort by"): `orders` (default, Triple Whale
+    `tw_ad_attr` lastPlatformClick Meta rows), `revenue` (TW sales), `roas` (TW sales / Meta spend, needs
+    $50+ spend and 1+ order), `hook` (3-second views / impressions, needs 1,000+ impressions). Organic
+    is not an option: we cannot see TRYBE creators' posts. Top `board_n` (4 to 50, default 20), and caches `[{ad_id, rank}]` in `board_json` + `board_at` for 6 hours
+    (a save on the tab clears `board_at`). The payload carries `board` (ids and rank only, never money).
+    The page shows those first (caption = the idea title when the ad is also proof on an idea, else the
+    first line of the ad copy from ad-creatives; line "#N right now"), then other brands' clips.
+    account-health `anglesBoardAds()` lets the slug play and cover exactly those ads on a LIVE auto page,
+    alongside proof. Tested on Ice & Gold 2026-10-14 (11 ads ranked) and set back to `picked`; switching a
+    brand on is Cole's call.
+- **THE STAFF SIDE IS THREE SCREENS (2026-10-15, Cole on a tablet: "stupid dumb to use").** `profit/amb.js` v23,
+  `paint()` + the block "THE SIMPLE STAFF SIDE": a top bar (link, Live switch, Copy link, Open as a creator), then tabs
+  **Videos** (default) / **Checklist** / **Settings** (view key `amb_view2`).
+  - **Videos** = the board exactly as creators see it, numbered, with the same category chips. It loads the public
+    payload (`GET /api/angles/<slug>` with the staff token) and orders it with `boardTiles()`, a copy of the page's
+    `buildTiles`. KEEP THE TWO IN STEP. Tap a video: watch it, caption (`p_amb_proof.note`, wins over the idea title),
+    category (`p_amb_proof.section_id`, wins over the idea's), whose video (uploads), To the top / Up one / Down one /
+    To the end (writes `board_sort` for every video, `POST /api/amb/board {order}`), Take it off (deletes the proof
+    row and an uploaded file). **Add videos** = From our ads (the picker), Upload a video (`/api/amb/upload` then
+    `{upload}`), Another brand's ad from Atria (account-health clip-to-angle with `angle_id: 'board'`).
+  - **Checklist** (2026-10-15 later, Cole: "Always say" read like every video must say it, and it was "a LOT that
+    people won't read") = THREE boxes of about three short lines: Before you film (title + one line), **Say it right**
+    ("only if you mention it"), Skip these. Stored in `p_amb_brand.checklist_json` {do:[{title,text}], say:[], skip:[]}
+    (amb-009, written for all five brands from their long lists). The page shows only this when it exists. The LONG
+    lists (`guide`, `rules`, `avoid`, `skip_json`) stay for briefs, the PDF and the Strategist, edited under Settings >
+    More > Full rules. The staff box warns past three lines.
+  - **Settings** = name, address, TRYBE link and button text, logo, colour, how the board fills, categories (rename,
+    show / hide, add), the PDF, and More: the old **Idea briefs** view (`angles`) and **Every other text field**
+    (`link`, the old Link and brief form), each with Back to Settings.
+  - Migration `amb-007.sql` (applied): `p_amb_proof.section_id`, `p_amb_proof.board_sort`, `p_amb_brand.skip_json`. New
+    videos take `MIN(board_sort) - 1` so they land on top. The public page sorts by `board_sort` (nulls after, in the
+    dealt order) on a hand-picked board.
+- **HOW A VIDEO GETS ON THE BOARD (2026-10-15).** Five ways, all ending as `p_amb_proof` rows:
+  1. **Board picks** (Ambassadors > Link and brief > "Pick ads from the account"): the brand's ads with spend in
+     7 / 30 / 90 / 365 days (`GET /api/amb/board-ads`: Meta spend, CTR, 3-second rate from `ad_daily`; orders,
+     sales, ROAS, CPA from Triple Whale `tw_ad_attr`), videos only by default, sort by spend / orders / sales /
+     ROAS / CPA / CTR / stops the scroll / most recent, search, tick any number, "Add N to the board" (in the
+     list's order). Stored as kind `meta` with `angle_id = 'board'` (the `BOARD` sentinel; no idea needed),
+     reordered and removed in "Picked from the ad account" (`POST /api/amb/board` {add, remove, order}). The
+     payload sends them as `picks`; on a hand-picked board they come FIRST, then the ideas' videos. Covers and
+     playback are authorised by account-health's existing proof rule (any shown meta proof on a live page).
+     `ads.status` is not synced, so "Running now" = spend in the last 2 days.
+  2. **An idea's own videos** (idea editor > Watch first): a Meta ad by name, an uploaded file (R2, 95MB), or a link.
+  3. **Other brands' videos, from the ideas bot**: its "Creator link" button makes an idea with the reference clip
+     stored as an `upload` (plays on the page) and the "steal this" note; who = "Another brand (inspiration)".
+  4. **Other brands' videos, from Atria**: "Pull the video in" on an idea's inspiration row (account-health
+     `/api/atria/clip-to-angle`).
+  5. **The Strategist** (Slack or the ask bar): tool `add_to_creator_board` in account-health strategist.js puts the
+     brand's OWN ads on the board as board picks (named ads, or "top N by orders / sales / roas / cpa / ctr / spend /
+     hook" over N days), or takes them off, shown with their numbers for approval first. For another brand's video
+     it hands the thread to the ideas pipeline (way 3). Claude Code sessions use the same routes or SQL.
+- **Not shown any more (still stored and edited):** each idea's steps, openers, alt hooks, on-screen text,
+  do / don't, why; the First seconds hooks bank; the season card and chart; about / audience; inspiration
+  LINKS with no stored clip; ideas with no video (they appear once a video is attached).
+- **Routes.** None. `#rules` / `#checklist` scroll to the checklist (old PDF and Slack links).
+- **Look = Locus v2** (`profit/v2.css` tokens in `angles/app.css`): Inter, graphite dark by default, a true
+  light theme on `prefers-color-scheme: light`, one brand accent from `applyAccent` at 4.5:1 on each theme
+  (`--acc-d`, `--acc-l`). Logos sit on a white pill on dark. `build.py` V = 20.
+- **Testing note.** Headless Chrome does not paint the stored clips' first frames and lays out under ~500px
+  wrong; put the page in a 390px or 768px iframe for phone and tablet shots, and use the Browser pane for
+  clip frames. The pane stops painting when the app window is hidden.
+
+## 2026-10-15: AD CALLS v2 and ONE Goals and ad rules screen. Read before touching hub.js buyerList, v2.js creative() or rules.
+
+Cole approved the "Locus Ad Call Rules" page (https://claude.ai/artifact/PyQPNkUBVy8myEQQGxHiD1): the reasoning for every
+number (Poisson: a set truly on goal shows 0 sales 37% of the time at 1x spent, 14% at 2x, 5% at 3x).
+- **Defaults** (brand.js TEST_KEYS): cr_judge_x 2, cr_min_days 3, cr_scale_buys 3, cr_cut_zero_x 3, cr_cut_spend_x 3,
+  cr_cut_cpa_x 1.5, cr_anchor_pct 50. `min_spend` ($20) is gone (nothing read it). A rules doc without `rules_v >= 2`
+  ignores stored numbers equal to the OLD defaults (1, 2, 2), because the old Settings form saved every field.
+- **New rule fields**: `goal_metric` cpa | ncpa | roas | cpl, `goal_ncpa`, `goal_cpl`, `goal_meta`, `goal_google`,
+  `goal_tiktok` (platform goals in the main metric; Google / TikTok used by account-health leaks.js), `roas_guard`
+  on|off (never cut while ROAS beats the goal ROAS; kept sets are named in the brand's `note`, not rows), `window_auto`
+  on|off (a set under 1 result a day judged on 14 days). `goalOf(R, metric, platform)` in brand.js.
+- **buyerList**: wait = spent 2x the unit AND 3 days; the unit = the goal in dollars (ROAS: the brand's window AOV /
+  goal ROAS); a campaign's Meta objective decides (lead campaigns on cost per lead, awareness / traffic only Refresh);
+  new customers per ad from tw_order_touch + tw_orders first orders; leads from `ad_daily.leads` (new column, synced
+  from Meta actions lead / lead_grouped / pixel lead since 2026-10-15, no backfill); Refresh needs CTR down 20% AND
+  frequency up. Rows carry `metric`, `results`, `days`, `judged_on`, `goal_roas`, `top_ad`.
+- **The screen** (index.html `loadGoals`): Brand settings > Goals and ad rules = measure picker, every goal with the real
+  90-day CAC and the first-order break-even (new AOV x margin from /api/customers) and Use it, platform goals, every rule
+  as a sentence with AND / OR / NOT chips and the numbers inline, test calls, test minimums. Home > Goals shows the goal
+  read only with one button there (`addGoalTargets`). Creative's "Change it" opens it (openGoals).
+- **Measured after deploy (2026-10-15)**: calls barely dropped (45) because the GOALS are below what Meta last-click
+  shows (Bonk $25 goal vs $58; Ice & Gold $50 vs $173). Meta last platform click runs about 2x blended CAC, so a Meta
+  platform goal (goal_meta) is the lever; Cole and Ahsan set it, Locus does not.
+
+## 2026-10-15: REAL PRODUCT in Studio (the fidelity bench). Read before touching exact / real-product ads.
+
+Cole: "consistently make ads with AI that always get the logo right and always get the clubs right". Bench on Lucky
+(Carver 02, Eclipse Mallet, Stryker, hats, polo; every ad graded by 100% crops beside the Shopify photos, never by a
+vision score). Files: C:\Users\wetzl\Lucky Golf\Creatives\Giveaway\fidelity-bench. Results page: see the bench README.
+- Full AI on GPT Image 2.5 at 1536x1920 with the truth photos: 9 of 16 ads passed every check (hat wordmark and wedge
+  medallion right every time; 2 of 4 wedges drawn LEFT-HANDED, putter clover and heel wordmark wrong 4 of 4, a hybrid
+  missing its gold band). Empty AI scene + pasted cut-out: marks exact, 0 of 8 shippable (floats, looks pasted). AI
+  relight of that composite: still floating. Gemini image models: the account-health key is free tier (quota 0).
+- WINNER (now Studio's "Real product"): the real cut-out is placed on an EMPTY canvas FIRST, `/api/studio/make-real`
+  has the model paint the whole scene around it (`realPrompt`: short on purpose), then `realfit.js` (browser) finds
+  where the model left the product (`fit`, masked zero-mean correlation, coarse whole-frame at 1/16 with 6 candidates,
+  then 1/8, 1/4, 1/2) and `lock` puts the REAL pixels back lit by the model's smooth light only. Club ads: 10 of 12
+  on the bench (Cole caught 2 wedges whose AI-drawn shaft above the photo came out BLACK: the Carver photo ends at its
+  thin black band; fixed by giving `realPrompt` the fingerprint for anything drawn past the photo, 2 of 2 gold after),
+  2 of 2 first try live in Studio. Grade the parts the AI draws past the photo too, not only the marks. Gate `RealFit.GATE` 0.78 (good fits 0.80 to 0.96,
+  every bad one 0.72 or less); up to 3 tries, best kept; a failed fit is NEVER locked (it would paste a ghost product),
+  the ad shows "Check the product". ~$0.32 an attempt, about $0.40 a finished ad.
+- Traps measured on the way: the long designed-ad prompt (adPrompt) made the model return the canvas BLACK with no
+  words; a look that re-describes the product ("club lower-right, back of the head facing camera") makes the model
+  re-pose or MIRROR it, so the art director (account-health studio-ai.js) writes setting-only looks for photo ads;
+  the one-product check must be told stamped marks (FORGED) are part of the product and the box is a bounding box.
+- On by default for clubs and caps (`REAL_RE`), switch on the Product card. Soft garments (polos) and 3-item apparel
+  scenes fail the fit (the model re-drapes or drops items): leave them on full AI. The cut-out keeps which photo
+  edges the product touched (`edges`, a shaft cut by the frame runs off the ad's edge) and peels the soft studio floor
+  shadow (neutral, smooth, bottom third only). Every real ad has "Real product · check": the photo beside the ad,
+  whole and on its two busiest details at 100%. Change with AI, variations and the 9:16 re-fit and re-lock.
+
+## 2026-10-16: Bonk Golf creator link (seed_bonk_golf.py). LIVE, not on TRYBE yet.
+- `angles/bonk-golf`, 17 videos, hand-picked board, 4 categories (Show it working, Gifts, On the course, New drops). Research:
+  `docs/research-2026-10-16/bonk-golf.md`. Re-running the seed replaces Bonk's sections, ideas and videos.
+- Our videos are Bonk's own Meta ads (proof rows under `brand_bonk_golf`, ads under `act_12528825`: the shared seed lib's
+  `ads` guard uses the proof act_id, so it does not work for brand-first brands; this seed guards on the Meta act).
+- Other brands' clips were downloaded from Atria and put in R2 by hand (`wrangler r2 object put mobius-amb-media/amb/<brand>/inspo-<name>.mp4`),
+  then filed as `upload` proof with who "<Brand> (inspiration)". `inspo` kind with an Atria URL does NOT play on the v20 board.
+- Cole's rule (2026-10-16): only videos a person with a phone can film start to finish. No motion graphics, studio spins, CGI or brand films, even if they sold. Other brands' videos can be any product (joggers, hoodies); the format is what counts.
+- No submit link yet: the button hides until a TRYBE campaign link is pasted on the Ambassadors tab.
+
+## 2026-10-17: VetriPaws and Speedin creator links (seed_strip_brands.py). Seeded, links OFF until TRYBE.
+- `angles/vetripaws` and `angles/speedin`, 25 videos each, no concept twice (round 2 cut 7 repeats), sister brands selling supplement strips (dogs / adults).
+  Every video is ANOTHER brand's clip from Atria (VetriPaws has ~$50 of video spend, Speedin has no Meta yet), stored at
+  `amb/brand_<slug>/inspo-<name>.mp4` in R2. Research: `docs/research-2026-10-17/`. Phone rule applied, each clip watched.
+- One seed for both: `python seed_strip_brands.py <slug> <ideas.json> <checklist.json>`; ideas + checklist JSON came from the
+  research (scratchpad, not committed; the .sql files are). It never touches `live`; re-running replaces sections, ideas, videos.
+  Board order = hot first, then one category at a time (`mix`). Categories = the PRODUCTS (Cole 2026-10-17: any angle under its product, never angle names like "Stiff mornings"); every video sits under one product. Round 3 cut 13 look-alikes (one person talking to camera indoors) for new shot types: check FIRST FRAMES side by side per product, Andromeda groups look-alikes.
+- Uploaded clips only play once a link is LIVE (`/api/angles-file` checks `b.live`), so the staff preview shows covers-less
+  tiles. Switch each live on the Creators tab once its TRYBE campaign link is pasted.
+
+## 2026-10-18: LOOK-ALIKE ADS (hub.js `lookAlikeGroups`). Meta's own similarity and fatigue fields are empty.
+
+- Probed 2026-10-17 on six ad accounts (Graph v23 to v26): `creative_fatigue`, `creative_similarity_score` and
+  `creative_diversity_score` are VALID insights fields (fake names are refused) but come back empty on every ad, ad set,
+  campaign and account. Meta's `/act_x/recommendations` answers, but it is mostly upsell (Reels, GEN_AI_MVP, music,
+  Advantage+); its FRAGMENTATION flag names our numbered test ad sets, which are fragmented on purpose. Cole: skip both.
+- Instead, Locus judges look-alikes from its own AI tags (`ad_tag`, no new AI cost). Two ads that spent in the last 7
+  days, in the SAME ad set, are `same` (one asset_key twice) or `alike` (same format, hook, person, product and offer,
+  and message + notes share 40%+ of their words). Groups join (A~B, B~C).
+- Shown: a "Looks like N others" / "Same creative twice" chip on the Ads > Meta > Ads cards, the card "Ads Meta likely
+  counts as one" on that page (`d.alike` from `/api/hub/creative`), and a command center reason `similar` (warn when the
+  groups hold $100+ and 10%+ of the week's Meta spend), which the Strategist reads through /api/hub/command.
+- First run on real data (Oct 10 to 17): Lucky 36 ads in 11 groups, $1.1K of $3.5K (the "Black Wedges - N" set alone has
+  11 look-alikes); Dartee 29 ads, $546; Ice & Gold 25 ads, $244; the rest under $150. Fatigue is unchanged (command
+  center CTR / hook / frequency, Today's Refresh call).
+
+## 2026-10-18: THE EMBEDDED SHOPIFY APP (review 131577). Read before touching /shopify/*.
+
+Shopify paused the app: no usable UI ("Shopify could not be read: Shopify returned 403" on the reviewer's store), session
+tokens, billing, test credentials. Fixes and the resubmission text: `docs/shopify-app-review-2026-10-18.md`.
+- `shopify.app.toml`: `embedded = true`, `application_url = .../shopify/app`, scopes now add write_products and
+  write_discounts (Locus's shopify_product / shopify_discount). `use_legacy_install_flow` STAYS TRUE: the install is the
+  same classic grant; the callback now lands every store back inside the admin (`https://<shop>/admin/apps/<api key>`).
+- `src/shopifyapp.js`: `GET /shopify/app` = the page (App Bridge from Shopify's CDN, the client id in a meta tag,
+  CSP frame-ancestors for that shop + admin.shopify.com, no cookies or storage; a shop with no saved token is sent to
+  /shopify/install through App Bridge's top-level open). `GET /shopify/app/api/report` = the numbers, authorised only by
+  the session token (`verifySessionToken`: HS256 with the app secret, aud = the client id, dest/iss = the shop, exp/nbf).
+  `appReport` never fails for a refused part: orders denied (Protected customer data not approved) = products + one note;
+  a 401 forgets the token and sends the store to the install. Tests: `node test-shopifyapp.mjs` (4).
+- The old public `?store=` report (`/api/store-view`) answers plain sentences instead of raw Shopify errors.
+- The two stores in p_shopify on 2026-10-17 ("Dlwlrma Store", "OFS Signature Looks") were Shopify's REVIEWERS; never link
+  them to a brand. Clients can install only after the review passes.
+
+## 2026-10-19: Goal / break-even / real table (`goalsGlance` in index.html)
+
+Ahsan asked where to find a brand's break-even ROAS and target CPA; the answers were grey hints under the goal inputs.
+`goalsGlance(a, rules, customers90)` draws ONE table (cost per sale, cost per new customer, ROAS, plus cost per lead
+when set): the agreed goal (with "Makes money at the goal" / "past break-even"), break-even, and the real last 90 days
+coloured green / amber / red against goal and break-even, then a sentence with the inputs (margin before ads, AOV,
+first-order AOV). It opens Brand settings > Goals and ad rules and is the Home > Goals card. Break-even: cost per sale =
+AOV x margin, new customer = first-order AOV x margin, ROAS = 1 / margin. `/api/customers` headline now also returns
+`aov`, `cpa` (spend / paid orders), `mer`, `spend`, `sales`, `orders`. Real ROAS shown is the whole-store MER.
+
+## 2026-10-19: Brand > Client answers is a BRAND SHEET (brand.js `brandSheet`, replaces `callSheet` / CALL_SHEET)
+
+Cole: "these answers aren't laid out in a way that is useful for myself or the team". The call sheet was the form
+re-grouped (admin first, raw dumps, the same facts three times, the client's numbers never checked; Ice & Gold's "never
+say gold plated" sat in an unshown field). Built only from data the page has, no AI:
+1. **"<Brand> in one read"**: what they sell and why (first thought, rest folded), what to push in ads (best sellers with
+   push = yes), the offer now + codes + thresholds, **Never say** (profile donts + dos_donts + jargon, red), Always, a good
+   90 days, who signs off. Team profile edits win over the form. Answers 180+ days old are flagged.
+2. **The numbers** (`fillNumbers`, `/api/customers?days=90&journey=0`): They told us / Our goal / Locus measures for
+   average order, kept per order, break-even, ad spend a month, cost per sale, cost per new customer; a gap of 20%+ is
+   named and copied into "Ask them on the call". Stacks as rows under 600px.
+3. Reference cards: Who buys (personas as cards), What to sell, Offers and growth, How they look and sound (swatches),
+   Competitors, Content and proof, Contacts and access. Empty columns and "N/A / none / no" answers are dropped (`said`).
+4. Ask them on the call: not sure, blank must-haves (only when the form has answers), numbers that do not match.
+At a glance is not drawn on the Client answers view (the sheet carries it; "Edit our notes" opens `editProfile()`, the
+same modal). The full form stays folded under it. Only Ice & Gold, Yak and Grunk have filled forms (2026-10-19).
+
+## 2026-10-19: THE CALL SCREENS (`profit/callscreen.js`, `window.CallScreen`). Read before touching Work > Calls.
+
+Cole: "something pulled up that I would share the screen and go down every single week with the team." Approved mock:
+https://claude.ai/artifact/YbExG9VRV3untjLtPHjnJb (Monday call, client call, creative kickoff). Backend: account-health
+`src/callscreen.js` (its CLAUDE.md, same date).
+- **Entry**: Work > Calls opens with "Run a call" (three cards; calls.js `runHtml`, which replaced the Monday agenda block)
+  and `?open=calls&call=monday|client|kickoff[&act=]` (index.html sets `window.CALL_OPEN`). The screen draws into `#main`
+  with "← Calls"; Present = the browser's full screen on `#csRoot`.
+- **Every box is labelled where it comes from**: green "Locus fills it", blue "From <strategist>'s Slack plan", amber
+  "Typed on the call". Rail on the left = the order (Monday: Open, brands red first by `/api/hub/command`, Close; client:
+  six steps; kickoff: one per brief), a clock per step (Monday: 7 min red/amber, 2 min green, 4 unknown), Back / Next,
+  arrow keys, Ctrl+Enter = the last step. Side = what Finish will do, counted live.
+- **Monday brand step**: 1 last week's items (open p_action due by today, ticks are instant via `/api/calls/done`; due
+  later folds), 2 the read (the weekly report's numbers, winners and losers = ads that beat or fell under the ads' own
+  Triple Whale ROAS together that week, the strategist's read pre-filled from Slack, Google and Amazon rows with Radhesh's
+  and Hamza's Slack words, Google spend by campaign type loaded lazily), 3 batches (rows: what, who, due, keep tick; from
+  the Slack plan), 4 new jobs (type a sentence, Enter, `/api/calls/parse` reads owner and day), 5 client asks.
+- **Client call** shows only the client's own brand: their news, the read from the newest SENT report (week / month
+  toggle), This week from that report + promises typed, asks (open Requests + typed), Coming up (Calendar), recap +
+  "Post this recap in the client channel" tick. Internal tasks are NEVER shown on it (the client watches).
+- **Kickoff**: Production cards in the Brief column (parked templates / "Test" / bare numbers / 3 weeks with no due date
+  fold under "Show N older briefs"); the brief page from `/api/production/card`, the brand's winners, inspiration files,
+  the Drive folder, the designer's questions, then the deal (how many, format, who, due = kickoff + 2 working days) and
+  "Agreed: send it to Making".
+- Typing autosaves (`PUT /api/calls/state`, 700ms debounce, "Saved"). Finish asks first, then the server sends it all.
+- CSS `#cscss`, classes `.cs-*` (tokens only). callscreen.js?v=1, calls.js?v=4. Checked on the local pair against real
+  data (Monday, Grunk client call, kickoff; 1440 and 375). Finish was NOT pressed locally (it writes Asana and Slack).
+
+## 2026-10-19: SOCIAL, phase 1: WATCH (`profit/social.js`, `window.SocialTab`). Read before touching it.
+
+Plan and UI research (Sandcastles' cards, Virlo's "usually X, this one Y", Later's week grid for phase 2):
+`docs/locus-social/proposal.html`. Backend: account-health/CLAUDE.md, same date.
+- **Rail item Social** (`#railSocial`, `NAV.social` = `[['social', 'Watch']]`, icon `#i-play-circle`, after Calendar),
+  hidden unless the brand has Social on (`SocialTab.tabOk(act)`, read once per session from `/api/social/brands`;
+  `show()` keeps it in step like Products). Switched on in **Brand settings > Social** (`BRAND_SECS` `social`,
+  `SocialTab.settings`). A client sees it for its own brand when on (`clientTabOk`). `SOCR()` + `socialHost()` hand the
+  helpers in. TAB_TITLE / TAB_CRUMB / TAB_WHO / TAB_PURPOSE / PAGE_BRIEF / ASK_SUGGEST / SHOWABLE / `?open=` have
+  `social`. On 2026-10-19 Social is on for Lucky only, following Takomo, Vice Golf, Bad Birdie and the topic "golf wedges".
+- **The page**: Feed / Saved, whose posts (a select), Following N (a side panel: each follow's handles, last pull, errors,
+  Handles editor, Stop, Pull everything now), + Follow (in-app modal: A brand = one handle looked up everywhere, with
+  per-platform overrides; A topic = words). A strip when the scraper credits run low. "Doing well lately" chips (sounds,
+  hashtags; a click filters). Format chips with counts (Breaking out first, the default when there are any). Tall cards:
+  cover, format, platform, saved star, caption over a fade; who, hook + format tags, the ratio chip (green 3x+, amber
+  1.5x+), views or likes, engagement, "usually X · N days ago", "Our version started".
+- **A post** = `V2UI.panel` (wide; a bottom sheet on a phone): Play (a copied MP4 for TikTok / Instagram, YouTube's
+  player for YouTube; pictures show the cover), Open on the platform, Save, the numbers, "usually" in words, tags,
+  caption, then **Make ours** (an optional steer, about 20 to 30 cents) -> polls every 5 s -> the take, the script as beats
+  (Hook / Or open / each shot), on-screen text, the suggested place, Send to Creator link / Brief (Work board) / Studio
+  (Lucky's creator link is its creator app), sent ticks with links, the Slack thread link, Try again on a failed draft.
+  Clients see "save it and tell the team in Requests" instead.
+- CSS injected as `#soccss`, tokens only. Checked on the local trio (worktree statics + both dev workers) with real
+  Lucky data at desktop width; the Takomo Make ours ran end to end live (Studio batch "Long Iron Dread: a PSA (statics)").
+- **Same day, after the demos (social.js?v=2).** Eight demo videos of Sandcastles, Virlo and Later were read as transcripts
+  (ScrapeCreators `/v1/youtube/video/transcript` through the team debug route `/api/social/raw`), and the plan page gained a
+  "What their demos actually showed" section (feature by feature: take / later / out). Built from it: a controls row under
+  the format chips with **Sort** (Breaking out first / Most views / Newest / Most engagement, `soc_sort`), **Posted in**
+  (everything / 7 / 14 / 30 days, `soc_win`; the backend keeps 30 days, so 30 is a no-op kept for when it keeps more),
+  a **search** over caption, handle, who, hook, format tag and sound (debounced, keeps the caret), **Hide paid-looking
+  posts** (engagement under 0.5% likes + comments per view, Kallaway's rule for dropping brand deals; `soc_paid`), and a
+  post count; the empty state offers "Clear search, window and paid filter". The ratio sort breaks ties on volume.
+  Phase 1.5 ideas (not built): transcript on Make ours once the clip is stored, a per-follow line (posts a week, median
+  views, best weekday), keep / change chips for Kallaway's seven variables. Phase 2 additions from Later's demo: the
+  Notify fallback as a Slack DM at post time, the tray's Unused filter, per-platform tweaks, saved captions, a tagged-in
+  collector with creator credit. Meta posting for Lucky needs NO app review (Cole is an admin of the Mobius Tools app):
+  two token scopes, `instagram_content_publish` + `pages_manage_posts`.
+- **Second pass, the same day (Cole's audit: "squished", "confusing", "Radhesh's read?", "how are winners chosen?",
+  "no way out of Present"). callscreen.js?v=2 SUPERSEDES the layout above.** One column of roomy section cards
+  (no rail or side panel), the steps as a row of pills on top, a sticky bar at the bottom (Back, where you are, the
+  clock as "6:40 left / 1:20 over", Next). Every section names its source in plain words with a tag: **Automatic**
+  (Locus pulled it in), **From Slack** (the team's posts), **You add** (+ **Optional**). The top strip of "When / In the
+  room / Talks / Types" is one plain sentence. Textareas grow as you type (`grow`, never a drag handle).
+- **Monday brand page**: Last week's to-dos; How last week went (Sales, Ad spend, MER vs goal, Orders, Cost per new
+  customer, each vs the week before; a By channel table from the report's channels; Best and worst ads = of the
+  report's ads that spent at least the floor, the 3 best and up to 3 worst by Triple Whale ROAS, never the same ad
+  twice, with "all of them together made X"; a tap opens `V2.playAd`, "See every ad in Locus" opens Ads with the brand);
+  **What the team posted in Slack** = every Monday post for the brand AS WRITTEN (`slackText`: user ids to names,
+  `*bold*`, "label (url)" to a short link), each with the person's team name and role; Notes from the call (optional,
+  goes in the Slack recap; stored as `brands[act].read`); New ads to make this week (rows from the strategist's or
+  Cole's post, never Radhesh's / Hamza's; "Already being made" folds the brand's Brief / Making / Review cards); New
+  to-dos (optional); What we need from them (Still waiting on, then Ask for something new).
+- **Present** = `body.cs-present` (rail, top bar and tabs hidden) + the page's full screen on `documentElement`, so the
+  page scrolls; the button reads "Exit (Esc)"; Esc or leaving full screen ends it.
+- Client call: the read warns when the newest weekly report has not been sent yet ("Check the numbers before you show
+  them"). Kickoff unchanged apart from the shared layout.
+
+## 2026-10-19: SOCIAL, phase 2: THE WEEK and direct posting (`profit/socialweek.js`, `window.SocialWeek`). Read before touching it.
+
+Built the same day as phase 1, for Lucky first. Backend and the scheduler rules: account-health/CLAUDE.md, same date.
+- **Rail**: `NAV.social` = Watch (`social`) + **Week** (`socialweek`); `SOCR(first, tab)` renders either through
+  `socialHost()`; a client sees Week for its own brand (`clientTabOk`). `?open=socialweek&act=<brand>&post=<id>` opens
+  one post (Slack's "Open in Locus" button; `BOOT_POST` is read at script load because share.js rewrites the URL).
+- **The screen** (own IIFE, CSS `#swcss`, tokens only): week nav (this week, previous, next; brand-local days from
+  `/api/social/week`), the four account bubbles (IG / FB / TT / YT; dimmed = not connected, amber dot = by hand, red
+  dot = needs reconnecting; a click opens Brand settings), **the tray** on the left ("Ready to post": Unused first,
+  then All, Studio, Creator, Meta ad, Make ours, Upload, Tagged in; drag an item onto an hour cell, or click it;
+  Upload a photo or video goes straight to `/api/social/upload`), **the grid** (7 days x 6am to 10pm, 56px an hour,
+  past hours hatched, today tinted; a post is a card at its minute with cover, state and the bubbles it goes to: Auto
+  9:00 / Scheduled / Draft dashed / Posted with views / In Slack: post by hand / Failed; drag a draft or scheduled
+  card to another hour = move it; click an empty hour = new post there). On a phone the tray is a bottom sheet
+  (Tray button) and the grid scrolls sideways.
+- **The composer** (`V2UI.panel`, wide; a bottom sheet on a phone): what goes out (thumbs, + From the tray, Upload),
+  when (date + time in the brand's zone, `atOf` converts through Intl in two passes for DST), where (the four
+  accounts as big bubbles with a one-line note each: live / to your TikTok drafts / private until approved / by hand
+  via Slack / not connected: Slack will hand it to you), one caption with **Rephrase in <brand>'s voice** (three
+  options from `/api/social/rephrase`), Saved captions (pick or remove) and Save this caption, then "Per-platform
+  tweaks (only where needed)" folded: Instagram first comment and caption, Facebook caption, TikTok title and who can
+  see it (live mode only), YouTube title, description and visibility (live only). Buttons: Schedule / Post now / Save
+  draft / Delete. A post already out shows "How it went": per platform Posted + open link + views, likes, comments,
+  "Handed to you in Slack" with a **Posted by hand** button (asks for the link, optional), the error, Try again now,
+  Post again (copy).
+- **Brand settings > Social > Connect accounts** (`SocialWeek.connect`, drawn by `SocialTab.settings` under the on/off
+  switch): four cards. Instagram + Facebook = "Connect a Page + Instagram" (a modal listing the Pages the Mobius Tools
+  token can see, each with its Instagram; a warning names the scopes the token still lacks). TikTok and YouTube =
+  "Sign in to TikTok / Google" (opens the OAuth URL in a new tab; Cole clicks the grant; "refresh this card" after),
+  or, while the server keys are not set, the exact setup steps with the callback URL. Each connected card has the
+  mode (Live / Draft / By hand) and Forget. Clients see the cards read only.
+- **Calendar**: `/api/calendar` carries `social`; calendar.js draws posts as a **Posts** layer (chips in the month and
+  the week, dots on the 13-week lanes and the phone month, rows in the day sheet; dashed = draft); a click switches
+  to the brand and opens the Week on that post (`window.SOCIAL_POST`).
+- Versions: calendar.js?v=14, social.js?v=3, socialweek.js?v=1. Checked offline only (syntax, the worker tests); the
+  screen was NOT opened in a browser (no sign-in here). Every real publish waits on Cole's three grants.
+
+## 2026-10-19: AGENCY VIEW vs ONE CLIENT. Read before touching the rail, the picker or show().
+
+Cole: "every client now has this under their Work tab, which is confusing ... There should be one thing called 'Agency
+view' that has everything that is agency. Only the things that really belong to one client show when I pick a client."
+Page table and the two rails: https://claude.ai/artifact/R1RksAoFEWR2NF5J2X6C5L.
+- **The picker's top choice is "Agency view"** (`AGENCY_VIEW`; still `S.act === 'all'` underneath). Settings in the rail
+  foot reads "Agency settings" there, "Brand settings" for a client.
+- **Three scopes** (index.html, after `clientTabOk`): `AGENCY_ONLY` (calls, tasks, economics, workload + the old ids),
+  `VIEW_BOTH` (overview = command center vs brand Home, yesterday, plan, requests, production, today, calendar, brief,
+  reports, dash, the season pages, pulse, settings, guide, health), everything else = one client. `tabInView(g, t)`:
+  the Work group is Agency view only; Production also sits in **Creative** under a client (that brand's ads, brief to
+  live). `NAV_OF` picks the group that shows in the current view; `navGo` and the `#v2seg` tabs filter by view;
+  `applyView()` (end of show()) hides rail and phone-bar destinations with no page in this view. A `[hidden]` rail
+  button needs the `display:none!important` rule (the rail's own display rule beat the attribute; client logins' Work
+  item was never actually hidden before this).
+- **A page opened in the other view switches the view** (top of show()): an agency page from a client goes to Agency
+  view; a client page from Agency view goes to the last client picked (`pf_lastclient`, else the first by name). A
+  picker change re-shows the same page; when that page has no version in the new view it opens Overview instead
+  (`LAST_VIEW`). So every old `?open=` link and every `[data-go]` still lands, and callers that set `#clientPick` then
+  `show(S.tab)` need no change.
+- **Home > Client call** (`ccall`, team only: in AGENCY_TABS) = callscreen.js's client screen for the picked client
+  (`CCALL()`); its "Calls" buttons go to that client's Home (wrapped host `show`, and the global `[data-go]` handler
+  skips `.cs` buttons that have their own onclick). Work > Calls > Client call asks which client and switches to it
+  (`window.LocusPick(act, 'ccall')`). `?open=calls&call=client&act=` opens `ccall`. Monday call and Creative kickoff
+  stay in Agency view.
+- **Client logins unchanged** in what they open (AGENCY_TABS + clientTabOk); they find Production under Creative now.
+- Checked on the local trio (worktree statics + both dev workers, headless Chrome) at 1440 and 375: both rails, the
+  picker both ways, every switch rule, the deep links (calls&call=client, studio, tasks&act, monday), the client call
+  and its back button, no page sideways scroll.
+- **2026-10-20 follow-ups:** a client call's back buttons read "← Back" / "Back to <brand>" (callscreen.js?v=3); the
+  Strategist's WHERE THINGS ARE IN LOCUS block (account-health strategist.js) names Agency view, Work, `ccall` and the
+  season's three pages. A client login was checked locally with `/api/me` stubbed to role client (CDP Fetch): rail =
+  Home, Ads, Email and SMS, Store, Products, Creative (with Production), Brand, Calendar, Social, Reports, the season;
+  no Work, no Client call; calls / tasks / ccall / workload and `?open=calls&call=client` all land on Overview.
+
+## 2026-10-20: THE TASKS AUDIT. Tasks is a title + details; Work > Calls is "Meetings"; the morning card is three lines.
+
+Cole: the task list and board "just aren't good" (no right-click, not like Asana, far too much text per task), most items a
+call proposes "aren't really tasks", the Slack note after approving a call is "so weird", and the 5am card's "Today's
+calls" collided with Work > Calls. Findings and what changed: the audit page https://claude.ai/artifact/BpuvtVhdgdJqYUyTMxACaU.
+- **A task is a SHORT TITLE plus `detail`** (p_action.detail, account-health actions.js `splitTitle`: every writer, and
+  the 24 open rows were migrated on 2026-10-20). `profit/tasks.js` (v6, rewritten): row = tick · title · brand chip
+  (only when not grouped by brand) · avatar · due · hover ⋯; a details mark (≡) when there are details; right-click or
+  long press = the menu (Done, Open, Who, Due, Brand, Area, Select, Copy link, Drop); click the avatar or the date to
+  change it in place (`ownerMenu` / `dueMenu` with a month calendar, Locus's own `pop()`, never a select); Ctrl/Cmd or
+  Shift-click selects, the `.tk-bulk` bar does Done / Who / Due / Brand / Drop; keys ↑ ↓ j k Enter Space x w t m Delete
+  Esc. The sheet (`editTask`) = Title, Details, Who, Due, Brand, Area, where it came from, Mark done, Drop. The From
+  and Area columns are gone from rows (area = the Area menu + the sheet). Board cards = title + avatar + due; drag
+  moves the selection together. The list's control selectors are scoped to `.tk-bar` (a section's `data-sec` used to
+  be `data-group` and a click on it changed the grouping). `.tk-areas` is a hidden row of `[data-areaf]` buttons
+  that phone.js's Filters sheet clicks. An avatar drawn inside another button must be a span (`av(n, '', 'span')`).
+- **Work > Calls is labelled Meetings everywhere** (NAV, TAB_TITLE, breadcrumb, tour, guide, callscreen's back
+  buttons); the page id stays `calls` and every `?open=calls|monday|meetings` link still lands. "Today's calls" on
+  Ads is "Today's ad calls" in Slack (todaypost.js, morningcard.js).
+- **calls.js (v6)**: each item shows its title and an editable details line; the model's `sure: false` items start
+  UNTICKED with a dashed "Maybe" tag (Locus heard an idea, not a commitment); the approve body carries `detail`.
+- **Something else** on Today's calls posts `text` + `detail` (desk.js v24); callscreen's typed jobs carry `detail`.
+- Checked on a stub harness in the browser pane (scratchpad, not committed) at 1400 and 375, dark and light: list,
+  menus, calendar, sheet, picker, selection bar, board, Meetings card. NOT checked against the real workers.
+- **Same day, later (Cole: "complete a task from the board", "it sends me to the top and loads").** Ticking a task (one,
+  or Done on a selection) changes it in the page with no reload, and every redraw keeps the page, board and column
+  scroll (`paint()` wraps `draw()`). Board cards carry the same round tick as list rows; Ctrl/Shift-click selects cards
+  for the bulk bar. **Tasks is in both views now** (team only, still AGENCY_TABS): Agency view = Work > Tasks, every
+  brand; a picked client = Home > Tasks, that brand's list (`tabInView` home/tasks, `tasks` in VIEW_BOTH). Meetings
+  stays Agency view only (one call covers several brands). The hand-typed "BFCM ads: ..." rows were dropped: the
+  Season page's to-do list derives the same deadlines from each phase's dates and moves with them.
+
+## 2026-10-20: THE LOCUS KIT, phase 1 of the UX audit (lx.css, lx.js). Read before adding a page header, a strip or a popover.
+
+Audit page (findings per screen, research, the system, before/after mocks, build order, trials):
+https://claude.ai/artifact/M5QhcBYdD8ueFq8LJPFYWa (source `docs/locus-audit/index.html`, screenshots in `docs/locus-audit/shots/`,
+research in `docs/locus-audit/research/`). Handoff: `docs/handoffs/locus-ux-audit.md`. Diagnosis in one line: Locus has no shared
+skeleton; every feature since the v3 shell brought its own page layout, filter form and card size.
+- **`profit/lx.css` is the look, `profit/lx.js` the behaviour.** lx.css loads after supply.css and BEFORE phone.css (phone rules stay
+  in phone.css, loaded last, Cole's rule). Tokens: radius `--r-xs 4 / --r-sm 6 / --r-md 6 / --r-lg 8 / --r-xl 12`, motion `--t-fast
+  120ms / --t 160ms / --t-panel 200ms / --t-sheet 240ms`, a type scale `--fs-*` (11 to 36), `--ctl-h 32px`, `--row-h 40px`, body 14px.
+- **The page header is ONE row**: crumb, 22px title (accent.js italic word), the page's own actions in `.ph-acts` (written by
+  `pageActions(html)` when the head exists, else `#hdActions` as before), the Export menu (share.js), and a `.ph-more` "..." button
+  whose popover holds the page purpose (TAB_PURPOSE) and Tour / Metrics / Help (their data-tour / data-gloss / data-help handlers are
+  unchanged, delegated on document). The subtitle under the title is hidden. On a phone the "..." menu opens in `LxPhone.open` (the
+  shared bottom sheet) as a clone of the menu node: never position a popover fixed inside `#main`, it carries a transform.
+- **Platform jobs (`#v2seg .v2jobs`) are a segmented control**, page tabs (`.v2tabs`) are underlined text; both restyled in lx.css only.
+- **The strip** (`LxKit.strip({tone, lead, n, text, fold, go, goLabel})` + `LxKit.wireStrip(host, onOpen)`): one 44px line with a
+  tone border (warn / bad / good / brand / quiet), a fold button that opens `.lx-strip-body` under it, and a go button. The leak
+  finder uses it: `LeaksCard.strip(host, H, page)` on Home (the brand's leaks to act on) and on Meta / Google / TikTok / Website / Email
+  (`mountLeaks` in v2.js prefers `strip` over `top`). The full list moved to **Home > Leaks** (`leaks` page id, VIEW_BOTH: one brand =
+  `LeaksCard.full` with every leak open, Agency view = `LeaksCard.brands`); Home's old 6-row card is gone, the strip links there.
+- **The side panel is shared**: `window.V2.panel(title, html)` / `V2.closePanel()` (v2.js's own panel, a bottom sheet on a phone),
+  wrapped as `LxKit.panel`. The rail tightens under 780px and 640px tall windows (`max-height` media rules) instead of scrolling.
+- **Not built in phase 1** (the audit's phases 2 to 6): the 56px icon rail for iPads, Tasks / Meetings / call screens on the kit, the
+  Reports and Social rebuilds, the copy pass, the iPad pass. The audit page lists them with the mocks.
+- Checked on the local trio with real data at 1280, 768 and 390, Agency view and Lucky, dark and light (Chrome in Cole's profile; the
+  Browser pane refused localhost that day). A new Chrome tab group starts with empty localStorage: set pf_worker / pf_ah / pf_token again.
+## 2026-10-20: SOCIAL REDESIGN (social.js?v=4, socialweek.js?v=2). Supersedes the two Social sections above for the UI.
+
+Cole rejected the first UI (pills everywhere, bare selects, a side play button, one carousel slide, settings with token
+instructions). Who uses Watch: a strategist on Monday deciding what to make this week, in this order: scan what broke out,
+watch the top few in the grid, open one for caption / slides / numbers vs usual, Make ours, send it on. Following is set-up
+work in its own Manage view. Screens before and after (desktop and phone): `docs/locus-social/screens/`.
+- **Watch**: view segment (All posts / Breaking out / Saved) + Manage follows + Follow; ONE filter bar of labelled selects
+  (Source, Platform, Format, Sort, Window, search, Hide paid-looking, N of M, Clear); a quiet "Doing well lately" line; 4:5
+  cards that play INLINE on hover (350ms) or tap, muted, with a sound toggle on the card (a copied MP4, or YouTube's player
+  via postMessage); one metric row per card (ratio chip, number, engagement, usually, age). Empty / loading / error states.
+- **A post** = `V2UI.panel` wide, TWO columns on desktop (media sticky left, details right; one column = bottom sheet on a
+  phone). A carousel or TikTok photo post loads every slide once (`POST /api/social/slides`, copied to R2, kept in
+  `social_post.media`) and shows them two side by side in a snap strip instead of the cover. Make ours shows a status pill
+  (Not started / Queued / Writing / Needs an answer / Draft ready / Sent on / Did not finish) and says what it does: a TEXT
+  brief in the brand's Slack channel, no images or video. Tested live 2026-10-20 on a golf-wedge TikTok: Writing, then
+  Needs an answer with the beats (the ideas bot could not download that clip, so it asked).
+- **Week**: 248px tray as a list with 44px thumbs (select filter Not used yet / Everything / per source), the hour grid with
+  seven columns that FIT (minmax(84px,1fr), no sideways scroll on desktop), posted cards with the same metric row; the
+  composer is one panel (Media, Caption, Accounts as labelled switches, When, per-platform tweaks folded, sticky footer).
+- **Brand settings > Social**: one table (Platform, Account, Status dot + short date, Mode select, Connect / Change the
+  Page / Forget; "Needs setup" chip with a tooltip when the server keys are missing). No token instructions on screen.
+- **Worker** (account-health social.js): YouTube reads use the YouTube Data API v3 with the NEW secret `YT_API_KEY`
+  (GOOGLE_SA_KEY is a service account and cannot read public YouTube); until it is set, YouTube falls back to
+  ScrapeCreators. Deployed 2026-10-20. Verification was done by injecting the worktree files into Cole's signed-in Chrome
+  (no sign-in from the built-in browser), desktop at 1280 and a 390px same-origin iframe for the phone.
+
+
+## 2026-10-20: THE LOCUS KIT, phases 2 to 6 (Work, Reports, Find, phone rows). Read before touching Tasks, the call screens, Production, Reports, the Brief or Dashboards.
+- **Page actions live in the header.** A page whose buttons already had handlers keeps those buttons in the DOM, hidden
+  (`<span hidden>` or the `.lx-tohead` / `.lx-tohead-bar` classes in lx.css), and the header buttons `press()` them by id
+  (Reports `data-rpa`, Brief `data-bfa`, Dashboards `data-dsa`). Add an action by adding the hidden original and a header
+  button that presses it, never by moving the handler. Call `pageActions()` AFTER the `innerHTML` paint: the kit's
+  `pageHead` draws the `.ph-acts` slot the actions go in.
+- **Reports** (`reportBodyHTML`): the first four `kpi()`s are the top row (`rp-four`), the rest go under `details.rp-more`
+  with the chart, pace, customers, attribution, Meta and changes. Best and worst ads (`adCardsHtml`) rank ads that spent by
+  ROAS under the model on the page; `RP_LAST` carries ads / act / currency / internal so `wireReportJump` can open an ad
+  in `V2.playAd` (internal) or `adDetailModal` (client archive). Both renderers set `RP_LAST` before `wireReportJump`.
+- **Find** (`askObjects`): open tasks and Production cards, read once per 5 minutes through `apiAH`, team only, matched by
+  name from two letters; kinds `task` (sets `ACT_OPEN`, switches brand, `show('tasks')`) and `brief` (`PD_CARD`,
+  `show('production')`).
+- **Leaks > Make it a task** (`leaks.js makeTask`): POST `/api/actions` with `source:'leak'` (falls back to `manual` if the
+  worker rejects the source), `detail` = number + fix; the toast's button opens Tasks with `ACT_OPEN`. Hidden for clients.
+- **Tasks / calls / Production on the kit**: each file draws its header with the host's `pageHead` and its one action with
+  `pageActions`; every control is a pill or segmented control opening the file's own menu (`LxPhone.open` on a phone),
+  never a native select; a task opens in `V2.panel`; the request bodies and `tk_prefs` / `pd_*` keys are unchanged.
+- **Phone rows** (phone.css, under 600px): `.v2tiles` is one column of 48px rows, `.v2tile:not(.hero)` is a two-column grid
+  (label, number + delta), `.sub` / `.v2spark` / `.v2bul` hidden, the hero tile keeps its card. A new tile needs nothing;
+  a tile that must stay a card on a phone gets `.hero`.
+- **The iPad icon rail** (lx.css, lx.js): `html.lx-irail` between 721 and 1180px; the rail is 56px of icons (titles are the
+  labels), `body.nav-open` expands it to 248px over the page with the old drawer's scrim; the logo, `#pfPickBtn` and
+  `#pfMeBtn` open it, a pick closes it, lx.js fires `resize` on `transitionend` so polish.js re-measures the sliding
+  highlight. Rail items need nothing new; keep labels inside the button's `<span>` so the collapsed rule hides them.
+- **Call to Brief** (account-health callscreen.js `finishCall` > `appendBriefNote`): a finished Monday or client call appends
+  its team jobs, briefs and promises (never client_owes) to settings `briefNote:<brand>`, the buyer's note the Brief's "What
+  we're doing" reads for 2 days. One line each, never twice, capped at 1500 chars; a failure never fails the call.
+- **Leak to call** (leaks.js `[data-lkcall]` > `window.CCALL_ADD` > callscreen.js `open`): the client call opens on This week
+  with the leak as a promised line, saved once through PUT /api/calls/state.
+- **Today's calls row** (desk.js): primary, Done, then a `.dk-more` "..." menu (Ads Manager, Open in Locus, Something else,
+  Not now). The menu's buttons keep their data-* attributes, so the per-element wiring is unchanged; on a phone the menu is an
+  `LxPhone` sheet whose buttons press the row's own by matching those attributes.
+## 2026-10-20 (later): SOCIAL REBUILD to the teardown spec (social.js?v=5, socialweek.js?v=3). Supersedes the Social UI sections above.
+
+Spec: `docs/locus-social/teardown/spec.html` (page https://claude.ai/artifact/N3GWj34WJnJFjAYij5KKEh), from the Later,
+Sandcastles and Virlo teardowns in `docs/locus-social/teardown/<app>/`. Built against main's `pageHead` and `PillMenu`;
+the UX audit kit (PR 36, lx.css / LxKit) is not on main, so the kit header applies on its own once that PR lands.
+- **Three tabs**: `NAV.social` = Feed (`social`), Saved (`socialsaved`, new page id in every index.html list: `?open=`,
+  TAB_PURPOSE, PAGE_BRIEF, TAB_CRUMB, TAB_WHO, clientTabOk, TAB_TITLE, SHOWABLE, the show map), Week (`socialweek`).
+  `SOCR(f, tab)` calls `SocialTab.render(tab, socialHost(), first)`. Saved is the Feed filtered to saved posts plus a
+  tag row.
+- **Feed** (`social.js`, IIFE, CSS `#soccss`, tokens only, state `ST`): segment All / Breaking out, then ONE controls
+  row of `PillMenu` pills (source `socSrc`, platform, format, sort, window; the pill shows its VALUE, `.hd-per-l`
+  hidden, `.hd-per-d` forced visible in the phone block because index.html hides it under 720), a search icon that
+  expands to a field, a Filters popover (`.soc-filt`, a `.hd-per-menu` opened by `.soc-filt.open`; holds hide paid,
+  min views, mine, and on a phone the platform / format / sort / window selects), a gear (`#socManage` = the Manage
+  follows view) and + Follow. A status line (following, last pull, problems). Trend chips only in Breaking out.
+  Cards are 9:16 (`.soc-grid` 2 / 3 / 4 columns), platform mark, duration, the ratio pill bottom right (`.soc-x`:
+  warn 10x+, good 3x+, grey 1.5x+), who + age, one caption line, one metric row. Inline play on hover / tap.
+- **Breaking out is decided server side** (account-health social.js): `MIN_N` 8 posts in the group, `MIN_BASE` 1000
+  views (`MIN_BASE_LIKES` 100) before a "usually" exists; posts carry `n` and `base` (null = no floor met, no ratio
+  drawn, `okRatio`). Topic posts use follower count as the base.
+- **Saved tags**: `social_post.tag` (ALTER on first use), `/api/social/save {id, saved, tag?}` (tag kept when saving
+  without one, cleared on unsave), `feed` returns `tags: [{tag, n}]` (`tagsOf`). The viewer's Save button has a chevron
+  = the tag picker (No tag / existing tags / New tag); the Saved tab filters by tag chips.
+- **The viewer** (`openPost(p, list)`): a dark full-screen overlay, media left (video, YouTube, or the slides strip with
+  dots), a 340px column right (who, platform · date · duration, the big number vs usually, likes / comments / saves /
+  engagement, caption, tags), prev / next (arrows and keys), and a bar: **Make ours** (the step: Writing → Ready beats →
+  send to Creator link / Brief / Studio via `/api/social/push`, polled every 5s), Save (+ tag chevron), Open on the
+  platform. On a phone: stacked, media 56vh, the bar fixed at the bottom, the tag picker fixed.
+- **Manage follows** (gear) and **Brand settings > Social** share `followTable` / `wireFollowTable` (handles, last pull,
+  errors, Stop, Pull now) plus the credits line; settings keep the on/off switch and `SocialWeek.connect` cards.
+- **Week** (`socialweek.js`): controls row (week nav, range, Week / List segment `sw_view`), 28px round account bubbles
+  with a `.pk` badge, the tray as 2-across 9:16 thumbs with a source glyph (`SRC_IC`; the sprite has no upload or
+  at-sign icon, so Upload = plus, Tagged = tag) and a Show pill; the grid has a now line (`.sw-now`); `.sw-post` = 38px
+  thumb + state dot + time + account glyphs; **List** = one card per day (`dayList`, forced on phones) with + Post per
+  day; the composer = media, caption with quiet Rephrase / Saved captions / Save links, Where as avatar buttons
+  (`.acc`), When as pill inputs. The tray is `LxPhone.open` on a phone.
+- **Transcript and Recreate (2026-10-20, social.js?v=6).** The viewer column has a Transcript button on video posts
+  (`transcript(p)` -> account-health `POST /api/social/transcript {id}`, one scraper credit the first time, then cached on
+  the row; shown as a scrolling "What they say" box, or "No speech was found"; pictures get none). Make ours has a two-way
+  choice above the steer box: Our own take (default) or Recreate it (same hook shape, beats, pacing; only product and words
+  change), sent as `mode` in the make body; the worker also hands the brief writer the stored transcript.
+- **Not built**: Later-style best-time suggestions and the advanced scheduler, the LxKit header (waits on PR 36).
+- Checked in the built-in browser on a stub harness (not committed) at 800, 1280 and 375, dark and light: Feed, Filters
+  popover, viewer with prev / next, Make ours end to end on stubs, tag picker, Saved, Week grid, List, composer sheet,
+  Brand settings > Social. No console errors. NOT checked against the real workers; the worker is not deployed.
+
+## 2026-10-20 (latest): THE LOCUS KIT, phase 7, the CONTENT pass. Read before adding a card, a chart or a table.
+
+Every page now reads as one product inside the cards, not just the chrome. The rules, and where they live:
+
+- **One card anatomy.** `.v2h` is a grid: `h3` (15px/600) on row one, ONE `.find` caption (12px/500, muted) UNDER it,
+  `.cap` on the right of row one for the card's controls or source, and an optional "..." (`LxKit.cardMenu(why, buttons)`)
+  as the last child. The "..." holds the method, the rule, the footnote: never a sentence beside a title and never a
+  block of prose under it. `card(title, find, body, cap, why)`, `ccard(..., what)` and `cardL(title, lead, body, cap,
+  cls, why)` in v2.js all take the why. desk.js's War Room `sec()` splits a step's note itself: first sentence = caption,
+  the rest = the menu. `.v2what` and `.v2rule` blocks are hidden by lx.css; put that text in the why instead.
+- **Numbers are tiles.** Four per row (`.v2tiles`, `.lx-t4`), the rest under a fold (`details.rp-more`). Phone rows come
+  from phone.css on their own.
+- **One chart style.** `lineChart` (thin brand stroke, soft area, dashed compare, hover answers) or stacked AREAS
+  (`stackChart`, `emStack`, `growthChart`), or a kit bar list `LxKit.bars(rows, {max, foot})` (label, bar, value on one
+  row, a goal tick, tones). No column charts, no boxed legends.
+- **Tables fit.** `.v2tbl` with a sticky head, tabular numbers, the first column wraps (never letter by letter), `td.txt`
+  for text columns, row actions as `LxKit.rowMenu(buttons)`. Sortable `th.v2srt` headers were padded twice (the th and
+  its button): fixed in lx.css, which alone pushed wide tables into sideways scroll. Headers may wrap to two lines.
+  Default column sets are what fits at 1024: META_DEF (8), G_DEF (8), KL_DEFAULT (7), under NEW saved keys
+  (`meta-camps2`, `kl-camps2`) so an old saved set does not bring the wide table back. Under 1100px lx.css tightens
+  padding, font and the inline bars (`.v2ib`). On a phone polish.js writes `data-l` on every td and phone.css draws
+  the rows as cards; `.v2tbl` is `overflow-x:clip` there.
+- **Ad lists are media cards.** `.v2gal .g`: 4:5 media, name, one `.kv` metric row (label over value), one `.v2one`
+  quiet line; tap = `V2.playAd`.
+- **Controls.** A segmented control (`.v2jobs`) for page jobs, a pill menu (`PillMenu.html/wire`) that shows its value
+  for anything with more than five options (Library setting, Inspiration board), never a native select in a page
+  (lx.css draws any stray `select` in #main as a pill; form selects are fine), never a row of six buttons.
+- **Copy.** Labels, not sentences; captions start lower-case and use " · " between facts; one verb per empty state
+  (`<p class="lx-empty">`); no "team only"; no em dashes.
+- **Deep links.** The `?open=` allow list in index.html now matches SHOWABLE (website, search, inspo, library, guide,
+  mtoday, mbrowser, economics, workload were missing and fell back to the last page).
+
+Not reachable locally, checked in code only: Stock/Buying/Drops with data (Supply needs the Google sign-in), Reports
+and Live (proxied Triple Whale), TikTok (no brand shows the tab). Shots: docs/locus-audit/shots/p7-*; the audit page's
+Phase 7 section lists what changed per page.
+
+## 2026-10-20 (evening): SOCIAL, the inventory features (social.js?v=8, socialweek.js?v=4). Read with the two sections above.
+
+Cole: "how are these brands getting it? If ScrapeCreators can get it, why can't we? I think you're wrong that we can't use
+Meta." He was right: Instagram posts of ANY business or creator account come free through Meta Business Discovery on the
+Mobius Tools token (account-health social.js `igDiscover`); only TikTok and topic searches still spend ScrapeCreators
+credits, and YouTube is free through the Data API once `YT_API_KEY` exists. Feature inventory of Later, Sandcastles and
+Virlo (55 gaps, ranked): the side-session notes folder `social-feature-inventory.md`; the teardown spec has a status section.
+- **Feed**: `SORTS` gained `added` (Just added = `p.seen`, the row's `first_seen`); the status line shows "N new since your
+  last visit" (`soc_seen_<act>` in localStorage, counted once per act per session, click = that sort) and "TikTok and
+  topics paused" when `d.paused`. `sourcesLine(d)` = the one honest line about where posts come from (`ig_meta`, `yt_key`,
+  `credits`, `low`, `paused` from `/api/social`); it replaced the credits line in Brand settings > Social and sits under
+  Manage follows. The empty state, the Follow modal and Manage's intro say Instagram and YouTube cost nothing.
+- **Manage follows**: "Seen in your topics" card (`d.suggest`: accounts behind topic posts not followed yet, with posts,
+  followers, best ratio, Follow = `followHandle(handle, plat)` which POSTs /api/social/follow with the platform override)
+  and three roll-up columns from the feed's per-follow stats (`posts30`, `per_week`, `usual` + `usual_kind`, `best`,
+  `last_at`); the compact table in Brand settings keeps the short shape. Error text wraps inside the table.
+- **Viewer**: "3 of 210" counter (`.vcount`), a Follow button beside the handle on a topic post (or any handle no brand
+  follow carries), Copy link on the platform line, Copy on the caption and on the transcript (`copyText`, clipboard with a
+  textarea fallback), a note box under the caption on a SAVED post (`/api/social/save {id, saved: true, note}` on blur;
+  shown on Saved cards as `.soc-note`; unsave clears it in the page), and keys S save / M make ours / C copy link /
+  T transcript / arrows (never while typing in an input). `followHandle` reloads the feed and reopens the same post.
+- **Week > Preview** (`igPreview`, `/api/social/grid`): the Instagram account header (pic, handle, count) and every post
+  through Locus that targets Instagram as a 3-across 4:5 grid, newest first; drafts faded, scheduled dashed, a tap opens
+  the composer. `sw_view` may be `preview` now.
+- **Morning card**: account-health morningcard.js adds one "Breaking out on Social" line (kind `social`) when a followed
+  account's post broke out since yesterday's card (`breakoutsFor`, the card stores `social_at`), tagged to the strategist.
+- Checked in Cole's signed-in Chrome by injecting the worktree files over the live page (a CORS file server on
+  127.0.0.1:8897; the page's `apiAH` is a global): feed 305 posts / 19 breaking out, Manage with 12 suggestions, the viewer
+  with every button, S saves then a note saved, Week > Preview (empty for Lucky: nothing targets Instagram yet).
+
+## 2026-10-20: LOCUS v4, phase 1 (behind a switch). Read before touching the rail, NAV or the Morning page.
+
+Design page: https://claude.ai/artifact/GYvCTrYpSf52GAZAm535LH (source `docs/locus-v4/index.html`, seven phases). Phase 1 is
+the shell plus Today > Morning, OFF by default so the team keeps the old rail until Cole has looked.
+- **The switch** = `localStorage.pf_v4 === '1'` (`V4` const at the top of the boot script; `?v4=1` sets it, `?v4=0` clears it;
+  the profile menu's "Try the new Locus" / "Back to the old Locus" toggles it and reloads). `<html class="lx-v4">` while on.
+- **Seven destinations** (`NAV4`, copied over `NAV` in place when V4 is on, so navGo / NAV_OF / show / the seg code are
+  unchanged): Today (morning, leaks, yesterday, brief), Money (profit, plan, customers, store, website, search, email,
+  stock, buying, drops), Ads (today "Calls", channels, meta, google, tiktok, angles), Make (production "Pipeline", studio,
+  library, inspo, social, amb, answers "Brand"), Calendar (calendar, warplan "Season"), Reports (reports, dash, requests),
+  Work (calls "Meetings", tasks). Second-level jobs are segmented controls like META_JOBS: `SOCIAL_JOBS`, `BRAND_JOBS`,
+  `SEASON_JOBS`, and STUDIO_JOBS under Make. `V4_HOME` maps the ids that are now jobs (socialsaved, research, voice,
+  warlive, season, copy...) to the tab that hosts them; every old id still routes. The rail has two `.grp-btns[data-v]`
+  blocks; the one that does not match the flag is removed before wiring. The phone bar maps home -> morning and store ->
+  profit when V4 is on; `TAB_CRUMB` gets v4 crumbs; `TAB_TITLE.morning = 'Morning'`.
+- **Today > Morning** = `profit/v4.js` (`window.V4.render(H, first)`), drawn with `window.V2.kit` (v2.js now exports its
+  helpers and `setHost`) so every number matches Home: the leak strip, the money river (LxHero.load: sales through the
+  bites to kept, dashed tick = a normal day), the month ring (mtd vs plan by now, outer arc = where the month lands vs
+  the goal), Needs you (top /api/hub/today rows by stake, tests to call, the next season date), four tiles with their
+  lines, the share bar with a card per channel, the site funnel as kit bars, the calendar card. **Agency view falls back
+  to the old Overview** (`V4R`) until the brand board (phase 4). CSS at the end of lx.css (`.v4-*`, tokens only).
+- Checked 2026-10-20 in Cole's signed-in Chrome by loading the worktree's files from a local CORS server into a same-
+  origin srcdoc iframe (document.write into the live tab fails: top-level consts survive document.open). Brand and
+  agency scope, every group, old ids, dark and light, 390px, flag off = the old rail untouched.
+
+### 2026-10-20 (night): LOCUS v4, phases 2 to 6, all behind the same switch. Read with the phase 1 section above.
+
+- **`V4` is a top-level const in index.html's boot script (the flag), and top-level consts are GLOBAL LEXICAL scope shared by every
+  classic script.** In desk.js, `V4.on` resolved to the boolean's missing property, so the Google rows and the ad set panel silently
+  never drew. Every other file must write `window.V4.…` for the v4 object. The same trap waits for any other top-level const name.
+- **Phase 2, Ads as one queue.** `NAV4.ads` = Calls (`today`), Accounts (`channels`; jobs row `ACCOUNT_JOBS` = All, Meta, Meta
+  campaigns, Google, Google campaigns, Search terms, TikTok, filtered by the brand's connections), Ads (`adcreative`), Tests (`angles`;
+  `TEST_JOBS` = Angles, Test calls), Changes (`changes`; `CHANGE_JOBS` = Meta, Google). Today's calls gains Google rows
+  (`V4.extraCalls`: one row per search-term leak with `apply.kind === 'negative'`, kind `neg`, button "Add N negatives" = the leak
+  finder's own Add all modal) and a tap on an ad set's name opens `V4.setPanel` (the reason, six numbers against the goal, the ads in
+  the set with covers via `V2.thumbs`, the one button). `LeaksCard.setHost` exists for this.
+- **Phase 3, Money > Month** (`V4.render(host, first, 'month')`): where the month lands (ring = the forecast at the planned spend over
+  the goal, outer arc = today's pace, three sentences from `/api/forecast` `projected` / `at_current_pace` / `to_hit`), weeks against
+  target (`fc.weeks`, kit bars with the target as the ghost bar), customer payback dial (`/api/customers` headline `payback`, 1.5x and
+  3x ticks), the waterfall from `/api/client` `mtd` (a margin override collapses the cost steps into one), who paid (new vs returning,
+  first orders by channel from `/api/hub/paid` with the month as the window). **Goals (`plan`) is this page's edit mode**: it left the
+  tab row (`V4_HOME.plan = 'month'`), "Edit the plan" opens it. The ring's number scales with the ring (`--rs`; under 80px the caption
+  hides and the number is 12.5px: Cole, "the numbers aren't fitting inside the circle"). Stock / Buying / Drops tabs appear once the
+  Supply brand list loads (`show()` reruns once for Money).
+- **Phase 4, Agency view.** `V4R` no longer falls back: `V4.render(..., agency = true)` draws the brand board on Today (the book
+  yesterday from `/api/hub/kept`, the counts from `/api/hub/today` + `ovTodayLoad`, then one row per brand: kept against a normal day,
+  the month ring at 56px, the reasons from `CommandCenter.reasonsFor` (command.js now exports reasonsFor / worst / score / cached),
+  the week) and the month board on Money (banked vs planned by now, where it lands vs the goal, spend vs plan, MER vs goal, worst
+  first). Paused brands (`/api/hub/command` `paused`, The Golf Sock) sit on one unflagged line on both. A row opens that brand's page
+  through `data-go="act:<id>:<tab>"` (v2.js wireGo).
+- **Phase 5, the flow.** Reports: `V4.reportExtras` (called by `renderReports` after paint, internal page only) inserts Done (tasks
+  ticked inside the report window, `/api/actions?status=done`) and From you (open Requests) under the summary; nothing is drawn when
+  both are empty. Leaks: "Make it a task" becomes "On Tasks" the moment a task is made (localStorage `lk_task:<act>:<leak>` for 14
+  days) and `confirmTasked` checks the open task list after each paint (`source === 'leak'`), so a task made elsewhere shows too.
+  The Monday call runner, Finish bar and client lines were already callscreen.js.
+- **Phase 6, Make.** production.js inserts `V4.ideasCol` in front of Brief for one brand: saved Social posts (cover, "Nx its usual"),
+  Refresh call rows (the set's main ad as the cover), the two biggest leaks; "Brief it" opens `ProductionTab.newBrief({act, text})`
+  (newBrief takes a prefill now and is exported). `cardHtml` shows `c.thumb` on EVERY stage that has one (Cole: "will those show
+  inside those tabs like before?").
+- **Phase 7 so far:** 390px checked on Month and the boards (no sideways scroll), the audit page carries a superseded note, the
+  design page's phases carry their status. Old renderers stay until the switch is on by default.
+- Script versions: v4.js?v=7, lx.css?v=19, desk.js?v=31, leaks.js?v=10, command.js?v=6, production.js?v=12. All checked in Cole's
+  signed-in Chrome through the CORS server + srcdoc iframe recipe (phase 1 section); nothing deployed, nothing merged.
+
+### 2026-10-20 (late night): LOCUS v4 polish pass 1 (Cole: type, colour, spacing on every tab, professional like TrendTrack / ClickUp)
+
+- **Money > Month** no longer crams sentences: the three landing paths are rows (`.v4-pr`: label, number, "$2,973 short" in red
+  or "over" in green), the month's five numbers under the week bars are a stat strip (`.v4-facts`, label over value), the customer
+  card is the dial on top with four facts in a strip (`.v4-cfacts`: to get a customer, first order, left after costs, repeat orders).
+  Under 1360px the top row is two columns and the customer card spans both (dial left, facts right). The dial's caption moved
+  under the arc ends (viewBox 180x114).
+- **Ad cards are one shape everywhere:** the report's Best and worst (`.rp-adc-row`) and the call runner's `.cs .ads` are
+  `grid repeat(auto-fill, minmax(136px, 1fr))`, pictures 4:5, no `max-height` (that cap was squaring the wider cards), no orphan
+  divider. The design page's report mock matches (six 4:5 cards).
+- **Ads > Ads and Changes** are first-row tabs in v4, so `V4_HOME` maps `adcreative` and `changes` to themselves and Meta's second
+  job row (Overview / Campaigns / Ads / Changes) is gone there. Meta overview and campaigns live under Accounts.
+- **Money with a sign:** `money()` and `kmoney()` in v2.js write `-$21`, never `$-21`.
+- **Agency brand board:** gap chips are the count and the kind only ("4 Asana tasks overdue"), reasons clamp to two lines.
+- **Module page titles carry the brand in v4** (`V4_NAMED` in pageHead: Pipeline, Social, Tasks, Meetings, Library, Inspiration,
+  Creators, Studio, Dashboards): "Pipeline: Lucky Golf", "Tasks: every brand". accent.js got the words (Pipeline, Social, Tasks,
+  Meetings, Morning, the month names). TAB_TITLE production = Pipeline.
+- Morning's channel tiles fit three across (`.v4-share` minmax 128px).
+- Versions: v4.js?v=8, lx.css?v=20, v2.js?v=69, callscreen.js?v=8, accent.js?v=3. Checked at desktop and 390px in Cole's Chrome.
+
+### 2026-10-20 (late night): LOCUS v4 polish pass 2 (the design page, and one river palette)
+
+- Cole reviews the DESIGN PAGE mocks (docs/locus-v4, artifact GYvCTrYpSf52GAZAm535LH) as much as the app, so every mock is held to
+  the same bar. The page had no `<meta charset="utf-8">`, so a viewer that guessed wrong showed every arrow, dot and keyboard glyph
+  as garbage (âŒ˜, Â·, â–¼). It has one now. Mock fixes: the dial caption sits under the arc (viewBox 180x114), the report mock shows
+  three 4:5 ad cards a row, the runner mock's week ads are the same 4:5 cards, the Pipeline mock's board no longer pushes into its
+  rail (`.grid>*` and `.kan>*` get `min-width:0`), delta pills never wrap, the agency board's 7-day cell stacks MER under the number.
+- **One river palette, page and app:** kept = brand blue, ads = `--warn` amber, product / shipping / fees = `--line-strong` /
+  `--muted` / `--faint`. The channel colours (Meta blue, Google gold, email purple) are only for channels. v4.js `BITE` and
+  v2.css `.b-ads/.b-cogs/.b-ship/.b-fees` both changed. Versions: v4.js?v=9, v2.css bumped.
+
+### 2026-10-20 (late night): the MONEY PALETTE (polish pass 3). Cole: "you think grey is a good colour for that?"
+
+- Researched before changing: Adobe Spectrum, ServiceNow Horizon, GitLab Pajamas, GOV.UK chart colours and Shopify's own analytics
+  palette all say the same thing. Unordered categories (cost types) get DISTINCT HUES, never a run of greys and never a sequential
+  ramp; keep it to 7 or 8 segments; red and green stay for judgement. So the three greys from pass 2 are gone.
+- The tokens live in v2.css, light and dark: `--m-kept` (brand blue), `--m-ads` (amber), `--m-product` (violet), `--m-ship` (teal),
+  `--m-handling` (slate), `--m-fees` (pink), `--m-other`. The design page carries the same values. Channel colours (`--c-meta`,
+  `--c-google`, `--c-email`) are only for channels side by side.
+- Readers: v4.js `BITE` (the Morning river) and `STEP` (the Month waterfall), v2.css `.b-kept/.b-ads/.b-cogs/.b-ship/.b-fees`
+  (the hero river), the design page's `river()` and `waterfall()`. Any new money chart reads these tokens, never a literal.
+- Versions: v4.js?v=10, v2.css bumped again.
+
+### 2026-10-21: v4 ON BY DEFAULT (PR 44 merged), and THE LOOP, edges 1 to 4
+
+- `V4` is true unless `pf_v4 === '0'` (profile menu "Use the old Locus for now", or `?v4=0`). The old renderers stay ONE WEEK
+  (to 2026-10-28) and then go; until then every `!V4` branch is the escape hatch, not a feature.
+- The loop is leak or call -> task -> done -> report -> brief -> next call. Wired tonight:
+  1. desk.js `logCallTask`: a call acted on (Done, Do it, Do all, the Google negatives) writes one p_action row (source `today`,
+     source_id `<day>:<row key>`) and ticks it at once, so Reports > Done, the Monday runner's last-week list and the brief see it.
+  2. leaks.js `confirmTasked` reads `status=all`: a leak says "On Tasks" while open and "Done" (green) once ticked anywhere.
+  3. worker.js `doneTaskLines`: both brief builders hand the model the ticked tasks next to the Change Log. Deployed
+     (mobius-account-health).
+  4. production.js `liveResults`: a Launched card reads /api/launch/list (its ads by card number) and /api/hub/creative (spend,
+     sales in the period) and prints "3 ads live · $412 · 5 sales · $82 a sale · 2 keep" under its title.
+- Not done: the Slack morning card reads yesterday from the brief's snapshot (briefs.data_json) while Morning reads /api/hub/kept
+  live; same P&L line, different moment. Left as is on purpose. Edges 1 to 4 were NOT seen in a browser (Chrome was down);
+  the first look is on Cole.
+
+
+## 2026-10-21 (later): a client reads, the team acts
+
+- `body.is-client` is set by applyClientMode(). One rule in lx.css hides every header action (`#main .ph .ph-acts > *`,
+  `#hdActions > *`, `.v4-ring-go`) for a client unless the page flags the button `data-client-ok` (Month's Customers is).
+  The JS gates match (reports, brief, P&L, dashboards, plan, Month), so nothing team-only is even in the DOM.
+- The ad wall (`/api/hub/creative`) is the PROFIT worker's; `/api/launch/list` is the account-health worker's.
+  production.js' live line uses `H.api` for the first and `H.apiAH` for the second.
+- Phone: the Meetings "Waiting on" rows stack under 720px (calls.js media block AFTER the base `.cl-tr` rule, same
+  specificity, so order decides). The past-calls table stays a horizontal scroller.
+- Verified this pass in Cole's Chrome (CORS iframe build): client sim on Reports / Month / Brief, dark mode on Morning,
+  Month, Pipeline, Ads queue; 390px on Ads queue, report cards, Requests, Tasks, Meetings, the Monday runner.
+
+## 2026-10-21 (end of the v4 build): help and a tour on every page, the design page marked done
+
+- PAGE_HELP now has a full-detail essay for every v4 page (today, leaks, yesterday, production, reports, channels, adcreative,
+  changes, social, calendar, tasks, calls, requests, dash, studio, library, inspo, amb, answers, store, website, search, email,
+  stock) and PAGE_BRIEF has requests. TOURS has today, leaks, production, reports, calls, tasks, calendar, social (steps whose
+  selector is missing are skipped by startTour, so a tour never breaks on an empty page).
+- docs/locus-v4/index.html: phases 5 and 7 marked built, the status note says all seven are live.
+- Still scheduled: delete the old renderers and the pf_v4 escape hatch on 2026-10-28.
+
+## 2026-10-21: review round one, PASS A, the instrument kit (lx.js / lx.css). Read before drawing any chart.
+
+Brief: `docs/locus-v4/review-2026-10-21.html`. Every chart primitive now lives in `window.LxKit` and follows one set of habits:
+thin strokes, 2 to 4px radius, the brand blue plus greys, numbers inside the chart, a visible scale, one legend line with the
+sentence on hover (`data-v2tip`), a 400ms grow on paint (off under prefers-reduced-motion). Status is a chip, never the colour of
+a wide stroke.
+- `LxKit.ring(pct, {label, sub, outer, size, chip})` thin brand ring + optional thin outer arc; `LxKit.planChip(pct)`,
+  `LxKit.chip(tone, text)` (class `.lx-st`, NOT `.lx-chip`). v4.js `ring()` wraps it.
+- `LxKit.spark(vals, {ghost, tips, fmt})` 56px line, baseline, max and min printed on a right-hand scale. v2.js `tspark` uses it,
+  so every headline tile in Locus got it. The svg keeps class `v2spark` and its last polyline is the main line (spkMark reads it).
+- `LxKit.river(segs, {total, fmt, mark, markLabel})` one thin segmented bar on a baseline; Morning puts Kept FIRST so the normal-day
+  tick reads against the end of the kept segment; "a normal day keeps $X" + delta sits beside the headline.
+- `LxKit.funnel(steps)` stepped centred bars with a carry-on chip coloured against `bench` (v4.js `FUN_BENCH`: 6% to cart, 35% cart
+  to order).
+- `LxKit.scale(v, {max, marks, fmt})` the marked bar that replaced Month's customer dial (plus one English sentence).
+- `LxKit.waterfall(steps)` HTML columns, dashed connectors, the amount inside a bar when it fits (above it otherwise; on a phone
+  always above). Text in bars is white on light, near black in dark.
+- Bar lists: 6px bars, the target as a dashed outlined track with a tick. `.v2ib` inline bars sit on a visible track.
+- **Row panels**: any `#main .v2tbl tbody tr` with no action of its own (no `.link`, no data-*, no `[data-go]` inside, 3+ cells)
+  opens `V2.panel` with every column of that row. A row that should NOT open one: put `.lx-norow` on its table.
+- **Tile panels**: `DRILL_TABS` in v2.js now includes morning, month, customers, brief, yesterday, plan, so Revenue / Orders /
+  Ad spend / MER tiles open the drill-down (day line, breakdown, definition) on the v4 pages.
+- Versions: lx.css?v=22, lx.js?v=8, v2.js?v=70, v4.js?v=12. Checked in Cole's Chrome (CORS srcdoc recipe): Today, Month, Calls,
+  Accounts + row panel, a tile panel, light and dark, 390px (no sideways scroll), Agency view.
+
+## 2026-10-21: review round one, PASS B, words, layout and panels (in Cole's walking order)
+
+- **Today**: the character's sentence is a button (`button.v4-line[data-ask]`) that opens Ask with that sentence
+  (`AskUI.ask`). Needs you: ONE item folds into a strip under the heading (`.v4-qstrip`, `LxKit.strip`) and the top row is
+  two cards (`.v4-two-top`); two or more items = the card, which scrolls inside itself (`.v4-queue` max 260px). The
+  calendar card caps Live now and Coming up at five each with "+N more" (calendar.js `homeCard`, `.cal-more`).
+- **Brief**: `briefCardHtml(text)` (index.html, beside slackPreview) draws the v2 brief as it reads: headline large, each
+  "Label: *value* (tail)" block as a strip of figures with the plan comparison coloured, the sections as text; a v1 brief
+  falls back to the Slack preview. Past briefs and the edit-save preview use it too. The date is a small pill
+  (`.bf-datec`). Any `.ph-menu-w` or `.hd-period` menu that would cross the window edge flips (lx.js `fitMenus`).
+- **Month**: Revenue / Ad spend / MER / aMER under the weeks (new and returning under revenue), cards sized to content,
+  the customer card in plain words with "See every customer month".
+- **P&L**: `costChip(h, marginPct)` = "Costs: trusted" / "Costs: estimated (flat N%)" / "mostly trusted" / "not trusted"
+  with the why on hover; the waterfall runs full width (`.pnl-wide`) and the two columns under it are balanced.
+- **Customers**: plain headlines ("New customers by the month they first bought", "What new customers buy first, and
+  next", "What a customer spends over time"); first and next products are a two-column list with counts (`.jr2`).
+- **Reports**: the day-by-day chart runs full width above pace / split | weeks.
+- **Dashboards**: a dashboard belongs to `d.act` OR its `spec.scope` (`dashOwner`); the list and an open dashboard follow
+  the brand picker (Bonk's showed under Lucky because only d.act was checked).
+- **Model menu on credited cards**: `window.cardModel()` draws the attribution pill (`.lx-cmodel`) in a card head; one
+  MutationObserver on #main wires every one; picking sets `S.model` and redraws like the top bar. On Morning (where
+  revenue came from), Month (who paid), and every v2.js card that used to print "Attribution: <model>".
+- **Stock** (supply.js): seven columns that fit, one bar meaning (days left with a tick at the lead time, `coverBar`,
+  `leadFor`), By product / By variant (`stockRows`, `sp_view`), the explainer in the table's "..." and
+  `SupplyTab.HELP_STOCK`.
+- **Pipeline** (production.js + v4.js `ideasCol`): Ideas is always the first column for one brand (re-inserted on every
+  paint, loading placeholders, an empty state naming its sources); cards never shrink, picture then a two-line title block.
+- **Requests**: one line under the heading (team / every brand / client) and a faded "Example" row in an empty section.
+- Also fixed on the way: P&L wrote its header actions (Costs, Client link) before the paint, so they never showed; they
+  are written after it now. P&L sparklines use the kit (`LX.spark` routes to `LxKit.spark`). The river drops its normal-day
+  tick and delta on a day that lost money. Versions: lx.css?v=24, lx.js?v=10, v2.js?v=71, v4.js?v=14, desk.js?v=33,
+  calendar.js?v=15, supply.js?v=8, supply.css?v=6, production.js?v=15, requests.js?v=4. Checked in Cole's Chrome: Today,
+  Calls (action column at one x on every row), Brief (dark), P&L, Customers, Dashboards, Pipeline, Stock, The Plan, 390px.
+
+## 2026-10-21: review round one, PASS C, structure (the rail). Supersedes the v4 seven destinations.
+
+- **Eight places** (`NAV4`): Today; Money (Month, P&L, Customers, Store, Site); **Marketing** (key stays `ads`, so every
+  `data-grp="ads"`, the phone bar and NAV_LAST still work: Calls, Accounts, Ads, Tests, Changes, Email, Search); **Products**
+  (`products`: Stock, Buying, Drops; the v4 rail button reuses `id="railProducts"` because the v3 block is removed before
+  wiring); Make; Calendar; Reports; Work. Crumbs for the moved pages are a third `Object.assign(TAB_CRUMB, ...)` just above NAV4.
+- **Test calls is a filter on Tests**: `TEST_JOBS` = Every test / Needs a call (same page ids `angles` / `tests`).
+- **Tools** = Calculators (`calc`, TAB_TITLE renamed), Platform status, Guide (`guide`), plus the owner's two agency pages.
+- **Make left the top bar** (`#hdMake` hidden in v4). `makeBtn(tab)` in pageHead draws it beside `.ph-acts` on Social,
+  Saved, Week, Pipeline and Inspiration (outside .ph-acts so pageActions never wipes it); one delegated click opens
+  LocusMake. Do NOT inject header buttons with a MutationObserver: it fought share.js's header observer and froze the tab.
+- **The rail collapses**: `#railMin` in the rail foot flips localStorage `pf_railmin`; lx.js `setRail` then applies the
+  iPad icon rail (`html.lx-irail`) on a wide window too. Hidden at iPad widths (already icons) and on a phone.
+- Every old id still routes (checked: email, search, stock, tests, calc, meta, mbrowser, store, production). The start
+  tour, PAGE_HELP (stock with `SupplyTab.HELP_STOCK`, email, calc, tests) and `docs/locus-v4/index.html` (the map and the
+  IA cards) match. Versions: lx.css?v=25, lx.js?v=11.
+
+## 2026-10-21 (round two): Cole's notes on passes A to C
+
+- **The site funnel is left to right** (`LxKit.funnel`, `.lx-fun2`): Visits, Added to cart, Orders as numbers with a thin
+  bar from the left (no centred bar, which read as a dot), and between steps the share that made it in words ("3.1% added
+  to cart", "23% of carts ordered") against a typical store. It is a full-width card on Today (`.v4-stack`); the old chips
+  ran past the card and that was the sideways page scroll. `#main` is `overflow-x:clip` as a guard.
+- Sources said plainly: visits and carts = Triple Whale's pixel on the site; orders = Shopify through Triple Whale.
+  Store gained a Conversion rate tile (orders / those visits); Site's conversion stays GA4's.
+- P&L cards are one column in reading order (`.pnl-stack`): waterfall, revenue vs ad spend, where the month lands (now a
+  marked bar to the goal, the paths table and the to-hit + weeks side by side, prose in the card's "..."), who paid.
+- Customers: "Do repeat orders need ads?" sits above the product list; the list shows 6 first products, the rest folded.
+- Meta and Google campaign tables: the row "..." no longer wraps under the name (absolute in the cell), names get 220px.
+- Leaks: a search-term table runs under the row's buttons, using the full row width.
+- Clarity: Lucky has no Clarity project in Cole's account and no Clarity tag on luckygolf.com (checked 2026-10-21).
+
+## 2026-10-21 (round three): the v5 look, the collapse button, brands with no Triple Whale data
+
+- **The v5 look** (end of lx.css, "THE v5 LOOK"): cards float on a cooler page with a two-layer soft shadow (dark: an inner
+  hairline + top highlight), 12px radius, 22/24px padding; tile numbers 28px/600 tight and tabular; data in ONE hue drawn as a
+  gradient (`--v5-grad`) with a soft glow on lines and the ring (`--v5-glow`, `.lx-ring-main`); week bars stay brand blue and
+  their % note carries good / warn / bad; dashed hairline grids, faint axis text. Change the look here, not per page.
+- **Collapse** is the `.rail-min` button in the brand row (`#railMin`, top right of "Locus · Mobius Digital"); the brand row is
+  a div now, it no longer links to the Mobius tools page.
+- **Agency boards**: a brand with no Triple Whale numbers (no window or month sales) is one quiet line under the rows
+  (`noDataLine` in v4.js, Morning and Month boards), linking to its Brand settings.
+- Morning's character line rewrites the server's "$-343" as "-$343".
+
+## 2026-10-21: STUDIO v5, one path (studio.js?v=37). Read before touching Studio's screens.
+
+Cole: "Studio looks like absolute shit. I still don't understand how things get deleted in the batches, or archived."
+- **The list** (`homeView`): one table (batch, where it is, approved x/n, updated, "..." = Open / Archive), Active / Archived
+  tabs (Archived rows have Restore), "Earlier ads" as the last row, then the **How batches work** card (`RULES`): a batch is
+  one test; Archive = off the list, nothing in Meta / Canva / the Pipeline changes, Restore brings it back; Delete an ad =
+  status 'deleted', it waits under Deleted ads in its batch with Restore; **nothing is archived or deleted by a timer**
+  (true in the code: no cron touches p_studio_batch or p_studio_ad). `GET /api/studio` now also returns `archived`
+  (status 'archived', newest 100). Restore = batch/save with status draft / planned / made from the batch itself.
+- **A batch = six steps, one on screen** (`PATH`, `pathState` decides done / now from the batch; `S.view[id]` is the step on
+  screen, reset when a batch is opened): Brief, Product, Look (`setup.look_mode` ai | photo | iterate: style ideas and
+  per-line inspiration / the photo IS the ad, Dress / Make iterations from Marketing > Ads), Make (Plan the ads, then Make),
+  Approve (cards + Deleted ads fold + Approve all), Launch (Launch to Meta per ad, or **Send to the Pipeline**: makes a brief
+  card with `/api/production/brief` when the batch has no `br_batch_id`, ties it, uploads each approved ad as a version
+  `<num>-<line> headline.png` via `/api/production/upload`, stores `setup.pipeline`). `footBar` holds Back, "Step n of 6"
+  and the ONE primary button of the step. After Make finishes the view moves to Approve.
+- **Ad card** (`adCard`): 4:5 picture (opens `openAd`, the review panel in `LxKit.panel` with every action), Ad n + status
+  chip on the picture, checks as chips, Approve toggle / Change / Redo, the rest in "...". `wireAds(root)` wires a root
+  (the page or the panel). Old helpers stepsBar / startView / archiveEmpty / the 270px side list are gone.
+- CSS: the "STUDIO v5" block at the end of injectCss (`#st-css5`, tokens only). Checked on the local trio (worktree statics
+  + profit and account-health `wrangler dev --remote`, dev token, headless Chrome over CDP; Cole's Chrome was unresponsive)
+  with Lucky's real batches: list, archived tab, every step, panel, archive -> restore and delete -> restore round trips,
+  light and dark, 390px with no sideways scroll. Nothing was planned, made or sent (no image spend, no Pipeline write).
+- Trap met: another session's static server held port 8841 with an older checkout; the Locus service worker also caches
+  by URL, so a reused ?v= serves the old file in a reused browser profile.
+## 2026-10-21: SOCIAL REBUILT AROUND "WHAT WE MAKE THIS WEEK" (social.js?v=10, socialweek.js?v=6). Supersedes the card and viewer notes above.
+
+- **The Feed leads with our strategy**: a This week strip (`loadPlan`: `/api/social/week` planned vs target, and from
+  `/api/social/tray` our versions waiting to be filmed, filmed and ready, other ready items; Open the Week, Fill the
+  week), then **Worth making this week** (top 4 posts at 3x+ usual in 14 days with no idea yet, each with Make ours),
+  then "Everything <brand> watches" with the unchanged controls row. Saved keeps the old simple layout.
+- **A card** = 4:5 media with ONE badge (`ratioPill`: "6.2x usual", tooltip has the numbers), time or slide count top
+  right, carousel arrows and dots (`cardSlides`: slides load on hover, touch or arrow into a snap strip), a speaker
+  button while a video plays (`G.vol` / `G.mute`; the old mic -> lightning icons are gone). Under it the account
+  (`avatar`: initials on a token tint, platform badge; @handle; platform · format · age) and one icon row (views,
+  likes, comments). No caption, "usually" or engagement % on the card. Icons the sprite lacks live in `G` in social.js.
+- **The viewer** plays video WITH sound (opening is the user gesture; if the browser refuses it plays muted with one
+  "Turn sound on" button), YouTube with `mute=0&controls=1`. Carousels: swipe, arrows, clickable dots, and the arrow
+  keys page slides first, then posts (`V.sl`). Column = who + Follow, fact chips, How it did (big number, badge, the
+  usual in a sentence, a 4-up grid), Caption (clamped, Show all, Copy), Details, What they say, Your note. Bar = Make
+  our version (full width) over a real split Save button (`.soc-split`) and Open on <platform>.
+- **Make our version** no longer opens LocusMake inside the viewer: `makeStep` / `mkShow` in social.js drive the same
+  account-health routes (`/api/make`, `?id=`, `/redo`, `/exit`) and show four steps as progress: Write it, On the Week,
+  Film it, Schedule it. One button ("Write it and put it on the Week") writes the script and caption and, when the draft
+  is ready, runs the `organic` exit itself (tray item + Film task for Ravo). Film it = Upload the film here
+  (`/api/social/upload?idea=` closes the task) or on the Week. Schedule it sets `window.SOCIAL_COMPOSE = 'idea:<id>'`
+  and opens the Week, whose render opens the composer at `nextSlot()` with the clip and caption. Creators / Ad brief /
+  Studio stay as small "Also send it to" buttons. A person still films; Claude never posts someone else's footage.
+- Week tray: a Make ours item with no clip is labelled TO FILM (was SCRIPT).
+- Checked on a stub harness in the built-in browser (not committed): before and after at 1400, the viewer, carousel by
+  arrow and key, the whole Make flow including Schedule opening the Week composer, 390px light with no sideways
+  scroll. Cole's Chrome renderer was frozen this session, so NOT checked against real data. Shots:
+  `docs/locus-social/screens/2026-10-21-*`.
+- **Later the same day: four paths, "I saw a post I like, now what?" (social.js?v=11).** `PATHS` in social.js = post
+  (exit organic: Write it, On the Week, Film it, Schedule it), creators (exit creators: Write it, On the creator link,
+  Creators film it), brief (exit brief: Write it, On the Pipeline, Team makes the ad), studio (exit studio: Write it,
+  Studio batch, Make the ads); each has a label, one line on what it makes, where it lands, and its button. The viewer's
+  "Make it ours" opens the chooser (`intro`: four radio cards, the picked path's steps, own take or recreate, a steer,
+  one button); `mkShow` follows the picked path (`p._path`, else the first door in `sent` via `SENT_PATH`) and runs its
+  exit when the draft lands; the other three are "Also:" buttons and switch the view to that path. The Feed shows the
+  same four as a guide card under This week (`sopHtml`, a `<details>` remembered in `soc_sop`). Checked on a stub
+  harness (desktop, 390px light): every path's steps, the Brief path end to end. Shots `docs/locus-social/screens/2026-10-21-paths-*`.
+- **2026-10-21 (later), live run with two Takomo references (studio.js?v=38):** brief, product, look (Takomo pics dropped as
+  style ideas), plan all ran for real (batches "Putter shape choice, 3 concepts" and "Eclipse launch carousel", Lucky).
+  Make stopped at the first picture: OpenAI answered "You have no credits remaining" (Cole adds credits; Claude never
+  handles that account). Fixed from the run: the step on screen is set when a batch opens (picking a product used to jump
+  the page to Look before the second product could be added), a Make that made nothing stays on Make and does not mark
+  the batch 'made', and an out-of-credits answer reads in plain words. Studio has no real carousel format: a "carousel"
+  batch makes each slide as its own 4:5 ad and Launch makes single-image ads.
+
+## 2026-10-21 (round four): RECEIPT ROWS replace every filled horizontal bar (Cole picked them)
+- `LxKit.bars` lists (weeks, channels, first orders) read as rows: label and number, note in grey, a 2px hairline sized to the
+  value, the target as a tick (no ghost bar). Yesterday on Today is a receipt (`river()` in v4.js, `.lx-rc`): Sales, each cost
+  with its share and hairline, Kept, a normal day. Agency kept bars, table inline bars, the share bar and funnel bars are
+  hairlines too. CSS block "RECEIPT ROWS" at the end of lx.css. Not seen in a browser: Chrome stopped responding (every tab).
+- **Week pass (socialweek.js?v=7):** the tray is labelled rows, not a 2-up thumbnail wall: picture, title, source · who,
+  and a state chip (To film / Ready / On the week), grouped To film, Ready to post, Already on the week; 288px wide.
+  A "How it works" line under the controls (drag on desktop, tap Ready on a phone). Tray and grid carry the v5 shadow
+  and radius. Drag, click and the phone sheet are unchanged (`.sw-ti[data-ref]`). Shot `docs/locus-social/screens/2026-10-21-week-tray.jpg`.
+- **Live check, 2026-10-21 (Cole's Chrome, Lucky, real data, social.js?v=12):** 244 cards, plan strip (0 of 5, 1 to
+  film, 22 ready), YouTube plays with `mute=0`, an Instagram MP4 plays unmuted, a 7-slide carousel pages by arrows and
+  keys, the chooser opens, the Week tray groups 8 To film / 22 Ready. Fixed from it: **Worth making picks followed
+  brands first** (own-usual ratio 2x+), topic posts only fill the rest at 5x+ (before, all four were topic accounts at
+  "523x its size" against follower count); quick arrow presses on a carousel now each move a slide (`S2.lock`).
+  No Make ours path was run live (each one makes a real task, brief or batch). Shots `2026-10-21-live-*`.
+
+## 2026-10-21 (round four): THE AD SHEET (v2.js previewAd, lx.css "THE AD SHEET")
+- Reading order: Results (spend, cost per purchase vs goal, ROAS + revenue, purchases), The call, **Its ad set** (every ad in
+  the set: thumb, name, its call, spend with a hairline share of the set, cost per purchase, ROAS, hook; this ad highlighted;
+  first 8 then "Show all"; tap a row = open that ad), Funnel, Landing page (path on its own line, add-to-cart stats under it),
+  Delivery, Watch time, Where it ran, Ad copy, Next steps.
+- creative()'s `ctxOf` carries `sibs` (ads with the same `adset.id`), `verdictOf` and `open`. A grouped card (one per creative)
+  has `adset: null`, so `setOf(r)` falls back to the set of its top ad (same id). previewAd uses `a.adset || cx.set`.
+
+## 2026-10-21 (round four): AD CALLS, PASS Q (Cole approved docs/locus-v4/goals-and-ad-calls.html)
+- One MAIN goal decides (`goal_metric`, platform goal `goal_meta` / `goal_google` in that metric); target ROAS (with the ROAS
+  guard on) and target CPA are GUARDRAILS when they are not the main metric; an empty field never counts.
+- hub.js `buyerList`: kind `mixed` when the main goal and a guardrail disagree (main met with 3+ sales but a guardrail broken,
+  or past the cut line with every set guardrail met); it replaces the old silent ROAS-guard keep. Every set row carries
+  `checks`, `evidence {for, against}` and, on Cut or Mixed, `funnel` when 60%+ of its 7-day sales are new customers and its
+  click rate beats the account median (sets with 1,000+ impressions). Mixed rows rank at half their spend.
+- desk.js: MIXED chip, a Mixed filter, no Do it button, "Decided on" in the Done log; "Feeds the funnel" tag with numbers on
+  hover. v4.js setPanel: numbers against goal or account, For keeping it / For cutting it boxes, the funnel line.
+- Not taught Mixed yet: nudge.js and the 8am Slack post ignore it (they only act on cut / scale / trim / refresh / fix).
+- Later the same day: Mixed is taught to the phone nudge (nudge.js, no action button), the morning card (`CALL_KINDS`,
+  "decide on N") and the 8am today post. Feeds the funnel needs 60%+ new AND 5+ points over the account AND click rate 25%+
+  over the median (Lucky is 89% new, so 60% alone tagged everything). The panel call chip is styled inside #v2panel.
+
+## 2026-10-21 (round five): ad sheet polish, the ingredients card, look-alikes
+- Ad sheet: the four top numbers are separate padded cards; the set table has fixed columns and one row height (name and call
+  on two fixed lines, spend, share hairline + %, per purchase, ROAS, hook hidden when no ad in the set is a video); the funnel
+  is rows (hook, hold for video; cost to reach 1,000; click rate; click to purchase) against the brand median with A to F,
+  and "weakest" only when a step is under the median (C or worse); the landing page shows add to cart, purchase rate and
+  visits against the site, plus "Compare landing pages in Leaks" (page-vs-page advice lives in Leaks, not the ad).
+- Which ingredients work: one group at a time from a tab row (`.ingr-seg`, remembered in `cr_ingr`), clean rows.
+- Ads Meta likely counts as one: a card per ad set with the look-alike ads as thumbnail buttons (`.alk`).
+
+## 2026-10-21 (round six): the ad over time, plain words
+- profit `/api/hub/ad-days?act=&ads=<ids>` (hub.js `adDays`, on CLIENT_RULES in both brandguard copies): the last 90 days of one
+  ad or of every ad behind one creative, Meta delivery + Triple Whale credit under the screen model, `attr_pending` per day.
+- Ad sheet: the top numbers say Spend / CPA / ROAS / Purchases with the period and the model under them; **Trend** (v2.js
+  `adTrend`): Yesterday / 3 / 7 / 14 / 30 days against the period before, six 60-day lines (spend, purchases, CPA, CTR, CPM,
+  frequency as a daily average), and six weeks as a table. Funnel in words: this ad, the typical (median) ad, "% better / worse"
+  (no letters); "Biggest gap" only at 10%+ worse. Landing page: add to cart and purchase rate against the site (no visits box);
+  the Leaks link shows only when Leaks flags this page. Where it ran: Spend and Share in separate columns.
+## 2026-10-21: STUDIO CAROUSELS (studio.js?v=40, launch.js?v=6). A carousel batch is ONE Meta ad.
+- **Brief step**: "Format" switch Single ads / One carousel, stored as `brief.format = 'carousel'` (empty = single). A carousel
+  hides "What we're testing", calls its lines cards ("in the order people swipe"), 2 to 10 (`CAR_MAX`). Switching clears the plan.
+- **Make**: the plan is sent with `format` (account-health studio-ai.js plans one story and a `card_title` per card); plan rows
+  read "Card n" with a "Card headline" field (under the card in Meta) and "Words on the picture". `plan.format` is kept.
+- **Approve**: one horizontal strip in swipe order (`carOrder(b, ads)`: `setup.carousel_order`, a redone card keeps its old
+  card's place by line), "Card n" on each, ‹ › move a card and save `setup.carousel_order`. Approve / Change / Redo as usual.
+  The per-ad Launch to Meta is hidden for a carousel (in the panel too).
+- **Launch**: "Launch the carousel to Meta" (the approved cards as thumbnails, in order) + the foot's primary button
+  (`data-lcar`) open `LaunchToMeta.openCarousel({act, tok, batchId, order, onDone})`: ad set, button, name ("420 A |
+  Carousel"), primary text, the ad's link, then each card's headline and (only when different) link; Check it (dry run)
+  then Create paused, then Ads Manager / Undo / Turn it on. `index()` marks every card of a carousel launch as launched, so
+  the chip and the Launch step's tick follow. **Send to the Pipeline** uploads the approved cards in swipe order as ONE ad
+  of the test (`<num>-1 card k of n <headline>.png`, so prodwork reads them as versions of ad <num>-1, newest = the last
+  card) and sets the card's format to Carousel (`/api/production/field`). The Pipeline shows it as ONE carousel (next section).
+- Checked on a stub harness in the built-in browser (static files + mocked Studio and Launch API; not committed): the format
+  switch, card fields, reorder saved, the window's dry run and create body (order, headlines, a card's own link), the chip
+  after, the Pipeline send (one brief, 3 uploads in order, format set), 375px with no sideways scroll. Nothing was made,
+  planned with a real model, or written to Meta.
+
+## 2026-10-21: THE PIPELINE READS A CAROUSEL CARD AS ONE AD (prodsheet.js?v=14, review-ui.js?v=10, launch.js?v=7)
+- A Production card whose `brief_json.format` is `Carousel` treats its uploads as the CARDS of one ad, not versions. The
+  worker decides it (account-health prodwork.js `adsOf(files, comments, {carousel})`): the ad carries `carousel: true` and
+  `cards: [{file_id, k, version}]` in swipe order, read from `card k of n` in the file name (a re-sent card k takes its
+  place), else version order. `file_id` = the newest card, where the ONE call lives; notes count over every card.
+- **Ads tab** (prodsheet.js `filesHtml`): a carousel is one article with its cards in a scrolling strip (`.ps-pv.car`, each
+  card a button that opens the viewer at that card), "Carousel · N cards", one Approve / Ask for changes, "Download N",
+  and "Launch the carousel to Meta" (`data-launchcar` = `LaunchToMeta.openBatch`). No Compare or Delete vN on it.
+  Download all takes every card.
+- **Viewer** (review-ui.js): an ad with `carousel: true` has files `{...file, card: k}`; buttons read Card 1..N (no
+  latest, no Compare, the tab is Cards), any card can make the call ("Approve all N cards"); the worker's `decide` maps
+  whichever card id it gets to the carousel's newest card. review.html (the client link) shows the first card with
+  "Carousel · N cards" and the same viewer.
+- **Launch** (launch.js `openBatch`): the row shows the card thumbs and each card's headline (from the file name
+  `card k of n <headline>`, else the brief's Headline); the dry run lists the cards; create = ONE carousel ad
+  (account-health `proposeWorkCarousel`, meta_create_ad `cards`). A carousel with under 2 or over 10 cards, or a video
+  card, cannot be ticked and says why.
+- Checked on a stub harness in the built-in browser (not committed): the strip, viewer labels and the decide body, the
+  launch window and its dry run body, 375px with the strip scrolling inside the card. Not run against real data or Meta.
+
+## Ad sheet, round seven (2026-10-21)
+- Header chip is "Live since <first spend>" (it was the ad's age, read as the window). Numbers follow the dates picked at the top.
+- Credit model pill sits in the sheet (`.adt-when .adt-model`); changing it reopens the sheet on the same ad via `V2PENDING`.
+- Trend: day-by-day covers this period and the one before (min 14 days); the "before" card says how many days of spend it needs. Week table fits (fixed layout, Purch./Freq., date on two lines).
+- Set table: CPA header, plain share %, the call explained on hover (`CALL_TIP`). Funnel compares to "Account median".
+- Delivery one number per line; the AI read of the creative sits in its own box (`.adt-tags`); ad copy labelled Headline / Primary text; Where it ran fits without a sideways scroll.
+## 2026-10-21: a Studio carousel posts as ONE organic carousel (Social > Week)
+- account-health socialpost.js `trayOf`: a Studio batch with `brief.format 'carousel'` and 2+ approved finals is ONE tray
+  item (`ref scar:<batch>`, `kind 'carousel'`, `cards` = media entries in `setup.carousel_order`, caption = post copy);
+  its cards never show as loose items; it is `used` once any card is on the week. `fillWeek` treats it as one post.
+- socialweek.js `mediaOf(it)`: adding it (drag, click, From the tray, Fill the week, Swap) puts ALL its cards in the post,
+  in order. Posting already handled several pictures: Instagram = one carousel, Facebook = one multi-photo post, TikTok =
+  one photo post. Test: `node test-socialpost.mjs` 8 (tray order, no loose cards, one IG CAROUSEL container).
+
+## Ad sheet, round eight (2026-10-21)
+- Header: "N days live" chip (from first spend, date on hover); Dates and Credit pills in the sheet header (`window.cardPeriod`, `setPeriod`, `setModel` in index.html). They change the whole page; the sheet dims (`.adt-busy`) and reopens on the same ad via `V2PENDING`. The "these dates..." line is gone.
+- No spacer under the last section (the `v2spy-end` blank space); `panel.refit` is a no-op.
+- Purchases number opens the orders as a sheet with "Back to the ad" (`drillOrders(label, q, back)`), customer view backs to the orders.
+- Funnel: padded rows, one-line headers (This ad / Median / vs median). Trend switch is 7 / 14 / 30 days, default 14, and says it ignores the top dates.
+- Testing in a srcdoc iframe on tools.go-mobius-digital.com writes Cole's real localStorage (pf_model, pf_range): reset them after.
+
+## 2026-10-21: STUDIO BRAND KIT (one button and the real logo on every ad)
+- Cole: "if you're going to use our foil, then use our foil", "put our actual logo there". A brand's kit lives in
+  `p_studio_cfg` key `kit:<act>` (`PUT /api/studio/kit {act, kit}`; null deletes it; GET /api/studio returns `kit`):
+  `{on, logo (https or /path), logo_tint auto|none, button {style foil|solid, colors[], text, radius, font, weight, track}}`.
+  Lucky's is set: Lucky foil `#C29A2B > #EDD27C > #C29A2B`, text `#17140F`, Archivo Narrow 700, radius 8, logo
+  `/profit/kits/brand_lucky_golf/logo.svg` (the Whatnot app's one-path logo, white fill, tinted dark on light backgrounds).
+- With the kit on, `specOf` sends `kit: true`; the worker's `kitRule` tells the model to draw NO button and NO logo and to
+  leave two bands empty (square ads: top 10% / bottom 14% of the square; 4:5 ads: 9-18% and 80-90%). `extend` = `extendFit`
+  then `kitPass` (studio.js): the browser draws the button (from `spec.cta`, centred, bottom at 88.5%) and the logo (square
+  ads: centred in the painted top strip; 4:5: at 11.5%), then finalizes with `kit: true`. The worker keeps the picture
+  before as `clean` (only the first time) and marks `check.kit` so it is never drawn twice. Vary / change / story prefer
+  square, then clean. A kit only applies to ads MADE with it (`spec.kit`); older ads are untouched.
+- Tested live 2026-10-21 on one Eclipse ad (~$0.40): the first draw put the logo on the headline (the model ignores the
+  9-18% band on square ads), so the logo moved into the painted strip; the second draw was clean.
+
+## 2026-10-21: SAVE TO LOCUS (inspo.js front, worker/src/inspo.js). Inspiration for a brand from anywhere.
+- Three ways in: the Ask bar (a pasted link offers "Save to Locus as inspiration" first; a pasted PNG / JPG / WebP opens
+  the save window and goes up through `/api/studio/upload`), the phone (manifest `share_target` GET to /profit/ with
+  title / text / url; the presence of url or text is the marker because the share sheet replaces the action's query),
+  and the bookmarklet on Make > Inspiration (`?save=<url>&title=`). `LocusSave.readURL(qs)` runs in boot before
+  LocusShare, keeps the link in sessionStorage `pf_save_pending` through sign-in, and `LocusSave.pending()` opens the
+  save window once after the first `show()`.
+- The save window = preview, brand picker (defaults to the picked brand), optional note, Save. Worker `/api/inspo`
+  (GET ?act=, POST {act, url|image, note, title}, PATCH {id, note, title}, DELETE ?id=), table `p_inspo` made on first
+  use; a link is read once server side (6s) for og:title / og:image; the same link twice for a brand answers `already`.
+  Clients save and read their own brand's (CLIENT_RULES, both brandguard copies).
+- Make > Inspiration leads with "Saved to Locus" (every angle, newest first: Open, Brief one like it, Remove), then the
+  Atria boards in one card. sw.js VERSION locus-v3 so installed apps pick up the manifest.
+- PR 56's leftovers landed here: the composer's Shop link (targets.fb.link, appended to the caption) and Write it for me,
+  the worker's fb link (VALID_T, publishFb) and slides copied at once. Brief: the More menu flips at the edge (lx.js
+  fitMenus listens in the capture phase; menu buttons stop the click) and the date pill keeps its own width.
+
+## 2026-10-24: pop-ups, not side drawers
+
+Cole: "instead of it coming off the right, can it just be a straight up pop-up in the window, like a normal pop-up...
+this goes for all things that go from the right side", and the Integrations panel showed blank when the page was scrolled.
+- **The blank panel.** `[data-ui="v2"] main{animation:lx-in ... both}` kept the end transform "current", which makes
+  `<main>` the containing block for every `position:fixed` child: the Integrations drawer (`.cn-drawer`, rendered inside
+  `#main`) sat at the top of the page, off screen once scrolled. Now `backwards` (v2.css). Never give `main` (or any page
+  wrapper) a transform / filter / `both`-filled transform animation; pop-ups also belong on `body` where possible.
+- **One block at the end of lx.css** (min-width 721px only) turns every right-side panel into a centred pop-up, fixed to
+  the window, sized to its content (`height:fit-content`, max `100dvh - 48px`), scrolling inside: `#v2panel:not(.sheet)`
+  (V2.panel, so every caller), `.cn-drawer` (Integrations, now also closes on Esc), `.lb-drawer`, `#amDrawer` (the idea
+  editor: a wide editor, so a fixed-height 880px window, still centred) and `#ask` (Ask Locus: a 680 x 820 window). The
+  card sheet (`#v2panel.sheet`) was already centred. Phones keep their bottom sheets (phone.css, unchanged).
+- Checked on a scratch page loading the real stylesheets + v2.js at 1280 and 375 (deleted): scrolled 1800px, every pop-up
+  centred; the old `both` fill put the Integrations panel at -350px. Not checked signed in on the live site.
+
+## 2026-10-26: THE BUYER LIST (buyer.js, account-health src/buyerlist.js). Read before touching Today's calls state or the morning card calls.
+- Cole runs media buying until he hires a buyer (Ahsan is creative strategy only). Ads > **Buyer list** (page id `buyer`, first
+  under Ads / Marketing, Agency view and one brand, team only: AGENCY_TABS, SHOWABLE) is ONE list sorted by money at stake:
+  hub.js buyerList calls (Scale, Cut, Trim, Refresh, Mixed; no Fix), test minimums due off (minoff.js state for the day, else
+  asana-brand.js testMinimumsDue live, cached `buyerMin:<date>` 6h; stake = a week of the minimum) and Production cards in
+  Ready with approved ads not on Meta (listBoard + prodwork adsOf minus p_launch; Do = LaunchToMeta.openBatch, paused).
+- Do / Skip / Open (Mixed has Done instead of Do). **Shared state** in `p_buyer_state` (brand, object, action): Done = quiet
+  3 days, Skip = until tomorrow (Central dates), clear = back. Any `p_meta_write` on the object in 3 days hides the call
+  (watch 3 days). **Today's calls (desk.js) uses the same state** (`/api/buyer-list/state`), no localStorage any more.
+- Slack: `buyerPostTick` posts ONE message a day from settings.morningHour to settings.buyerChannel (default #daily-briefs
+  C0C8UA53U3W): head, owner (settings.buyerOwner, default Cole, tagged), top 5, launches waiting, Open in Locus. While
+  settings.buyerPost is on (default) the brand morning cards carry NO calls line, NO Make the calls button, NO calls thread.
+  Owner, channel and the switch are edited on the page ("Change", "Slack post"), which also previews the post.
+- Migration `worker/migrations/buyer-001.sql` (also made on first use). Tests: account-health `node test-buyerlist.mjs`.
+
+## 2026-10-26: LAUNCH DAYS + LAUNCHED AND SCHEDULED on the Buyer list (buyerlist.js, profit buyer.js?v=2). Read before touching launch rows.
+- **Launch days** = settings `launchDays` (default `mon,thu`, Central; `PUT /api/buyer-list/settings {launchDays}`, also
+  "Change launch days" on the page). A Ready card with approved ads not on Meta is a Launch row ONLY on a launch day, or on
+  and after its own `launch_on` (dated BFCM batches, any weekday; the row carries `launch_on`). Any other day it is not a
+  to-do: `list.next_launch {date, day, n, n_ads}` = the quiet "Next launch: Thursday, N cards" line under the lead.
+- `list.scheduled` = Ready / Review cards with a future launch_on (dated) + Ready cards waiting for the next launch day,
+  sorted by date. `list.launched` = p_launch of the last 30 days (`launchedRows`, LEFT JOIN p_br_batch for the card
+  number and title), newest first; `checked` false = never read again, shown as "Created paused".
+  `GET /api/buyer-list/launched?act=&refresh=1` reads the status live (launch.js `refreshStatus`, exported, dep
+  `launchStatus` in buyerDeps; rows read in the last 30 minutes are skipped). The page calls it after it paints.
+- **The daily post** adds "Launched yesterday: N ads (brands)" and "Launch today: N cards (brands)" under the owner when
+  they apply; a day with only launches yesterday still posts.
+- **Card to Live**: the single ad (`/api/launch/create`) and the carousel (`/api/launch/carousel-create`) now move their
+  Production card to Live too (launch.js `cardToLive`, only from Ready or Review), like the batch since PR #102.
+- Page: "Launched and scheduled" card under the list (agency view and per brand), one search box (brand, card or ad), a
+  tap on a row = its details in the modal (a bottom sheet on a phone), Open / Card = Production with that card open
+  (`window.PD_CARD`; production.js now honours it on every visit, not only the first, which also fixes search's brief kind).
+- Tests: account-health `node test-buyerlist.mjs` (launch days, dated cards, launched rows, post lines, cardToLive).
+
+## 2026-10-26: funnel role on the daily ad calls (hub.js buyerList). Read before touching Cut / Trim.
+- Every set row (and Trim / Refresh ad rows) carries `role` (opener | closer | both | null) and `first_click {role, heavier,
+  on_goal, fc_orders, fc_revenue, lc_orders, lc_revenue, fc_results, fc_cpa, fc_roas, fc_new_share, fc_known}`; set rows
+  also carry `ad_roles [{ad_id, role}]`. Source: tw_ad_attr fullFirstClick vs lastPlatformClick over the SAME window as the
+  call (7 or 14 days), the 1.3x line from account-health leakctx.js. Opener = first-click credit 1.3x+ last-click AND 2+
+  first-click sales at or better than the goal. New-customer share = fullFirstClick tw_order_touch orders whose
+  customer has no earlier tw_orders row, over the orders tw_orders can place. Null when the brand has no first-click rows.
+- **Opener guard**: a Cut or Trim whose role is opener becomes kind `mixed` with `kept_by: 'opener'` (no Do button) and a why
+  "Last click says cut (...), but first click credits it with N sales at $Y CPA and Z% new customers: it opens journeys.
+  Keep it; judge it on first click." A ROAS floor Mixed still wins over it. Brand field `n_opener_kept`.
+- **Every why ends with one numbers sentence**: days running, spend, CPA (or ROAS / cost per new customer / lead) vs goal,
+  CTR, CPM, frequency, hook rate (video_3s / impressions, video ads only). Cut, Trim and opener rows add "(N needed)" for
+  min days and "($X needed to judge)" for spend. The Buyer list shows only the first sentence (oneLine), so the call
+  sentence stays first. Desk (Today's calls) tags kept openers "Opens journeys". Tests: profit/worker/test-calls.mjs.
+- **Live audit fixes (same day, Dartee / Bonk):** (1) best set guard: when the account is under goal over the set's window,
+  a sales set with 25%+ of the account's results at better than the account's number is never Cut; Mixed `kept_by:
+  'best_set'` (Bonk "235 | Still"), brand `n_best_kept`. (2) a Cut set holding an ad on goal with 2+ results says "keep ad
+  X (...) and move it to a working set first" in its first sentence, row field `keep_ad`. (3) no Scale when a slow set
+  (14-day window) had no result in the last 7 days. (4) lead sets without goal_cpl are named in the brand note "not
+  judged: no lead goal set" (`lead_no_goal`); sales rules never apply to them. NOT built yet: judging split tests that
+  share a test number / concept together (Dartee "Muni"), and flagging sets paused and turned back on repeatedly (churn).
+- **Tracking gap guard (same day, Ice & Gold audit):** per brand over 7 days, Meta's own purchases (`ad_daily.purchases`)
+  on the spending sales sets 3+ and Triple Whale lastPlatformClick orders on those ads 30% of that or less = tracking gap.
+  Every Cut and Trim turns Mixed (`kept_by: 'tracking_gap'`, `was: 'cut'|'trim'`) with "Tracking gap: Meta counts N sales on
+  this set in 7 days, Triple Whale counts M. Fix tracking before cutting." first; brand `tracking_gap {meta, tw}`; the
+  answer carries `banners [{act_id, brand, kind, text}]`, passed through account-health buyerlist.js `banners` and shown
+  as one line on the Buyer list (buyer.js) and Today's calls (desk.js). Live 2026-10-26: I&G 19 vs 0, 2 cuts held.
+
+## 2026-10-26: THE BUYER REVIEW FLOW + THE MORNING READ (account-health src/buyerai.js, profit buyer.js?v=3). Read before touching Buyer list rows, Disagree or the morning post.
+- Cole is the media buyer for now. Locus suggests every change, shows the data AND the ads; he agrees (Locus makes the
+  change) or disagrees and says why (Locus answers once, with numbers, or agrees) and Locus remembers his call.
+- **The ads**: every ad call row has "Show the ads": `GET /api/buyer-list/ads?act=&adset=&ad=&meta_act=` = the set's ads
+  that spent in the last 7 days (plus the Trim ad by id), each with `cover` (creative.js `/cover/<ad>.<sig>.webp` when the
+  cover is in R2, else the page falls back to V2.thumbs / `/api/ad-creatives`), spend, sales + revenue (Triple Whale last
+  platform click, never Meta's), CPA or ROAS against the row's goal, CTR, CPM, frequency, hook rate (video only), role
+  (first vs last click, 1.3x line + 2 first-click sales, as hub.js), new-customer share. A tap on a picture = V2.playAd
+  (the bigger view, Meta's preview or the mp4). Ad set rows by default; ad rows only for Trim (the rules' own call).
+- **Agree** = the existing Do (LxMetaWrite: dry run, write with expect, p_meta_write log, Undo). Mixed and morning-read rows
+  have Done instead. **Disagree** = "Why not?" -> `POST /api/buyer-list/disagree {act, row, why}`: ONE Sonnet 5.5 call
+  (`talkSystem`) reads the row, the set and its ads (7 days), his earlier calls and his words, and answers in two plain
+  sentences, stance `drop` ("Fair, I'll drop it.": his call stands at once, decision mine, the row Done 3 days) or `hold`
+  ("I still think X because Y"): then Go with mine / Go with Locus (`POST /api/buyer-list/decide {act, id, decision:
+  mine|locus}`; mine = Done 3 days, locus = the page runs the Do). Saved in `p_buyer_lesson` (migration
+  profit/worker/migrations/buyer-002.sql, also made on first use). `lessonsText`: COLE'S FINAL CALL / LOCUS AGREED WITH
+  COLE / SETTLED FOR LOCUS. `GET /api/buyer-list/lessons?act=` = "Your calls" on a one-brand page. A Disagree is ~1 cent.
+- **The morning read** (`readBrand`, `buyerAITick` on the HOURLY cron, every brand in one run; the 5-minute trigger has not fired since 2026-10-23, so it is a backup only; settings `buyerAIRunNow` = 1 runs it on the next tick at any hour): from an hour BEFORE settings.morningHour to noon
+  Central, 3 brands a tick side by side (settings `buyerAILock`, 8 minutes, stops two ticks reading one brand), every
+  eligible() brand once a day (settings `buyerAIDone` {date, acts, tries}). ONE Opus 5.5 call, effort medium, per brand
+  reads: rule rows (list rows + quiet ones), ad sets that spent in 14 days (top 25) with 7 and 14 day numbers, first click,
+  new-customer share, budgets and their top 6 ads, campaigns with budgets and 7-day spend, the short brain, memory facts
+  (strat_fact; any brand fact on account / structure / plan / campaign is printed as THE ACCOUNT PLAN), buyer lessons,
+  tracking banners. Answer (json schema): per rule row keep | change | drop + one sentence (+ the change), up to 6 extra
+  calls (budget, relaunch, leads, tracking, cut, scale, other) with ids it was given (others dropped), and a summary.
+  Stored in `p_buyer_ai` (act_id, day). Em dashes are stripped from every model answer (`noDash`).
+- **On the list** (`applyAI` in buildBuyerList; `noAI: true` skips it): rule rows carry `ai {verdict, reason, change}`,
+  shown under the why; a drop sinks under the rest; the extra calls are rows of kind `ai` ("MORNING READ" chip,
+  `from: 'morning read'`, Done / Disagree / Skip / Open, no Do). `list.ai {on, n_read, n_brands, brands[{summary}]}`.
+  callRow now also carries goal, goal_roas, metric, cpa, roas, revenue, days, role, top_ad, anchor_ad.
+- **The post** adds "Morning read: N brands read, X calls the rules missed, Y to change, Z to drop." and tags each top line
+  "(morning read agrees / says change it / says drop it)" or "(from the morning read)". buyerPostTick WAITS for the read
+  during the post hour (`aiPassDone`), then posts anyway the hour after.
+- **Switch + money**: settings `buyerAI` ('off' stops it; the "Slack post" modal has the checkbox and today's cost).
+  `aiSpend:buyer:<YYYY-MM>` {calls, in, out, usd, by: {pass, disagree}} and `aiSpend:buyer:day:<YYYY-MM-DD>`; hard cap
+  DAY_CAP $5 a day (a brand past it = 'capped', no call). `GET /api/buyer-list/ai/spend`; `POST /api/buyer-list/ai/run
+  {act?}` runs it now (force, re-reads). Prices Opus 5.5 $4 / $20, Sonnet 5.5 $2 / $10 per M.
+- **Lucky's account plan** is a brand memory fact (strat_fact scope brand_lucky_golf, topic 'account structure'), from
+  docs/strategist-brain/source-lucky-account-structure.md: one [MD] CBO since Oct 4, do not split it or turn the old
+  Black Wedge campaign on.
+- Tests: account-health `node test-buyerai.mjs` (7) and `node test-buyerlist.mjs` (buyerAI off there).
+
+## 2026-10-27: THE BUYER LIST, SIMPLE (buyer.js?v=4, account-health buyerlist.js + buyerai.js). Read before touching a Buyer list row, the morning read's answer or the DM.
+- Cole found v3 too confusing (names squished, "what to do and why" talked too much, the morning read note took long to
+  get to the point and told him to check UTMs Locus can check itself, no way to approve everything at once).
+- **The row**: the full ad set / ad name on its OWN line (never clamped or split), the level ("Ad set", "Ad", "Campaign")
+  and brand as small labels beside it, a bold action of a few words ("Pause this ad set", "Raise budget $100 to
+  $120/day", "Turn back on"), ONE why line with at most 3 numbers (buyerlist.js `shortWhy`: "$561 in 7 days, 0 sales,
+  goal ROAS 2.2x"), an optional green "Locus checked: ..." line, then the buttons, then "Show ads" (or "Show details")
+  as its own control below. Everything else (the rule's full reason `why_full`, spend, sales, CPA/ROAS vs goal, days,
+  role, budget, the rule's own call when Locus changed it) lives inside Show ads (`detailsHtml`). No kind chips, no
+  CUT/SCALE pills, no "Morning read says" box any more.
+- **One final call per row** (buyerai.js `applyAI`): keep = the rule's call stands; change = the row shows the read's
+  action and why, tagged "Locus changed this" (hover = what the rule said), `rule {action, why, do}` kept, and Agree
+  makes the read's `move`; drop = the row leaves the list (quiet, `hidden.why 'dropped'`, "N Locus dropped").
+  Extra calls are tagged "Locus found this". Rows Agree to all cannot make are tagged "Needs you".
+- **Grouped by brand**, the brand with the most money at stake first (`byBrand`; list.groups, list.n_do).
+- **Agree to all N** (top of the page, and per brand when 2+ brands): one sheet (bottom sheet on a phone) lists every
+  change in one line; Your call / launches / briefs / rows with no Meta move are listed under "Needs you (skipped)".
+  Budgets: the read's number, else the live budget +20% (metaLive), a set on its campaign's budget is skipped. On the
+  button `runAll` makes them one at a time through `/api/meta/write` (dry run, then the write with expect: locusWrite,
+  p_meta_write, Change Log, Undo 24 hours), marks each Done, shows each result with its own Undo; one failure never
+  stops the rest. Single Agree: pause / budget = LxMetaWrite as before (it.ad_id only when the row is on an ad);
+  resume and a morning-read budget = `confirmOne` (Meta's before and after, then the write).
+- **The DM** (`buyerMessage`): "*N changes ready across B brands, $X at stake*", the top 5 one-liners
+  ("• *Brand*: action, "name""), an Open button. No owner line, no launch or morning read lines.
+- Tests: profit `node test-buyer-page.mjs` (the row, groups, Agree to all bodies and run order), account-health
+  `node test-buyerai.mjs` (10: prompt shape, tracking check, final call) and `node test-buyerlist.mjs` (13).
+- **2026-10-27 (buyer.js?v=5): the nudge.** A test-minimum row may carry `nudge` (winner | campaign | not_picked) and
+  `then: 'pause'` (account-health asana-brand.js nudgeCall, see account-health/CLAUDE.md "TEST MINIMUM = A NUDGE"). For
+  `then: 'pause'` the single Agree (`minOff`, "Do both") and Agree to all (`planOne` -> `commitOne`) take the minimum to 0,
+  then pause the set (`pauseAfter`, dry run + write with expect); the toast's Undo carries both writes.
+
+## 2026-10-27: photo library follows Drive shortcuts, skips archive / not-for-use folders
+
+- **Why:** Dartee looked "really old" in Studio because Locus read Cole's own Dartee folder (2024 Assets) while the
+  real library is "Cole x dartee", a folder Justin shares with cole@. Bonk's Assets holds two SHORTCUTS to the June
+  shoot that the walker dropped (a shortcut is neither a folder nor an image). Audit:
+  scratchpad `locus-asset-audit-2026-10-27.md` (brand by brand, Lucky and Grunk Air, Frame to Air plan).
+- **assets.js `syncAssets`:** the file list now asks for `shortcutDetails(targetId,targetMimeType)`. A folder
+  shortcut joins the walk under the shortcut's name (the `seen` set stops loops); an image shortcut is read once
+  (`files/<target>`) and indexed under the TARGET id, so one photo reached two ways is one row; other shortcuts are
+  ignored. `SKIP` also matches `archive | needs edit | not for use | do not use | don't use` ("06 - Archive",
+  "05-needs edited" in Dartee, "NOT for USE" in VetriPaws and SpeedIn) so Studio never picks from them.
+- **Test:** account-health `node test-assets.mjs` (8 checks: in-memory D1, mocked Drive, a throwaway RSA key for the
+  service-account JWT).
+- **Still a setting, not code:** a shared folder only counts once its link is in the brand's library folders
+  (Brand settings > photo library folders, `p_br_doc` 'assets'.folders) or is its Drive connection. Dartee needs
+  "Cole x dartee" added; Bonk needs BONK Content Library and the monthly shoot folders.
+## 2026-10-27: client access audit (front end) + Meetings under a brand
+- A client's pages that broke or showed the team's buttons: Requests "Ask the team for something" now `data-client-ok`
+  (it was hidden by the client header filter); goal CPA saves through `PUT /api/accounts/<id>` (the client-settings
+  route is the team's); TikTok reads the report straight away (no `/api/tiktok/status`); the Asana mirror of a test
+  verdict is skipped for a client; the welcome card shows on Morning (V4) with the V4 rail words; Guide drops "How we
+  work" and any step whose Open is an agency page; lx.css hides `.lc-pick-add`, `.st-key`, `[data-mconn]`, `#libSync`,
+  `[data-unsave]`, `[data-else]` for `body.is-client`; no other brand named in a brand's own text (desk.js stock line,
+  PAGE_HELP studio, the test explainer). Not done: Month "Edit the plan" stays the team's (editions.md says a client
+  edits its goals; decide), Home's Today card still draws role columns, Social "T transcript" still 403s.
+- **Work > Meetings shows in BOTH views** (`calls` left AGENCY_ONLY for VIEW_BOTH, `tabInView('work')` true). Under a
+  brand the "Client call" card opens that brand's call at once (caption names the brand); Agency view asks which client.
+  The brand's Morning page has a team-only "Client call" header button (`data-go="ccall"`). Cole: "I never know where
+  to go" and clicking Work bounced him into Agency view. ccall's Calls buttons go back to Meetings now, not Overview.
+
+## 2026-10-27: the client call gets an Ads step, 25 minutes
+- callscreen.js CLIENT_STEPS: Their news 3, Last week 7, **Ads 5**, This week 3, Requests 3, Coming up 2, Finish 2 (25 in a 30-minute slot). The Ads step = Production cards in Review (open one to show the ads, the client approves on the card), cards in Ready (approved, launch date), and p_launch rows of the last 14 days (`D.ads` from account-health callscreen.js clientData: listBoard + launchedRows). test-clients.mjs checks the payload.
+
+## 2026-10-27: the client call is a shared-screen DECK (callscreen.js?v=10, root `.cs.cs-deck` when KIND === 'client')
+- Cole shares the screen and presents; Fireflies takes the notes. One big visual slide per step; only Their news and
+  Requests are typed. This week = a numbered list from the report's this_week + promised lines (no typing); Requests =
+  ONE list (open asks + approvals "your OK") with "+ Add one"; Coming up = `calendarGrid()`: 35 days from this week's
+  Monday, events span their end dates, a multi-day event is labelled on its first day and on Mondays and a quiet bar
+  in between, dashed = not confirmed, `.sale` tinted; under 600px the grid hides and `.cal-list` shows the same events
+  as a list. Finish = the recap (drafted from the lists) with "Post it" and one Finish button. Checked headless (CDP)
+  at 1280 and 375 against a stub payload; the Browser pane refused localhost that day.
+- **2026-10-27 (later): where the client call is.** In the v4 rail "Client call" was no tab at all (V4_HOME sent `ccall`
+  to Meetings), so Cole could not find it. It is now **Work > Client call** under a picked brand (`NAV4.work`,
+  `tabInView` hides it in Agency view), plus the Meetings card and the Morning header button. Leftovers from the access
+  audit closed: a client edits its own goals from Month (Edit the plan / Set the goals carry `data-client-ok`; PUT
+  /api/plan was always allowed), POST /api/social/transcript on CLIENT_RULES, amb/order refuses a section of another
+  brand, a social post refuses an upload key the brand does not own. test-clients.mjs 31/31. brand/tag ad ids stay
+  unchecked on purpose: p_br_adtag is keyed by the brand's own act_id, nothing crosses. social/follow was already
+  capped at 40 a brand.
+- **2026-10-28, tagging backlog:** `assetsTick` tags 20 images for ONE brand an hour (the stalest), so a 3,000-image
+  library (Dartee once "Cole x dartee" was added, 3,266 found / 159 tagged) would take months. New `tagBacklog`
+  (assets.js) runs LAST in the hourly cron and spends whatever subrequest budget is left (`subCanAfford(120)` per
+  25-image round, 300 an hour max) on the brand with the most untagged images. Untagged images never match a
+  library search by setting or product, so this is what makes a newly added folder usable. Test: test-assets.mjs.
+
+## 2026-10-31: the turn-on box and Drops and sales (index.html `metaWriteGuard`, buyer.js?v=6, launch.js?v=8)
+- **One box for every screen that turns something on.** `apiAH` (and launch.js's own `ah`, through `window.lxMetaGuard`)
+  sends `/api/meta/write` through `metaWriteGuard`: an answer with `need: 'over_pause'` opens `overPauseModal` (who paused
+  it, when, their reason, "Why should it be back on now?", Leave it off / Turn it on anyway), then sends the same body
+  again with `over_pause`. The reason is kept 15 minutes per act|object so the write after the dry run does not ask twice.
+  Cancel = the answer's error with "Left off." in front. Buyer list, Today, nudges, Launch and Ads > Meta all get it with
+  no change of their own. A drop lock is a plain error (no box).
+- **Drops and sales** (Buyer list page action): a brand's drops with status (Live / Sale ended / Sold out), tag, end date,
+  products, how many are locked off; Add / Edit / Remove (live only) / Sold out / Sale ended / Reopen, each an in-app
+  modal. Quiet rows hidden by a lock read "Off for good: <drop> sold out ([TAG]). Reopen it in Drops and sales to bring it back."
+
+## 2026-11-04: THE STRUCTURE REVIEW, steps 1 and 2 (page https://claude.ai/artifact/ERGvYEz3m3NfJtpAH1HdWw). Read before touching the rail or the calls pages.
+
+- Step 1 (PR 156): the rail says **Ads** (was Marketing, key still `ads`) and **Clients** (was Work, key still `work`). Labels only.
+- Step 2: **one Calls tab**. For the team `show('today')` lands on `buyer` (top of show()) and `tabInView('ads','today')` is false, so every
+  old `?open=today` / `data-go="today"` link opens the Buyer list for that brand. A client login still gets desk.js `today()` (the Buyer
+  list is in AGENCY_TABS); both tabs are labelled Calls. Delete desk.js `today()` only once buyer.js has a client read-only view.
+- Not on the Buyer list: test calls (Tests > Needs a call) and the `?doall=1` sheet (the Buyer list's own Agree / Yes to all replaces it).
+- Steps 4 to 10 (same day): `NAV4.ads` = Calls (`buyer`; `today` for a client), Launch (`launch`), All (`channels`), Meta, Google, TikTok, Tests. A platform's
+  levels are the switch under it: `META_JOBS` (Overview, Campaigns, Ads, Changes), `GOOGLE_JOBS` with a direct Google Ads link. `V4_HOME` maps the level
+  ids to their platform tab (campaigns / adcreative / changes / mtoday / mbrowser -> meta, g* -> google). `ACCOUNT_JOBS` and `CHANGE_JOBS` are unused.
+- **Launch** is buyer.js in a second mode (`LMODE()`: `H.S.tab === 'launch'`): launch rows + Launched and scheduled. Calls shows every other row and a link
+  to Launch. Team only (`AGENCY_TABS`), both views (`VIEW_BOTH`).
+- **Ready cards against Meta** (2026-11-05, buyer.js?v=9 `runCheck` / `checkSec`, account-health buyerlist.js `readyCheck`, GET
+  `/api/buyer-list/ready-check?act=<brand>`): for every Ready card and every Review card with a date, Meta is asked live for ads and ad sets whose
+  name STARTS with the card's number (`numHit`; CONTAIN filter, then the strict test; ads made in the last 120 days only, numbers get reused).
+  One line per card (`metaVerdict`): Live, Starts by itself, In review, In Meta but off (ad / ad set / campaign), Ended, Not in Meta. Two Graph
+  reads per card and Meta account, 20 cards a brand; the page asks brand by brand (Agency view walks every brand). Reads only. A batch named
+  without its number (Bonk "Gift cards | parked", Lucky 453) reads Not in Meta: the fix is the name in Meta, not the code.
+- **One Calls page for everyone (2026-11-05, buyer.js?v=10).** A client login reads Ads > Calls for its own brand, read only (`CL()`):
+  the same rows, the why and the ads; no Yes / No, no Later, no owner, Slack post, drops or lessons. brandguard lets a client GET
+  `/api/buyer-list` only (both copies); the handler drops launch rows, the launch queue, the owner and settings for a client. `today`
+  routes to `buyer` for everyone, `buyer` left `AGENCY_TABS` (Launch stays the team's), and the old Today's calls renderer in desk.js is
+  deleted. Renamed in Meta the same day so the Launch check finds them: Bonk `335 | Gift cards`, `336 | Run-back`, Ice & Gold
+  `15 | Gift cards`, `25 | Early Bird | ...` (ad sets, through meta_write, undo in the Change Log).
+- **One call on the gallery** (v2.js `creative()`, `callOf`): where Calls has an open ad-level call, or a Cut on the ad's set, the card's pill shows that call
+  (tip starts "Today's call on Ads > Calls"). Team only, 3.5 second cap on the read. The gallery's own verdict uses the same rule numbers.
+- Moved: Email and Search to **Money**; the Brief to **Reports > Daily**; Requests to **Clients** (a client login sees it under Reports: `tabInView`).
+- Checked signed in on the local trio (statics :8788, profit dev :8799, account-health dev :8798, dev token from .dev.vars served by the static server):
+  every page id above on Lucky, Agency view Calls and Launch, the gallery override on Bonk. Report routes answer 401 locally, as before.
+
+## 2026-11-05: ADS > TRYBE (trybe.js?v=1, account-health src/trybe.js)
+
+Why: brands fill Trybe with approved creator videos and launch a fraction. Spec: https://claude.ai/artifact/9BJkh1mCRzQEVDiSFeo9BK
+(Phil Kiel's "launch queue, leaderboard on real revenue, rebook list, stale alerts").
+
+- **Page id `trybe`**, a tab in `NAV4.ads` between TikTok and Tests. `TRY(f)` calls `TrybeTab.render(host, first)`. In every
+  index.html list (`?open=`, TAB_PURPOSE, TAB_CRUMB, TAB_WHO, VIEW_BOTH, TAB_TITLE, SHOWABLE, the show map). Not in
+  AGENCY_TABS: a client sees it for its own brand.
+- **Views** are a `.v2jobs` switch inside the page (module state `VIEW`, no sub page ids): Queue, Live, Creators, Rules.
+  A client login gets Live and Creators only (`CL()` in trybe.js, and the handler trims the answer).
+- **Agency view** = one row per brand with a key (never run, over 3 days, oldest, waiting on review); a row opens the brand.
+- **Server** (account-health `src/trybe.js`, routes `/api/trybe`, `/api/trybe/key` PUT, `/api/trybe/sync` POST,
+  `/api/trybe/rules` PUT). One Trybe Brand API key per brand in `p_br_doc` key `trybe` (a key sees one brand; the Trybe
+  MCP connector is one brand per login, so the API is the only way to run several). Tables `p_trybe_sub`,
+  `p_trybe_creator`, made on first use (`profit/worker/migrations/trybe-001.sql` is the reference).
+- **The API has no approval date.** `approved_seen` = the day Locus first saw the video approved (the submitted day on a
+  brand's first sync). The 3 day clock (`STALE_DAYS`) runs from it.
+- **Matching**: an ad belongs to a video when its name carries `trybe=<trybe_id>` (Trybe's Build Ads names them
+  `Creator_Product_YYYYMMDD_trybe=1b2c3d4e`). Sales and revenue are `tw_ad_attr` lastPlatformClick; spend is `ad_daily`.
+- **Queue** = approved and Trybe has never seen it deliver (`ads.count` 0). Locus's `ads` table only holds ads that SPENT
+  (it is filled from insights rows), so the sync reads every ad named `trybe=` live from Meta into `p_trybe_ad` and the
+  state comes from there: `not_launched`, `no_spend` (on, no delivery yet), `scheduled`, `review`, `rejected`, `off`.
+  Only `not_launched` is the backlog (the tile, the Slack line, the Calls banner, the Agency view). Launching stays in
+  Trybe (partnership ads, the creator's commission); the page links to it.
+- **Briefs live here (2026-11-05)**: the creator link page (page id `amb`, was Make > Creators) is a view of Ads > Trybe.
+  `V4_HOME.amb = 'trybe'`; `TRYBE_JOBS` draws the switch above the briefs page and Trybe draws the same one itself.
+- **v3 (the same day, Cole's first look)**: tiles are label, number, one short line; every list has search, filter and
+  sort (module state `UI`); a thumbnail plays the video (`GET /api/trybe/video`, a 20 minute link from Trybe, asked on
+  press); a creator's name opens their sheet; metrics read Spend, Sales, CPA, ROAS; Rebook is called "Ask for more";
+  "Updated X ago" sits under the title. Pop ups are bottom sheets on a phone. No scale or cut buttons here: those
+  calls stay on Ads > Calls.
+- **Rebook** = at least 2 sales at or under the account's 30 day cost per sale, and no new video in 14 days.
+- **Daily** (`trybeTick`, hourly cron, once a Central day from 4am, setting `trybeDay`): sync every keyed brand, then one
+  Slack line in the brand's internal channel for videos that crossed 3 days (each video once, `alerted`), plus the
+  rebook list on Mondays. The posts are OFF until `settings.trybeAlerts = 'on'` (the switch is on the Agency view, `PUT /api/trybe/alerts {on}`); the sync runs either way.
+- **Calls**: buyerlist.js adds a `kind: 'trybe'` banner per brand with videos over 3 days. Never to a client, never into
+  the morning read's prompt.
+- **Rules** are text per brand (`settings trybeRules:<brand>`). Shown and editable; the morning read does not read them yet.
+- Tests: `node test-trybe.mjs` (account-health/worker).
+
+## The creator hub, v2 (2026-11-05, the Trybe Scale program)
+
+- Rebuilt on Phil Kiel's creator brief (x.com/PhilKiel/status/2113216005728325780). Four tabs, plain names:
+  **Start here** (how it works, the deal said exactly, what is selling with numbers, the videos to film this week,
+  call, Discord), **Video ideas** (each idea is a card with a preview image; tap opens its brief: example video, what
+  to show first, what to say first, the shots, do and do not), **Videos that sold**, **Product and rules** (features,
+  names, how to film, say it this way, do not, extra clips, upload label, last check).
+- New data: `week.selling[]` and `week.discord` in `week_json`; `brief_json` on `p_amb_brand`
+  (`cleanBrief`: features, names, offer_dont, broll, label, final), saved with `PUT /api/amb/brand {brief}`.
+- Staff screens under Ads > Trybe > Briefs carry the hub's own tab names: Start here, Video ideas, Example videos,
+  Product and rules, Settings. Each screen says which hub tab it fills.
+- Copy rule: every line must make sense to a creator who has never heard of the brand. No inside phrases
+  ("Hands first, then talk" was one).
+
+## 2026-11-05: SITE REVIEWS (profit/reviews/, review-kit.js, sitereviews.js, account-health src/sitereview.js)
+
+A client walks through a proposed site rebuild page by page: Approve or Needs changes plus a note on every
+`<section class="ba">`, then an overall note and "Send my review". Cole gets one Slack DM (bot, U06C37MDWD7, never a
+client channel): counts, then one line per page with its note. Answers stay editable until sent, then locked until the
+team presses Reopen.
+- **A new review = a folder + one line.** Put the document at `profit/reviews/<brand-slug>/<review-slug>/index.html`
+  (a full document with `<meta charset="utf-8">`), body `data-review-act="brand_x" data-review-slug="..." data-review-title="..."`,
+  `<script src="../../review-kit.js?v=N">` at the end, and add an entry (act, slug, title, path, sections) to
+  `profit/reviews/index.json`. Nothing in the worker names a brand.
+  Easiest: `node profit/reviews/sync-review.mjs "<source folder>" <brand-folder> <slug> <brand id> "<title>"` does all of
+  it (mirrors the folder, wraps the HTML, rewrites the index line) and is safe to re-run whenever the source is edited.
+  Yak: source is `C:/Users/wetzl/Mobius Digital/Yak Sports/Site Review`, args `yak site-rebuild brand_yak_sports "Site rebuild"`.
+- **Two ways in**, like the Your ads page: `?t=<token>` with no login (minted once by Copy link, POST /api/site-review/link,
+  team only), or a Locus sign-in on the same browser (pf_token): a client login of that brand passes brandguard's
+  three rules (GET /api/site-review, PUT /answer, POST /send); the list, link, reopen and DELETE /answers are team only.
+- **Where the team sees it:** Clients > Requests (a client sees it on Reports > Requests), the "Site reviews" card
+  above the request groups. Shows nothing for a brand with no review.
+- Tables p_site_review (one row per act+slug: token, sections, overall, sent) and p_site_review_answer, made on first use.
+- Test: account-health `test-clients.mjs` "site reviews". Clear test answers with DELETE /api/site-review/answers?act=&slug=.
+
+## 2026-11-07: Ads > Updates (what we changed, for the client)
+
+- Cole: "the change log, but way better": one page per brand that shows each change to the ads, why, and the ads it
+  touched, which the client opens with their own Locus login (the Slack update links here instead of the Your ads page).
+- **Route** account-health `GET /api/ad-updates?act=&from=&to=` (default 45 days; on CLIENT_RULES in both brandguard
+  copies; a SMOKE_ROUTES row). Source = `activities` rows (not dismissed) with **`client_why`** written: a column of
+  its own (added at runtime by `ensureClientWhy` / metawrite `ensureTable`), never the team's `reason`, which holds
+  notes like "slug was misspelled; Cole 11-02" (the first version read `reason` and surfaced 102 of those on Bonk).
+  A buying-call write carries it (`meta_write` with `extra: {client_why}`; `locusInput` -> `common` -> `logChange`);
+  a change made by hand gets it in Meta > Changes > Add why ("What the client reads on Ads > Updates"); PUT or PATCH
+  `/api/activities/:id {client_why}` sets it after the fact ('' clears). Meta's automatic edits never show.
+  Before/after from `p_meta_write` (joined on the "Write mw_..." note; undone writes drop out) and `p_ext_write`.
+  **The client why is written the way Cole would say it to the client.**
+- **Page** `adUpdates()` in v2.js, tab id `adupdates` (NAV4 Ads after Calls, SHOWABLE, the renderer map, `?open=`,
+  TAB_TITLE, TAB_CRUMB). Platform tabs Meta / Google / TikTok / Trybe with counts; days newest first; one `.upd-box`
+  per change (label, level, before -> after, the why, the 7-day totals of its ads) with its ads on a grey band
+  inside the box as the SAME `.v2gal .g` cards as Meta > Ads, each opening the SAME `previewAd` sheet (trend,
+  funnel, landing page, Play...). Ads come from `/api/hub/creative` for the last 7 days, matched by ad set id,
+  campaign name, or the ad and its set. Team view has "Copy the client link" (`?open=adupdates&act=`).
+- **Every ad card is the same size** (v2.css, all `.v2gal` grids): the 4:5 frame shows the whole ad uncropped and a
+  blurred copy fills the sides of a 9:16 or the top and bottom of a square (`::before` blur, `::after` the ad).
