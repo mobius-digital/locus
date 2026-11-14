@@ -1,0 +1,60 @@
+# Mobius Profit — Shopify app configuration.
+#
+# `shopify app deploy` pushes THIS file to the Partner Dashboard: scopes, redirect
+# URLs and webhook subscriptions all live here, not in a dashboard form.
+#
+# WARNING: `shopify app config link` PULLS the remote config down and OVERWRITES
+# this file with it. Only run it on a fresh clone, and re-check every value below
+# afterwards — it has already blanked the scopes and redirect URLs once.
+#
+# Learn more: https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "a204d4974bccc5aacf66c3f723fb5652"
+# The app is registered as "Mobius Digital", not "Mobius Profit": one Shopify app
+# is meant to cover whatever Mobius builds, and Profit is only the first tool on
+# it. `deploy` PUSHES this value, so changing it here renames the real app.
+name = "Mobius Digital"
+handle = "mobius-profit"
+
+# Where a merchant lands when they open the app: the EMBEDDED store screen inside the Shopify admin
+# (worker/src/shopifyapp.js: App Bridge + session tokens, no cookies). A store with no saved token is sent through
+# /shopify/install (the classic authorization-code grant below) once, then lands back inside the admin.
+application_url = "https://mobius-profit.mobius-digital.workers.dev/shopify/app"
+
+# true since 2026-10-18 (review 131577 asked for an in-admin UI on session tokens). The install stays the classic
+# grant (use_legacy_install_flow = true); session tokens only authenticate the embedded page's own API calls.
+embedded = true
+
+# Only the three MANDATORY compliance webhooks live here. app/uninstalled cannot:
+# app-specific subscriptions (anything with `topics =`) are rejected outright when
+# use_legacy_install_flow is true, which it must be. The worker registers
+# app/uninstalled per shop in the OAuth callback instead - a shop-specific webhook,
+# which is exactly what Shopify's own error message points you at.
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "https://mobius-profit.mobius-digital.workers.dev/shopify/webhooks/customers/data_request"
+  compliance_topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "https://mobius-profit.mobius-digital.workers.dev/shopify/webhooks/customers/redact"
+  compliance_topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "https://mobius-profit.mobius-digital.workers.dev/shopify/webhooks/shop/redact"
+  compliance_topics = [ "shop/redact" ]
+
+[access_scopes]
+# Must match SHOPIFY_SCOPES in worker/src/worker.js exactly — Shopify compares the
+# two at install and re-prompts on a mismatch. read_reports is what grants
+# shopifyqlQuery, which is the only way to get customers by first-order month.
+scopes = "read_orders,read_customers,read_products,read_reports,write_products,write_discounts"
+optional_scopes = [ ]
+
+# true = classic OAuth (authorization code grant), which is what the worker does.
+# false turns on Shopify managed installation, which is embedded-app only.
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = [ "https://mobius-profit.mobius-digital.workers.dev/shopify/callback" ]

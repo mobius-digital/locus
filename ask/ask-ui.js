@@ -1,0 +1,482 @@
+/**
+ * Ask: the in-app side of the assistant, shared by every Mobius app.
+ *
+ *   AskUI.init({
+ *     name: 'Controller',          what it is called on screen
+ *     api: (path, opts) => ...,    the host app's fetch wrapper (auth included)
+ *     base: '/api/ask',            where the worker mounts the engine
+ *     intro: '...',                the first line of an empty chat
+ *     screen: () => ({...}),       what is on screen now, sent with every question
+ *     esc, flash, confirm, cardH   the host's helpers (fallbacks are provided)
+ *   })
+ *
+ *   AskUI.open(prefill)            the panel (also Ctrl/Cmd+K unless init({hotkey:false}))
+ *   AskUI.ask(question, {fresh})   open the panel and send the question at once; fresh = a new chat
+ *   init({ scope: () => key })     chats belong to a scope (Locus: the brand). Opening the panel on a
+ *                                  different scope shows that scope's latest chat, and Chats lists
+ *                                  only that scope's chats.
+ *   AskUI.card()                   -> HTML: what it found, for the home screen
+ *   AskUI.settingsCard()           -> HTML: what it knows + the controls
+ *   AskUI.afterSettings()          wires the settings card after it is in the DOM
+ *   AskUI.chartHTML(spec)          -> HTML: one ```chart block drawn the way the chat draws it
+ *   init({ onPin: info => ... })   every chart in an answer gets "Pin to a dashboard"; the host is
+ *                                  handed { spec, question, title } (Locus: profit/askextra.js)
+ *
+ * Same brain as Slack, same read-only reach. Findings are marked Done / Not
+ * now / Wrong on the card, and what is marked is never raised again.
+ */
+window.AskUI = (() => {
+  const A = { name: 'Ask', base: '/api/ask', chat: [], chats: [], busy: false, data: null, id: null };
+  const $ = s => document.querySelector(s);
+  const escDefault = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  let esc = escDefault, flash = m => console.log(m), confirm = async o => window.confirm(o.title), cardH = (t, q) => `<div class="ch"><h3>${esc(t)}</h3>${q ? `<p class="q">${esc(q)}</p>` : ''}</div>`;
+  const LS = () => 'ask_chat_' + A.name.toLowerCase();
+
+  function init(cfg) {
+    Object.assign(A, cfg);
+    if (cfg.esc) esc = cfg.esc;
+    if (cfg.flash) flash = cfg.flash;
+    if (cfg.confirm) confirm = cfg.confirm;
+    if (cfg.cardH) cardH = cfg.cardH;
+    try { const saved = JSON.parse(localStorage.getItem(LS()) || 'null'); if (saved?.chat && !A.scope) { A.chat = saved.chat; A.id = saved.id; } } catch (e) {}
+    document.addEventListener('keydown', e => {
+      if (A.hotkey !== false && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); open(); }
+      if (e.key === 'Escape' && $('#ask')?.classList.contains('on')) close();
+    });
+  }
+
+  /* ---- what it found ---- */
+  async function load(force) {
+    if (A.data && !force) return A.data;
+    A.data = await A.api(A.base + '/findings');
+    return A.data;
+  }
+  const sevWord = { high: 'Worth doing today', med: 'Worth a look', low: 'When you have a minute' };
+  function card(d) {
+    const f = d.findings || [];
+    const list = f.slice(0, 6).map(x => `
+      <div class="find" data-key="${esc(x.key)}">
+        <span class="dot ${esc(x.severity)}" title="${esc(sevWord[x.severity] || '')}"></span>
+        <div class="ft"><b>${esc(x.title)}</b><small>${esc(x.detail || '')}</small></div>
+        <div class="fa">
+          <button class="btn" onclick="AskUI.open(${JSON.stringify('About this: ' + x.title + '. ' + (x.detail || '')).replace(/"/g, '&quot;')})">Ask about it</button>
+          <button class="btn" onclick="AskUI.mark(this,'done')" title="Dealt with. It will not come back.">Done</button>
+          <button class="btn" onclick="AskUI.mark(this,'snoozed')" title="Not now. Back in 30 days, or sooner if it gets bigger.">Not now</button>
+          <button class="btn" onclick="AskUI.mark(this,'wrong')" title="This check is wrong about this one. It will never raise it again.">Wrong</button>
+        </div>
+      </div>`).join('');
+    const b = d.briefing;
+    return `<div class="card cardp askcard" id="askCard">
+      ${cardH(`The ${A.name}${f.length ? ` · ${f.length} open` : ''}`, 'Checks run every night. Anything you mark Done or Wrong is never raised again.',
+        `<button class="btn" onclick="AskUI.open()">Ask the ${esc(A.name)}</button>`)}
+      ${b ? `<div class="brief">${esc(b.text).replace(/\n/g, '<br>').replace(/\*(.+?)\*/g, '<b>$1</b>')}<span class="when">${esc(new Date(b.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}</span></div>` : ''}
+      ${list || '<div class="hint" style="padding:8px 0">Nothing needs you. The checks ran and everything looks right.</div>'}
+      ${f.length > 6 ? `<div class="tiny" style="margin-top:8px">and ${f.length - 6} more.</div>` : ''}
+    </div>`;
+  }
+  /* Drop this into a home screen: a placeholder now, the card when it loads. */
+  async function mount(afterEl, where = 'afterend') {
+    if (!afterEl) return;
+    afterEl.insertAdjacentHTML(where, `<div id="askSlot" class="card cardp askcard loading"><div class="hint">The ${esc(A.name)} is looking…</div></div>`);
+    try { const d = await load(); const slot = $('#askSlot'); if (slot) slot.outerHTML = card(d); }
+    catch (e) { $('#askSlot')?.remove(); }
+  }
+  /* The same card at the top of a container (a screen that has no header block inside it). */
+  const mountIn = container => mount(container, 'afterbegin');
+  async function mark(btn, state) {
+    const row = btn.closest('.find'), key = row?.dataset.key;
+    if (!key) return;
+    row.style.opacity = '.4';
+    try {
+      await A.api(A.base + '/finding', { method: 'POST', body: JSON.stringify({ key, state }) });
+      row.remove(); A.data = null;
+      const n = document.querySelectorAll('#askCard .find').length;
+      const h = document.querySelector('#askCard .ch h3');
+      if (h) h.childNodes[0].nodeValue = `The ${A.name}${n ? ` · ${n} open` : ''}`;
+      if (!n) $('#askCard').insertAdjacentHTML('beforeend', '<div class="hint" style="padding:8px 0">Nothing left.</div>');
+    } catch (e) { row.style.opacity = '1'; flash(e.message); }
+  }
+
+  /* ---- the panel ---- */
+  function panel() {
+    if ($('#ask')) return $('#ask');
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="askScrim" onclick="AskUI.close()"></div>
+      <aside id="ask" role="dialog" aria-label="Ask the ${esc(A.name)}">
+        <div class="ch2"><b>The ${esc(A.name)}</b>
+          <button class="ctl" onclick="AskUI.fresh()" title="Start a fresh conversation">+ New</button>
+          <button class="ctl" onclick="AskUI.history()" title="Earlier conversations">Chats</button>
+          <button class="ctl" onclick="AskUI.reports()" title="Reports it has built for you">Reports</button>
+          <button class="x" onclick="AskUI.close()" aria-label="Close">✕</button></div>
+        <div id="askList" hidden></div>
+        <div id="askLog"></div>
+        <div id="askFile" hidden></div>
+        <form id="askForm" onsubmit="AskUI.send(event)">
+          ${A.attach ? '<button class="clip" type="button" onclick="AskUI.pick()" title="Attach a receipt, an invoice, a statement">📎</button>' : ''}
+          <textarea id="askIn" placeholder="${A.attach ? 'Ask, or drop a receipt in… ' : 'Ask anything… '}(Enter sends, Shift+Enter for a new line)" rows="1" autocomplete="off"></textarea>
+          <button class="btn primary" type="submit">Ask</button>
+        </form>
+      </aside>`);
+    if (A.attach) {
+      const el = $('#ask');
+      el.addEventListener('dragover', e => { e.preventDefault(); el.classList.add('over'); });
+      el.addEventListener('dragleave', () => el.classList.remove('over'));
+      el.addEventListener('drop', e => { e.preventDefault(); el.classList.remove('over'); if (e.dataTransfer.files[0]) attachFile(e.dataTransfer.files[0]); });
+    }
+    /* The box grows with the question, up to about six lines, then scrolls:
+       a long ask stays readable and editable while it is being written. */
+    const ta = $('#askIn');
+    const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; };
+    ta.addEventListener('input', grow);
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+    ta._grow = grow;
+    return $('#ask');
+  }
+  function close() { $('#ask')?.classList.remove('on'); $('#askScrim')?.classList.remove('on'); }
+  /* One file at a time, held beside the question until it is sent. The host
+     decides what to do with it (a receipt files itself; anything else is read). */
+  function pick() { const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*,application/pdf,.pdf,.html,.eml,.txt'; i.onchange = () => { if (i.files[0]) attachFile(i.files[0]); }; i.click(); }
+  async function attachFile(file) {
+    try {
+      A.file = await A.attach(file);
+      const el = $('#askFile'); el.hidden = false;
+      el.innerHTML = `<span>📎 ${esc(file.name)}</span><button class="x" type="button" onclick="AskUI.drop()" title="Remove">✕</button>`;
+      $('#askIn').focus();
+    } catch (e) { flash('Could not read that file'); }
+  }
+  function drop() { A.file = null; const el = $('#askFile'); if (el) { el.hidden = true; el.innerHTML = ''; } }
+  /* 2026-10-13 (Cole: "every time I change a client it has the previous convo loaded"): a chat
+     belongs to the brand it was asked on. When the brand moved, show that brand's latest chat. */
+  const scopeNow = () => { try { return A.scope ? String(A.scope() ?? '') : null; } catch (e) { return null; } };
+  function syncScope() {
+    const k = scopeNow(); if (k == null || k === A.chatScope) return;
+    if (A.busy) return;
+    A.chatScope = k; loadChats();
+    const c = (A.chats || []).find(x => x.scope === k);
+    A.chat = c ? c.messages.slice() : []; A.id = c ? c.id : null;
+    const l = $('#askList'); if (l) l.hidden = true;
+  }
+  function open(prefill) {
+    syncScope();
+    panel().classList.add('on'); $('#askScrim').classList.add('on');
+    render(A.chat.length ? '' : (A.intro || 'Ask me anything about what is in this app.'));
+    const el = $('#askIn');
+    if (prefill) el.value = prefill;
+    if (el._grow) el._grow();
+    el.focus();
+  }
+  /* A proposal is a change the assistant described and did not make. It sits
+     in the chat as a card until Apply or No thanks; either way it stays in the
+     history as what happened. */
+  const proposalHTML = p => `<div class="m ai prop" data-id="${esc(p.id)}">
+      <b>${esc(p.summary)}</b>${p.detail ? `<div class="pd">${esc(p.detail).replace(/\n/g, '<br>')}</div>` : ''}
+      ${p.preview ? `<div class="pv">${esc(p.preview).replace(/\n/g, '<br>')}</div>` : ''}
+      ${p.done ? `<div class="pr ${p.done === 'applied' ? 'ok' : ''}">${linkify(p.result || (p.done === 'applied' ? 'Applied.' : 'Left as it was.'))}</div>`
+        : `<div class="pa"><button class="btn primary" onclick="AskUI.applyProposal('${esc(p.id)}')">${p.group ? 'Apply all' : 'Apply'}</button><button class="btn" onclick="AskUI.applyProposal('${esc(p.id)}', true)">No thanks</button></div>`}
+    </div>`;
+  /* A report the assistant built: a card in the chat, the page on Open. */
+  const reportCardHTML = r => `<div class="m ai rep" data-id="${esc(r.id)}">
+      <b>${esc(r.title)}</b>${r.subtitle ? `<div class="pd">${esc(r.subtitle)}</div>` : ''}
+      <div class="pd">${(r.blocks || []).length} block${(r.blocks || []).length === 1 ? '' : 's'}: ${(r.blocks || []).map(b => b.type).join(', ')}</div>
+      <div class="pa"><button class="btn primary" onclick="AskUI.openReport('${esc(r.id)}')">Open</button><button class="btn" onclick="AskUI.openReport('${esc(r.id)}', true)">Print</button>${r.pdf ? `<a class="btn" href="${esc(r.pdf)}" target="_blank" rel="noopener" title="Made on first click, about 30 seconds">PDF file</a>` : ''}${r.share ? `<button class="btn" type="button" onclick="navigator.clipboard.writeText('${esc(r.share)}').then(()=>{this.textContent='Link copied'})" title="${esc(r.share)}">Copy share link</button>` : ''}</div>
+    </div>`;
+  /* A feature that needs code: the owner gets the prompt for Claude Code. */
+  const handoffHTML = h => `<div class="m ai hand">
+      <b>${esc(h.title)}</b><div class="pd">This needs a change to the app itself, which only you can make. Paste this into Claude Code:</div>
+      <div class="pv">${esc(h.prompt)}</div>
+      <div class="pa"><button class="btn primary" onclick="navigator.clipboard.writeText(this.closest('.hand').querySelector('.pv').textContent).then(()=>{this.textContent='Copied'})">Copy the prompt</button></div>
+    </div>`;
+  /* Answers can carry ONE ```chart {json}``` block (engine.js web style): drawn here as bars, a line or a
+     table in the theme's colours, so a comparison reads at a glance. Anything malformed shows as text. */
+  function fmtV(v, u) { if (v == null || v === '' || !isFinite(v)) return '–'; const n = +v; if (u === '$') return '$' + (Math.abs(n) >= 1000 ? Math.round(n).toLocaleString('en-US') : n.toFixed(Math.abs(n) < 100 ? 2 : 0)); if (u === 'x') return n.toFixed(2) + 'x'; if (u === '%') return n.toFixed(1) + '%'; return Math.abs(n) >= 1000 ? Math.round(n).toLocaleString('en-US') : String(+n.toFixed(2)); }
+  function chartHTML(c) {
+    const labels = (c.labels || []).slice(0, 15).map(String), ser = (c.series || []).slice(0, 3), u = c.unit || '';
+    const cols = ['var(--brand,#5B8DEF)', 'var(--c-google,#B5761A)', 'var(--c-tiktok,#27A392)'];
+    const head = c.title ? `<div class="ac-t">${esc(c.title)}</div>` : '';
+    if (c.type === 'table' || (ser.length > 1 && c.type !== 'line')) {
+      return `<div class="ac">${head}<table class="ac-tbl"><thead><tr><th></th>${ser.map(x => `<th>${esc(x.name || '')}</th>`).join('')}</tr></thead><tbody>${labels.map((l, i) => `<tr><td>${esc(l)}</td>${ser.map(x => `<td>${fmtV((x.values || [])[i], u)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }
+    const vals = (ser[0] && ser[0].values || []).slice(0, labels.length).map(Number);
+    const mx = Math.max(...vals.filter(v => isFinite(v)), +c.goal || 0, 0) || 1;
+    if (c.type === 'line') {
+      const w = 320, h = 110, n = vals.length; if (n < 2) return '';
+      const X = i => 6 + i / (n - 1) * (w - 12), Y = v => h - 16 - v / mx * (h - 26);
+      const pts = ser.map((x, k) => `<polyline points="${(x.values || []).slice(0, n).map((v, i) => `${X(i).toFixed(1)},${Y(+v || 0).toFixed(1)}`).join(' ')}" fill="none" stroke="${cols[k]}" stroke-width="2" stroke-linejoin="round"/>`).join('');
+      const goal = c.goal ? `<line x1="6" x2="${w - 6}" y1="${Y(+c.goal)}" y2="${Y(+c.goal)}" stroke="var(--warn,#EBBF63)" stroke-dasharray="4 4"/>` : '';
+      return `<div class="ac">${head}<svg viewBox="0 0 ${w} ${h}" class="ac-svg">${goal}${pts}<text x="6" y="${h - 2}" class="ac-x">${esc(labels[0])}</text><text x="${w - 6}" y="${h - 2}" text-anchor="end" class="ac-x">${esc(labels[n - 1])}</text></svg>
+        <div class="ac-leg">${ser.map((x, k) => `<span><i style="background:${cols[k]}"></i>${esc(x.name || '')} ${fmtV((x.values || [])[n - 1], u)}</span>`).join('')}${c.goal ? `<span><i style="background:var(--warn,#EBBF63)"></i>goal ${fmtV(c.goal, u)}</span>` : ''}</div></div>`;
+    }
+    return `<div class="ac">${head}${labels.map((l, i) => { const v = vals[i]; return `<div class="ac-row"><span class="ac-l" title="${esc(l)}">${esc(l)}</span><span class="ac-b"><i style="width:${isFinite(v) ? Math.max(2, v / mx * 100).toFixed(1) : 0}%"></i>${c.goal ? `<b style="left:${(+c.goal / mx * 100).toFixed(1)}%"></b>` : ''}</span><span class="ac-v">${fmtV(v, u)}</span></div>`; }).join('')}${c.goal ? `<div class="ac-leg"><span><i style="background:var(--ink,#111)"></i>goal ${fmtV(c.goal, u)}</span></div>` : ''}</div>`;
+  }
+  /* `mi` = the message's index in the chat: with a host that pins (init onPin), each chart carries a
+     "Pin to a dashboard" button that knows which message and which chart in it. */
+  function richText(t, mi) {
+    const parts = String(t || '').split(/```chart\s*([\s\S]*?)```/);
+    return parts.map((p, i) => { if (i % 2) { try { const h = chartHTML(JSON.parse(p)); return h && A.onPin && mi != null ? h.replace(/<\/div>$/, `<button type="button" class="ac-pin" onclick="AskUI.pin(${mi},${(i - 1) / 2})" title="Keep this chart on a saved dashboard">Pin to a dashboard</button></div>`) : h; } catch (e) { return `<pre>${esc(p)}</pre>`; } } return esc(p.trim()).replace(/\n/g, '<br>'); }).join('');
+  }
+  /* The chart's spec, the question that produced it (the nearest earlier question in this chat) and
+     its title, handed to the host, which asks where to keep it. */
+  function pin(mi, k) {
+    const m = A.chat[mi]; if (!m || !A.onPin) return;
+    const blocks = String(m.text || '').split(/```chart\s*([\s\S]*?)```/).filter((p, i) => i % 2);
+    let spec; try { spec = JSON.parse(blocks[k]); } catch (e) { flash('That chart could not be read.'); return; }
+    let q = ''; for (let i = mi - 1; i >= 0; i--) { const x = A.chat[i]; if (x.role === 'user' && !x.proposal && !x.report && !x.handoff) { q = String(x.text || '').replace(/^📎[^·]*·\s*/, ''); break; } }
+    A.onPin({ spec, question: q, title: spec.title || '' });
+  }
+  /* Links in a result line are clickable (a saved dashboard, a share link). */
+  const linkify = t => esc(t).replace(/https?:\/\/[^\s<)]+/g, u => { const c = u.replace(/[.,;]+$/, ''); return `<a href="${c}" target="_blank" rel="noopener">${c}</a>${u.slice(c.length)}`; });
+  /* An image or file the assistant made and stored (it has a URL): shown inline, Download, and the item's own
+     actions (the Strategist: "Open in Studio"), each a POST the host's api() sends. */
+  const mediaHTML = (f, mi) => `<div class="m ai file media">${f.kind === 'image' ? `<a href="${esc(f.url)}" target="_blank" rel="noopener"><img src="${esc(f.url)}" alt="${esc(f.title || '')}" loading="lazy" style="display:block;max-width:100%;max-height:420px;border-radius:10px;margin:0 0 8px"></a>` : ''}
+      <b>${esc(f.title || f.name)}</b>${f.note ? `<div class="pd">${esc(f.note)}</div>` : ''}
+      <div class="pa"><a class="btn primary" href="${esc(f.url)}${String(f.url).includes('?') ? '&' : '?'}dl=1" download="${esc(f.name)}">Download${f.kind === 'image' ? '' : ' ' + esc(f.name)}</a>${(f.actions || []).map((a, k) => `<button class="btn" type="button" onclick="AskUI.mediaAction(${mi},${k},this)">${esc(a.label)}</button>`).join('')}</div>
+      ${f.result ? `<div class="pr ok">${linkify(f.result)}</div>` : ''}</div>`;
+  async function mediaAction(mi, k, btn) {
+    const m = A.chat[mi], a = m && m.media && (m.media.actions || [])[k];
+    if (!a) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    try { const r = await A.api(a.path, { method: 'POST', body: JSON.stringify(a.body || {}) }); m.media.result = r.error ? 'Could not: ' + r.error : (r.note || 'Done.'); }
+    catch (e) { m.media.result = 'Could not: ' + e.message; }
+    render(); save();
+  }
+  /* A file the assistant made (CSV, Markdown): a download button, kept in the chat. */
+  const fileHTML = f => `<div class="m ai file"><b>${esc(f.title || f.name)}</b><div class="pa"><button class="btn primary" onclick="AskUI.download('${esc(f.name)}')">Download ${esc(f.name)}</button></div></div>`;
+  function download(name) {
+    const f = A.chat.map(m => m.file).find(x => x && x.name === name);
+    if (!f) return;
+    const type = /\.csv$/i.test(name) ? 'text/csv' : /\.md$/i.test(name) ? 'text/markdown' : 'text/plain';
+    const url = URL.createObjectURL(new Blob([f.content], { type }));
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+  /* While it works: what it is doing right now, the steps done, a Stop button (Viktor's working line).
+     The Mobius strip (<mobius-loader mode="working">) shows when the page has defined it. */
+  function workingHTML() {
+    const steps = A.steps || [];
+    const icon = window.customElements && customElements.get('mobius-loader') ? '<mobius-loader mode="working" size="22"></mobius-loader>' : '<span class="ask-pulse"></span>';
+    const secs = A.t0 ? Math.round((Date.now() - A.t0) / 1000) : 0;
+    /* A Stop lands at the end of the model's current round (up to ~20s), so say so at once and keep saying it:
+       the progress poll replaces A.steps every second (2026-10-10). */
+    const head = A.stopping ? 'Stopping after this step…' : steps.length ? steps[steps.length - 1] : 'Reading the question…';
+    return `<div class="m ai think working">${icon}<div class="wk"><b>${esc(head)}</b>`
+      + (steps.length > 1 ? `<div class="wk-done">${steps.slice(-5, -1).map(s => `<span>✓ ${esc(s)}</span>`).join('')}</div>` : '')
+      + `<span class="wk-t">${secs}s</span></div><button class="btn wk-stop" type="button" onclick="AskUI.stop()"${A.stopping ? ' disabled' : ''}>${A.stopping ? 'Stopping…' : 'Stop'}</button></div>`;
+  }
+  function render(intro) {
+    const log = $('#askLog');
+    log.innerHTML = (intro ? `<div class="m ai intro">${esc(intro).replace(/\n/g, '<br>')}</div>` : '')
+      + A.chat.map((m, mi) => m.proposal ? proposalHTML(m.proposal) : m.report ? reportCardHTML(m.report) : m.handoff ? (A.isOwner ? handoffHTML(m.handoff) : '') : m.file ? fileHTML(m.file) : m.media ? mediaHTML(m.media, mi)
+        : `<div class="m ${m.role === 'user' ? 'me' : 'ai'}">${m.role === 'user' ? esc(m.text).replace(/\n/g, '<br>') : richText(m.text, mi)}${m.cost ? `<div class="m-cost">${esc(m.cost)}</div>` : ''}</div>`).join('')
+      + (A.busy ? workingHTML() : '');
+    log.scrollTop = log.scrollHeight;
+  }
+  async function stop() {
+    if (!A.runId) return;
+    A.stopping = true; render();
+    try { await A.api(A.base + '/stop', { method: 'POST', body: JSON.stringify({ id: A.runId }) }); } catch (e) {}
+  }
+  async function applyProposal(id, cancel = false) {
+    const m = A.chat.find(x => x.proposal && x.proposal.id === id);
+    if (!m) return;
+    try {
+      const r = await A.api(A.base + '/apply', { method: 'POST', body: JSON.stringify({ id, cancel }) });
+      m.proposal.done = cancel || r.cancelled ? 'cancelled' : r.error ? 'failed' : 'applied';
+      m.proposal.result = r.error ? 'Could not apply: ' + r.error : cancel ? 'Left as it was.' : (r.note || 'Applied.');
+      if (!r.error && !cancel && A.onApplied) A.onApplied(r);
+    } catch (e) { m.proposal.done = 'failed'; m.proposal.result = 'Could not apply: ' + e.message; }
+    render(); save();
+  }
+  async function send(e) {
+    e?.preventDefault();
+    const el = $('#askIn'), q = el.value.trim(), file = A.file;
+    if ((!q && !file) || A.busy) return;
+    el.value = ''; if (el._grow) el._grow();
+    A.chat.push({ role: 'user', text: (file ? `📎 ${file.name}${q ? ' · ' : ''}` : '') + q });
+    A.file = null; drop();
+    A.busy = true; A.steps = []; A.t0 = Date.now(); A.stopping = false;
+    A.runId = Math.random().toString(36).slice(2, 12);
+    render();
+    /* Poll what it is doing (the engine writes each step); redraw the working line every second. */
+    const runId = A.runId;
+    const poll = setInterval(async () => {
+      if (!A.busy || A.runId !== runId) return;
+      try { const p = await A.api(A.base + '/progress?id=' + runId); if (A.runId === runId && Array.isArray(p.steps) && p.steps.length) A.steps = p.steps; } catch (e) {}
+      if (A.busy && A.runId === runId) render();
+    }, 1000);
+    try {
+      const history = A.chat.slice(0, -1).filter(m => !m.proposal && !m.report && !m.handoff && !m.file && !m.media);
+      const r = await A.api(A.base, { method: 'POST', body: JSON.stringify({ question: q, history, runId, screen: A.screen ? A.screen() : null, ...(file ? { file } : {}) }) });
+      if (r.isOwner !== undefined) A.isOwner = !!r.isOwner;
+      A.chat.push({ role: 'assistant', text: r.error || r.answer, cost: r.costLine || null });
+      for (const p of r.proposals || []) A.chat.push({ role: 'assistant', proposal: p, text: 'Proposed: ' + p.summary });
+      for (const rep of r.reports || []) { A.reports = [rep, ...(A.reports || []).filter(x => x.id !== rep.id)]; A.chat.push({ role: 'assistant', report: rep, text: 'Report: ' + rep.title }); }
+      for (const hd of r.handoffs || []) A.chat.push({ role: 'assistant', handoff: hd, text: 'Feature: ' + hd.title });
+      for (const f of r.files || []) A.chat.push({ role: 'assistant', file: f, text: 'File: ' + f.name });
+      /* Images and files the assistant made (stored, with a link). A redone image replaces the one it redid. */
+      const replaced = new Set((r.media || []).map(x => x.replaces).filter(Boolean));
+      for (const f of r.media || []) if (!replaced.has(f.id)) A.chat.push({ role: 'assistant', media: f, text: (f.kind === 'image' ? 'Image: ' : 'File: ') + (f.title || f.name) });
+      if ((r.reports || []).length) openReport(r.reports[0].id);
+      if (A.onAnswer) A.onAnswer(r);
+    } catch (err) { A.chat.push({ role: 'assistant', text: 'That one broke: ' + err.message }); }
+    clearInterval(poll);
+    A.busy = false; A.runId = null; render();
+    save();
+  }
+  /* Conversations, kept apart: a question about one thing and a question
+     about another are different threads, and a thread only carries its own
+     history into the prompt. Kept in this browser. */
+  function save() {
+    if (!A.chat.length) return;
+    const title = (A.chat.find(m => m.role === 'user')?.text || 'Chat').slice(0, 70);
+    const cur = { id: A.id || (A.id = Math.random().toString(36).slice(2, 9)), title, at: new Date().toISOString(), messages: A.chat, ...(A.chatScope != null ? { scope: A.chatScope } : {}) };
+    A.chats = [cur, ...(A.chats || []).filter(c => c.id !== cur.id)].slice(0, 40);
+    try { localStorage.setItem(LS(), JSON.stringify({ chat: A.chat, id: A.id })); localStorage.setItem(LS() + 's', JSON.stringify(A.chats)); } catch (e) {}
+  }
+  function loadChats() { try { A.chats = JSON.parse(localStorage.getItem(LS() + 's') || '[]'); } catch (e) { A.chats = []; } }
+  function fresh() { A.chat = []; A.id = null; try { localStorage.removeItem(LS()); } catch (e) {} const l = $('#askList'); if (l) l.hidden = true; open(); }
+  function history() {
+    const el = $('#askList'); if (!el) return;
+    if (!el.hidden && el.dataset.kind !== 'reports') { el.hidden = true; return; }
+    loadChats(); el.hidden = false; el.dataset.kind = 'chats';
+    const mine = (A.chats || []).filter(c => A.chatScope == null || c.scope === A.chatScope);
+    el.innerHTML = mine.length
+      ? mine.map(c => `<button class="chatrow ${c.id === A.id ? 'on' : ''}" onclick="AskUI.openChat('${c.id}')"><span>${esc(c.title)}</span><small>${esc(new Date(c.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))} · ${c.messages.length} message${c.messages.length === 1 ? '' : 's'}</small></button>`).join('')
+      : '<div class="hint" style="padding:10px 20px">No earlier chats yet.</div>';
+  }
+  function openChat(id) {
+    loadChats();
+    const c = (A.chats || []).find(x => x.id === id); if (!c) return;
+    A.id = c.id; A.chat = c.messages.slice();
+    $('#askList').hidden = true; render();
+  }
+
+  /* ---- the report page ---- */
+  const fmtCell = v => v == null ? '' : typeof v === 'number' ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-US') : String(Math.round(v * 100) / 100)) : String(v);
+  /* A small chart drawn by hand: no library, prints cleanly, reads in both
+     themes. Lines for series over time, bars for a few categories. */
+  function chartSVG(b) {
+    const W = 720, H = 260, L = 56, R = 16, T = 18, B = 40;
+    const x = b.x || [], series = (b.series || []).slice(0, 4);
+    const all = series.flatMap(s => (s.values || []).filter(v => v != null));
+    if (!x.length || !all.length) return '<div class="hint">No data to draw.</div>';
+    let lo = Math.min(0, ...all), hi = Math.max(...all); if (hi === lo) hi = lo + 1;
+    const pad = (hi - lo) * 0.08; hi += pad; if (lo < 0) lo -= pad;
+    const px = i => L + (x.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (x.length - 1));
+    const py = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+    const colors = ['var(--ask-brand)', 'var(--ask-good)', 'var(--ask-warn)', 'var(--ask-bad)'];
+    const unit = b.unit || '';
+    const fmtY = v => (unit === '$' ? '$' : '') + (Math.abs(v) >= 1000 ? Math.round(v / 1000) + 'k' : Math.round(v * 10) / 10) + (unit && unit !== '$' ? unit : '');
+    const ticks = 4; let g = '';
+    for (let t = 0; t <= ticks; t++) { const v = lo + (hi - lo) * t / ticks, y = py(v); g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--ask-line)" stroke-width="1"/><text x="${L - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="currentColor" opacity=".7">${fmtY(v)}</text>`; }
+    const step = Math.ceil(x.length / 8);
+    x.forEach((lab, i) => { if (i % step === 0 || i === x.length - 1) g += `<text x="${px(i)}" y="${H - B + 18}" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">${esc(String(lab))}</text>`; });
+    if (b.kind === 'bar') {
+      const n = series.length, bw = Math.max(4, ((W - L - R) / x.length) * 0.7 / n);
+      series.forEach((s, si) => (s.values || []).forEach((v, i) => { if (v == null) return; const cx = px(i) - (n * bw) / 2 + si * bw; const y0 = py(Math.max(0, lo)), y1 = py(v);
+        g += `<rect x="${cx}" y="${Math.min(y0, y1)}" width="${bw - 1}" height="${Math.abs(y0 - y1)}" fill="${colors[si]}" rx="2"/>`; }));
+    } else {
+      series.forEach((s, si) => { const pts = (s.values || []).map((v, i) => v == null ? null : `${px(i)},${py(v)}`).filter(Boolean);
+        g += `<polyline points="${pts.join(' ')}" fill="none" stroke="${colors[si]}" stroke-width="2.2" stroke-linejoin="round"/>`;
+        (s.values || []).forEach((v, i) => { if (v != null) g += `<circle cx="${px(i)}" cy="${py(v)}" r="2.6" fill="${colors[si]}"/>`; }); });
+    }
+    const legend = series.map((s, si) => `<span class="lg"><i style="background:${colors[si]}"></i>${esc(s.name)}</span>`).join('');
+    return `<div class="legend">${legend}</div><svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="${esc(b.title || 'chart')}">${g}</svg>`;
+  }
+  function reportHTML(r) {
+    const blocks = (r.blocks || []).map(b => {
+      const title = b.title ? `<h3>${esc(b.title)}</h3>` : '';
+      if (b.type === 'text') return `<section>${title}<p>${esc(b.text || '').replace(/\n/g, '<br>')}</p></section>`;
+      if (b.type === 'kpis') return `<section>${title}<div class="kpis">${(b.items || []).map(i => `<div class="kpi ${esc(i.tone || '')}"><div class="l">${esc(i.label)}</div><div class="v">${esc(i.value)}</div>${i.note ? `<div class="n">${esc(i.note)}</div>` : ''}</div>`).join('')}</div></section>`;
+      if (b.type === 'table') return `<section>${title}<div class="tw"><table><thead><tr>${(b.columns || []).map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${(b.rows || []).map(row => `<tr>${row.map((v, i) => `<td class="${typeof v === 'number' || /^[-$]?[\d,.]+%?x?$/.test(String(v || '')) ? 'num' : ''}">${esc(fmtCell(v))}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+      if (b.type === 'chart') return `<section>${title}<div class="chart">${chartSVG(b)}</div></section>`;
+      return '';
+    }).join('');
+    return `<div class="rp-head"><div><h1>${esc(r.title)}</h1>${r.subtitle ? `<div class="sub">${esc(r.subtitle)}</div>` : ''}<div class="meta">Built by the ${esc(r.by || A.name)} · ${esc(new Date(r.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</div></div>
+      <div class="rp-actions no-print"><button class="btn" onclick="window.print()">Print / PDF</button>${r.pdf ? `<a class="btn" href="${esc(r.pdf)}" target="_blank" rel="noopener">PDF file</a>` : ''}${r.share ? `<a class="btn" href="${esc(r.share)}" target="_blank" rel="noopener">Share page</a>` : ''}<button class="btn" onclick="AskUI.closeReport()">Close</button></div></div>${blocks}`;
+  }
+  function openReport(id, print = false) {
+    const r = (A.reports || []).find(x => x.id === id) || A.chat.map(m => m.report).find(x => x && x.id === id);
+    if (!r) return;
+    let el = $('#askReport');
+    if (!el) { document.body.insertAdjacentHTML('beforeend', '<div id="askReport" class="askreport"><div class="rp"></div></div>'); el = $('#askReport'); }
+    el.querySelector('.rp').innerHTML = reportHTML(r);
+    el.classList.add('on'); document.body.classList.add('ask-printing');
+    if (print) setTimeout(() => window.print(), 300);
+  }
+  function closeReport() { $('#askReport')?.classList.remove('on'); document.body.classList.remove('ask-printing'); }
+  /* Every report it has built, newest first: the same list the worker keeps. */
+  async function reports() {
+    const el = $('#askList'); if (!el) return;
+    if (!el.hidden && el.dataset.kind === 'reports') { el.hidden = true; return; }
+    try { A.reports = (await A.api(A.base + '/reports')).reports || []; } catch (e) { A.reports = A.reports || []; }
+    el.hidden = false; el.dataset.kind = 'reports';
+    el.innerHTML = A.reports.length
+      ? A.reports.map(r => `<button class="chatrow" onclick="AskUI.openReport('${esc(r.id)}')"><span>${esc(r.title)}</span><small>${esc(new Date(r.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }))}${r.subtitle ? ' · ' + esc(r.subtitle) : ''}</small></button>`).join('')
+      : '<div class="hint" style="padding:10px 20px">No reports yet. Ask for one: "build me a cash forecast report for the next 8 weeks".</div>';
+  }
+
+  /* ---- settings: what it knows, and the controls ---- */
+  function settingsCard() {
+    return `<div class="card cardp" id="askSet">${cardH(`The ${A.name}`, 'What it knows about the company before it answers anything, and when it speaks. It reads; it never changes anything.')}
+      <label class="lbl">What it knows <span class="why">Written once, read before every answer and every briefing. Add anything it should never have to ask again.</span></label>
+      <textarea id="askBrief" rows="7" spellcheck="false"></textarea>
+      <label class="lbl" style="margin-top:14px">How it thinks <span class="why">Its playbook: how a good person in this job reads the numbers and what they do about them. Correct it here in plain English and it changes how every answer is reasoned.</span></label>
+      <textarea id="askPlaybook" rows="10" spellcheck="false"></textarea>
+      <div id="askMem"></div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <button class="btn primary" onclick="AskUI.saveBrief(this)">Save</button>
+        <button class="btn" onclick="AskUI.run(this)">Run the checks now</button>
+        <button class="btn" onclick="AskUI.briefing(this)">Post this week's briefing to Slack</button>
+        <span class="hint">The checks run every night. The briefing posts on Monday.</span>
+      </div>
+    </div>`;
+  }
+  async function afterSettings() {
+    try {
+      const d = await load(true);
+      const t = $('#askBrief'); if (t) t.value = d.brief || '';
+      const pb = $('#askPlaybook'); if (pb) pb.value = d.playbook || '';
+      const m = d.memory || { notes: [], watches: [] };
+      const el = $('#askMem'); if (!el) return;
+      const notes = (m.notes || []).slice().reverse().slice(0, 25);
+      const watches = (m.watches || []).filter(w => w.active !== false);
+      el.innerHTML = (notes.length ? `<label class="lbl" style="margin-top:14px">What it has been told <span class="why">Said in a chat, kept from then on. Remove one and it forgets it.</span></label>
+        <div class="memlist">${notes.map((n, i) => `<div class="memrow"><span>${esc(n.text)}</span><small>${esc(n.at)}</small><button class="x" onclick="AskUI.forget('note',${(m.notes.length - 1 - i)})" title="Forget this">✕</button></div>`).join('')}</div>` : '')
+        + (watches.length ? `<label class="lbl" style="margin-top:14px">What it watches every night <span class="why">Asked for in a chat. Stop one here or by saying "stop watching".</span></label>
+        <div class="memlist">${watches.map(w => `<div class="memrow"><span>${esc(w.text)}</span><small>${esc(w.until ? 'until ' + w.until : w.once ? 'once' : 'ongoing')}</small><button class="x" onclick="AskUI.forget('watch','${esc(w.id)}')" title="Stop watching">✕</button></div>`).join('')}</div>` : '');
+    } catch (e) {}
+  }
+  async function saveBrief(btn) {
+    btn.disabled = true;
+    try {
+      await A.api(A.base + '/brief', { method: 'PUT', body: JSON.stringify({ text: $('#askBrief').value }) });
+      if ($('#askPlaybook')) await A.api(A.base + '/playbook', { method: 'PUT', body: JSON.stringify({ text: $('#askPlaybook').value }) });
+      A.data = null; flash('Saved');
+    }
+    catch (e) { flash(e.message); } finally { btn.disabled = false; }
+  }
+  async function forget(kind, ref) {
+    try { await A.api(A.base + '/forget', { method: 'POST', body: JSON.stringify(kind === 'watch' ? { kind, id: ref } : { kind, index: ref }) }); A.data = null; afterSettings(); }
+    catch (e) { flash(e.message); }
+  }
+  async function run(btn) {
+    btn.disabled = true; btn.textContent = 'Checking…';
+    try { const r = await A.api(A.base + '/run', { method: 'POST' }); A.data = null; flash(`Checked. ${r.fresh} new, ${r.found} open.`); }
+    catch (e) { flash(e.message); } finally { btn.disabled = false; btn.textContent = 'Run the checks now'; }
+  }
+  async function briefing(btn) {
+    if (!await confirm({ title: 'Post this week\'s briefing to Slack?', body: 'It writes the briefing from what is open right now and posts it in the channel.', ok: 'Post it' })) return;
+    btn.disabled = true;
+    try { const r = await A.api(A.base + '/briefing', { method: 'POST' }); A.data = null; flash(r.text ? 'Posted' : 'Nothing to say this week'); }
+    catch (e) { flash(e.message); } finally { btn.disabled = false; }
+  }
+
+  /* fresh: start a new chat for this question (Locus's top bar: "why wouldn't it just start a new
+     thread?"). Follow-ups typed in the panel stay in that chat; Chats reopens older ones. */
+  function ask(q, o = {}) {
+    syncScope();
+    if (o.fresh && A.chat.length && !A.busy) { A.chat = []; A.id = null; }
+    open(); const el = $('#askIn'); if (!el || !q) return; el.value = q; send();
+  }
+  return { init, open, close, send, fresh, history, openChat, card, mount, mountIn, mark, applyProposal, openReport, closeReport, reports, pick, drop, settingsCard, afterSettings, saveBrief, forget, run, briefing, state: A, ask, pin, chartHTML, stop, download, mediaAction };
+})();

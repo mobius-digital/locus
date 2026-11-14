@@ -1,0 +1,5422 @@
+/*
+ * Lineup — one product identity for every brand.
+ *
+ * The brand supplies exactly one thing: its accent (`--accent`, set per
+ * request by lib/brand.ts). Everything else here is Lineup's own: a cool
+ * off-white ground, one sans, one type scale, and a fixed set of stage hues.
+ * The older per-brand variables (`--color-*`, `--border-*`, `--surface-*`)
+ * are kept as aliases below so the surfaces that were not redrawn in the
+ * overhaul (sign-in, settings, the Clients screen, the tour) inherit the new
+ * palette without being touched.
+ */
+
+:root {
+  /* ---- ground and ink ------------------------------------------------- */
+  --bg: oklch(97.6% 0.004 250);
+  --surface: oklch(100% 0 0);
+  --surface-2: oklch(96.2% 0.005 250);
+  --surface-3: oklch(93.6% 0.007 250);
+  --ink: oklch(22% 0.016 255);
+  --ink-2: oklch(46% 0.016 255);
+  --ink-3: oklch(63% 0.012 255);
+  --line: oklch(90.5% 0.006 250);
+  --line-2: oklch(84% 0.009 250);
+
+  /* ---- the brand's one color ------------------------------------------ */
+  --accent: #14608c;
+  --accent-text: #ffffff;
+  --accent-ink: color-mix(in oklab, var(--accent) 70%, var(--ink));
+  --accent-bg: color-mix(in oklab, var(--accent) 11%, var(--surface));
+  --accent-bg-2: color-mix(in oklab, var(--accent) 20%, var(--surface));
+  --accent-line: color-mix(in oklab, var(--accent) 45%, transparent);
+
+  /* ---- semantic ----------------------------------------------------- */
+  --danger: oklch(56% 0.19 25);
+  --danger-ink: oklch(44% 0.17 25);
+  --danger-bg: oklch(95.5% 0.03 25);
+  --danger-line: oklch(80% 0.1 25);
+  --warn-ink: oklch(48% 0.12 75);
+  --warn-bg: oklch(96% 0.05 85);
+
+  /* ---- stage hues: base, tint, ink ------------------------------------ */
+  --stage-gray: oklch(62% 0.01 250);
+  --stage-gray-bg: oklch(95% 0.004 250);
+  --stage-gray-ink: oklch(40% 0.015 250);
+  --stage-blue: oklch(58% 0.16 255);
+  --stage-blue-bg: oklch(94.5% 0.03 255);
+  --stage-blue-ink: oklch(42% 0.15 255);
+  --stage-teal: oklch(62% 0.11 195);
+  --stage-teal-bg: oklch(95% 0.03 195);
+  --stage-teal-ink: oklch(40% 0.09 195);
+  --stage-green: oklch(62% 0.15 150);
+  --stage-green-bg: oklch(95% 0.04 150);
+  --stage-green-ink: oklch(40% 0.12 150);
+  --stage-amber: oklch(76% 0.15 80);
+  --stage-amber-bg: oklch(96% 0.05 85);
+  --stage-amber-ink: oklch(46% 0.12 70);
+  --stage-orange: oklch(68% 0.17 45);
+  --stage-orange-bg: oklch(95.5% 0.04 45);
+  --stage-orange-ink: oklch(46% 0.15 40);
+  --stage-rose: oklch(62% 0.18 10);
+  --stage-rose-bg: oklch(95% 0.035 10);
+  --stage-rose-ink: oklch(43% 0.16 10);
+  --stage-violet: oklch(58% 0.18 300);
+  --stage-violet-bg: oklch(95% 0.035 300);
+  --stage-violet-ink: oklch(42% 0.16 300);
+
+  /* ---- shape, depth, rhythm ------------------------------------------- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --shadow-1: 0 1px 2px oklch(22% 0.016 255 / 0.06), 0 1px 1px oklch(22% 0.016 255 / 0.04);
+  --shadow-2: 0 10px 28px -10px oklch(22% 0.016 255 / 0.28), 0 0 0 1px var(--line);
+  --shadow-3: -16px 0 48px -24px oklch(22% 0.016 255 / 0.35);
+  --scrim: oklch(22% 0.016 255 / 0.42);
+  --focus-ring: color-mix(in oklab, var(--accent) 70%, transparent);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  --shell-max: 1520px;
+  --topbar-h: 56px;
+  --tabbar-h: 60px;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --t-fast: 140ms;
+  --t-base: 200ms;
+
+  --z-sticky: 20;
+  --z-fab: 30;
+  --z-menu: 40;
+  --z-scrim: 100;
+  --z-toast: 150;
+  --z-tour: 200;
+
+  --font: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* ---- aliases for the surfaces not redrawn in the overhaul ----------- */
+  --color-background: var(--bg);
+  --color-surface: var(--surface);
+  --color-primary: var(--accent);
+  --color-primary-text: var(--accent-text);
+  --color-text: var(--ink);
+  --color-text-muted: var(--ink-2);
+  --color-danger: var(--danger);
+  --color-tentative: var(--ink-3);
+  --color-scrim: oklch(22% 0.016 255);
+  --color-accent-ink: var(--accent-ink);
+  --font-family: var(--font);
+  --font-weight-heading: 600;
+  --font-weight-body: 400;
+  --weight-heading: 600;
+  --border-subtle: var(--line);
+  --border-strong: var(--line-2);
+  --surface-raised: var(--surface-2);
+  --surface-sunken: var(--surface-2);
+}
+
+/* --------------------------------------------------------------------------
+ * Base
+ * ----------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background: var(--bg);
+  color-scheme: light;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "tnum" 1, "cv11" 1;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  margin: 0;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+::selection {
+  background: var(--accent-bg-2);
+}
+
+/* --------------------------------------------------------------------------
+ * App shell
+ *
+ * A 56px top bar: the brand on the left, the three views in the middle, the
+ * actions on the right. Under 720px the views move to a bottom tab bar and
+ * the primary action becomes a floating button, both in thumb reach.
+ * ----------------------------------------------------------------------- */
+
+.shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-4);
+  height: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) var(--space-5) 0;
+  /* Solid, not frosted: a backdrop-filter here would become the containing
+     block for the Settings window, which is rendered inside this bar and
+     positioned fixed. */
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar__left,
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.topbar__right {
+  justify-content: flex-end;
+}
+
+.topbar__product {
+  color: var(--ink-3);
+  font-size: 0.85rem;
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--line);
+  margin-left: var(--space-1);
+  white-space: nowrap;
+}
+
+/* The brand block: mark, name, and (for people on several boards) a caret. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 6px;
+  margin-left: -6px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  text-decoration: none;
+  color: var(--ink);
+  min-width: 0;
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+}
+
+.brand--menu:hover,
+.brand--menu[aria-expanded="true"] {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+
+.brand__logo {
+  width: 28px;
+  height: 28px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.brand__name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The hub's own mark, for the pages that belong to no brand. */
+.brand__logo--hub {
+  display: inline-block;
+  background: currentColor;
+  -webkit-mask: url("/lineup.svg") center / contain no-repeat;
+  mask: url("/lineup.svg") center / contain no-repeat;
+}
+
+.door__swatch--all {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: conic-gradient(
+    from 90deg,
+    var(--stage-blue),
+    var(--stage-teal),
+    var(--stage-amber),
+    var(--stage-rose),
+    var(--stage-violet),
+    var(--stage-blue)
+  );
+}
+
+.brand__caret {
+  color: var(--ink-3);
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* The three views as a segmented set in the middle of the bar. */
+.topbar__tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  height: 32px;
+  border-radius: 7px;
+  text-decoration: none;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.tab svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab--active {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+
+.tab--active svg {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding: var(--space-5) calc(var(--space-5) + env(safe-area-inset-right, 0px))
+    calc(var(--space-6) + env(safe-area-inset-bottom, 0px))
+    calc(var(--space-5) + env(safe-area-inset-left, 0px));
+}
+
+/* Who is editing: initials in a circle, name beside it on wide screens. */
+.who {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px 0 4px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.8rem;
+  max-width: 14rem;
+}
+
+.who--button {
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+
+.who--button:hover {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.who__avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-bg-2);
+  color: var(--accent-ink);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.who__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Legacy identity classes still referenced by a couple of panels. */
+.identity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.identity__name {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.identity--static {
+  cursor: default;
+}
+
+/* Icon-only control in the bar (Settings). */
+.iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  padding: 0;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.iconbtn svg {
+  width: 17px;
+  height: 17px;
+}
+
+.iconbtn:hover {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* Phone chrome: the bar and the floating add button. Shown under 720px. */
+.tabbar {
+  display: none;
+}
+
+.fab {
+  display: none;
+}
+
+/* --------------------------------------------------------------------------
+ * Buttons
+ *
+ * One vocabulary everywhere: default (bordered), primary (accent), quiet
+ * (text), danger, and the small variant for dense rows.
+ * ----------------------------------------------------------------------- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  box-shadow: var(--shadow-1);
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.button svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-3);
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.button--primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: color-mix(in oklab, var(--accent) 80%, var(--ink));
+  font-weight: 600;
+}
+
+.button--primary:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent) 90%, var(--ink));
+  border-color: color-mix(in oklab, var(--accent) 70%, var(--ink));
+}
+
+.button--danger {
+  color: var(--danger-ink);
+  border-color: var(--danger-line);
+  background: var(--surface);
+}
+
+.button--danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+}
+
+.button--destructive {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  font-weight: 600;
+}
+
+.button--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-2);
+  box-shadow: none;
+}
+
+.button--quiet:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-2);
+  border-color: transparent;
+}
+
+.button--outline {
+  background: transparent;
+  border-color: var(--accent-line);
+  color: var(--accent-ink);
+  box-shadow: none;
+}
+
+.button--outline:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.button--small {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 0.8rem;
+}
+
+.button--icon {
+  width: 36px;
+  padding: 0;
+}
+
+/* --------------------------------------------------------------------------
+ * Forms
+ * ----------------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field__label {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.field__required {
+  color: var(--accent-ink);
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: 0 12px;
+  height: 38px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  /* 16px keeps iOS from zooming the viewport on focus. */
+  font-size: 16px;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+@media (min-width: 721px) {
+  .input,
+  .select,
+  .textarea {
+    font-size: 0.9rem;
+  }
+}
+
+.textarea {
+  height: auto;
+  min-height: 84px;
+  padding: 10px 12px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 32px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) 50%,
+    calc(100% - 12px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.select:disabled,
+.input:disabled {
+  opacity: 0.55;
+  background: var(--surface-2);
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-3);
+}
+
+.input--invalid,
+.select--invalid {
+  border-color: var(--danger);
+}
+
+.field__error {
+  color: var(--danger-ink);
+  font-size: 0.8rem;
+}
+
+.field__hint {
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.fieldset__legend {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.date-grid > .field {
+  min-width: 0;
+}
+
+.input--date {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.channel-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.channel-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-3);
+  align-items: center;
+  padding: 6px 8px 6px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.channel-row:first-child {
+  border-top: 0;
+}
+
+.channel-row__toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  min-height: 36px;
+  font-weight: 500;
+}
+
+.channel-row__toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+
+.select--compact {
+  height: 32px;
+  width: auto;
+  min-width: 8.5rem;
+  font-size: 0.85rem;
+  padding: 0 28px 0 10px;
+}
+
+.danger-zone {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.danger-zone__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.danger-zone__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.danger-zone__admin summary {
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: var(--space-2) 0;
+}
+
+.danger-zone__admin[open] summary {
+  margin-bottom: var(--space-2);
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  cursor: pointer;
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+.toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+
+/* --------------------------------------------------------------------------
+ * View toolbar: the row under the top bar that every view owns
+ * ----------------------------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+
+.toolbar__lead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-right: var(--space-2);
+}
+
+.toolbar__title {
+  font-size: 1.35rem;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.toolbar__sub {
+  color: var(--ink-3);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.toolbar__nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar__nav .button {
+  box-shadow: none;
+}
+
+.toolbar__spacer {
+  flex: 1;
+}
+
+.toolbar__group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.segmented__option {
+  background: transparent;
+  border: 0;
+  color: var(--ink-2);
+  padding: 0 12px;
+  height: 28px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.segmented__option:hover {
+  color: var(--ink);
+}
+
+.segmented__option--active {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+
+/* The channel lens as a compact row of chips. */
+.filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.filters__chips {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.chip-filter {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 999px;
+  padding: 0 11px;
+  height: 28px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.chip-filter:hover {
+  border-color: var(--line-2);
+  color: var(--ink);
+}
+
+.chip-filter--active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+.filters__note {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+}
+
+/* --------------------------------------------------------------------------
+ * Menus: one dropdown for status, stage, and the switcher
+ * ----------------------------------------------------------------------- */
+
+.menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu__list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: var(--z-menu);
+  min-width: 15rem;
+  max-height: min(24rem, 60vh);
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: menu-in var(--t-fast) var(--ease-out);
+  transform-origin: top right;
+}
+
+.menu__list--left {
+  right: auto;
+  left: 0;
+  transform-origin: top left;
+}
+
+.menu__list--up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform-origin: bottom right;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.menu__heading {
+  padding: 8px 10px 4px;
+  font-size: 0.7rem;
+  color: var(--ink-3);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.menu__item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 2px 10px;
+  align-items: center;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--ink);
+  min-height: 36px;
+  text-decoration: none;
+  width: 100%;
+}
+
+.menu__item:hover {
+  background: var(--surface-2);
+}
+
+.menu__item--current {
+  background: var(--accent-bg);
+}
+
+.menu__label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.menu__hint {
+  grid-column: 2 / -1;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  line-height: 1.35;
+}
+
+.menu__check {
+  color: var(--accent-ink);
+  width: 14px;
+  height: 14px;
+}
+
+.menu__rule {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 4px 0;
+}
+
+/* Trigger that reads as a value with a caret (status/stage on a card). */
+.pill-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+
+.pill-menu:hover:not(:disabled),
+.pill-menu[aria-expanded="true"] {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.pill-menu:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.pill-menu__caret {
+  width: 11px;
+  height: 11px;
+  opacity: 0.7;
+}
+
+/* --------------------------------------------------------------------------
+ * Marks: stage dots, status marks, flags
+ * ----------------------------------------------------------------------- */
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  background: var(--dot, var(--ink-3));
+}
+
+.dot--lg {
+  width: 10px;
+  height: 10px;
+}
+
+/* Stage hue is set through --stage-c on any element carrying a stage. */
+.stage-gray { --stage-c: var(--stage-gray); --stage-bg: var(--stage-gray-bg); --stage-ink: var(--stage-gray-ink); }
+.stage-blue { --stage-c: var(--stage-blue); --stage-bg: var(--stage-blue-bg); --stage-ink: var(--stage-blue-ink); }
+.stage-teal { --stage-c: var(--stage-teal); --stage-bg: var(--stage-teal-bg); --stage-ink: var(--stage-teal-ink); }
+.stage-green { --stage-c: var(--stage-green); --stage-bg: var(--stage-green-bg); --stage-ink: var(--stage-green-ink); }
+.stage-amber { --stage-c: var(--stage-amber); --stage-bg: var(--stage-amber-bg); --stage-ink: var(--stage-amber-ink); }
+.stage-orange { --stage-c: var(--stage-orange); --stage-bg: var(--stage-orange-bg); --stage-ink: var(--stage-orange-ink); }
+.stage-rose { --stage-c: var(--stage-rose); --stage-bg: var(--stage-rose-bg); --stage-ink: var(--stage-rose-ink); }
+.stage-violet { --stage-c: var(--stage-violet); --stage-bg: var(--stage-violet-bg); --stage-ink: var(--stage-violet-ink); }
+/* No stage yet: the brand's own tint, so an unsorted board still looks like theirs. */
+.stage-none { --stage-c: var(--accent); --stage-bg: var(--accent-bg); --stage-ink: var(--accent-ink); }
+
+.stage-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  background: var(--stage-c, var(--ink-3));
+}
+
+/* Status is shape, not hue. */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  background: var(--ink-2);
+}
+
+.status-dot--confirmed {
+  background: var(--ink);
+}
+
+.status-dot--tentative {
+  background: transparent;
+  border: 1.5px dashed var(--ink-3);
+}
+
+.status-dot--at_risk {
+  background: var(--danger);
+}
+
+.status-dot--completed {
+  background: var(--ink-3);
+  opacity: 0.6;
+}
+
+.status-dot--cancelled {
+  background: transparent;
+  border: 1.5px solid var(--ink-3);
+  opacity: 0.6;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+
+.status-badge--tentative {
+  border-style: dashed;
+  border-color: var(--ink-3);
+}
+
+.status-badge--at_risk {
+  color: var(--danger-ink);
+  border-color: var(--danger-line);
+  background: var(--danger-bg);
+}
+
+.status-badge--completed {
+  color: var(--ink-3);
+}
+
+.type-badge {
+  font-size: 0.72rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.clash-flag,
+.stale-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.clash-flag {
+  color: var(--danger-ink);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-line);
+}
+
+.stale-flag {
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  border: 1px solid color-mix(in oklab, var(--warn-ink) 30%, transparent);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  background: var(--surface);
+}
+
+.chip__priority {
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.chip--primary {
+  color: var(--ink);
+  border-color: var(--line-2);
+  background: var(--surface-2);
+  font-weight: 500;
+}
+
+.chip--fyi {
+  opacity: 0.7;
+}
+
+/* Small avatar with initials, for owners. */
+.avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+/* The passive connection note. */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.conn__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.conn--connecting .conn__dot {
+  background: var(--accent);
+  animation: conn-pulse 1.2s ease-in-out infinite;
+}
+
+.conn--offline .conn__dot {
+  background: var(--danger);
+}
+
+@keyframes conn-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Calendar
+ *
+ * Month and week share one grid: a weekday strip, then one row per week made
+ * of seven day cells and, under them, the lanes of event chips. A chip runs
+ * from teaser start to promo end. The part before launch day is hatched, the
+ * part from launch day on is solid, and launch day itself carries a dot.
+ * ----------------------------------------------------------------------- */
+
+.cal {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.cal__head {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.cal__weekday {
+  padding: 8px 10px;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.cal__weekday--weekend {
+  color: var(--ink-3);
+  opacity: 0.8;
+}
+
+.cal-week {
+  border-bottom: 1px solid var(--line);
+  position: relative;
+}
+
+.cal-week:last-child {
+  border-bottom: 0;
+}
+
+.cal-week__days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+/* Each day is a button: click it to start an event on that date. */
+.day {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px 2px 10px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition: background var(--t-fast) var(--ease-out);
+}
+
+.day:last-child {
+  border-right: 0;
+}
+
+.day--weekend {
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+}
+
+.day:hover {
+  background: var(--surface-2);
+}
+
+.day__num {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--ink-2);
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+}
+
+.day--outside .day__num {
+  color: var(--ink-3);
+  opacity: 0.55;
+}
+
+.day--today .day__num {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.day__add {
+  opacity: 0;
+  color: var(--ink-3);
+  width: 14px;
+  height: 14px;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.day:hover .day__add,
+.day:focus-visible .day__add {
+  opacity: 1;
+  color: var(--accent-ink);
+}
+
+/* Week rows sit on a 7-column grid too, so a drop target can be painted
+   over any column while chips are being dragged. */
+.cal-week__lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 4px 8px;
+  min-height: 34px;
+  position: relative;
+}
+
+.cal-week__lanes--empty {
+  min-height: 26px;
+}
+
+/* Where a dragged chip would land: a column-wide tint in the brand color. */
+.cal-week__drop {
+  position: absolute;
+  inset: 0 0 0 0;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  pointer-events: none;
+}
+
+.cal-week__drop span {
+  border-radius: 6px;
+}
+
+.cal-week__drop span[data-over="true"] {
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0 3px;
+}
+
+/* ---- the chip ---- */
+
+.evt {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 8px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in oklab, var(--stage-c) 45%, transparent);
+  background: var(--stage-bg);
+  color: var(--stage-ink);
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: box-shadow var(--t-fast) var(--ease-out), filter var(--t-fast) var(--ease-out), opacity var(--t-fast) var(--ease-out);
+  container-type: inline-size;
+}
+
+.evt:hover {
+  filter: brightness(0.97);
+  box-shadow: var(--shadow-1);
+}
+
+.evt[draggable="true"] {
+  cursor: grab;
+}
+
+.evt--dragging {
+  opacity: 0.4;
+}
+
+/* The run-up before launch day is hatched; the launch onward is solid.
+   --x is where launch day falls inside this segment (0% to 100%). */
+.evt--split {
+  background:
+    linear-gradient(to right, transparent var(--x), var(--stage-bg) var(--x)),
+    repeating-linear-gradient(
+      -45deg,
+      color-mix(in oklab, var(--stage-c) 18%, var(--surface)) 0 4px,
+      var(--surface) 4px 8px
+    );
+}
+
+.evt--before {
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--stage-c) 18%, var(--surface)) 0 4px,
+    var(--surface) 4px 8px
+  );
+  color: var(--ink-2);
+}
+
+.evt__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* Launch day: a dot in the stage color, sitting where launch day falls. */
+.evt__launch {
+  position: absolute;
+  left: calc(var(--x, 0%) + 4px);
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--stage-c);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.evt--split .evt__name,
+.evt--launch-first .evt__name {
+  padding-left: 0;
+}
+
+.evt--launch-first {
+  padding-left: 18px;
+}
+
+.evt--launch-first .evt__launch {
+  left: 7px;
+}
+
+.evt--cont-l {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left-style: dotted;
+}
+
+.evt--cont-r {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-style: dotted;
+}
+
+.evt--tentative {
+  border-style: dashed;
+  background: var(--surface);
+  color: var(--ink-2);
+}
+
+.evt--tentative.evt--split {
+  background: linear-gradient(to right, transparent var(--x), var(--surface-2) var(--x));
+}
+
+.evt--at_risk {
+  border-color: var(--danger);
+}
+
+.evt--at_risk .evt__name::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.evt--completed {
+  opacity: 0.5;
+}
+
+.evt--completed .evt__name {
+  text-decoration: line-through;
+}
+
+/* A clash is a small red mark at the chip's end, not a ring: the banner
+   above already says it, and a ring on every chip in a busy month drowned
+   the stage colors the chips exist to show. */
+.evt--clash::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.evt--clash {
+  padding-right: 16px;
+}
+
+/* A chip too narrow for words keeps its color and dot. */
+@container (max-width: 4rem) {
+  .evt__name {
+    display: none;
+  }
+}
+
+/* Week view gives each day room. */
+.cal--week .day {
+  min-height: 44px;
+  align-items: flex-start;
+  padding-top: 8px;
+}
+
+.cal--week .day__num {
+  font-size: 0.9rem;
+}
+
+.cal--week .cal-week__lanes {
+  min-height: 9rem;
+  gap: 4px;
+  padding-bottom: 12px;
+}
+
+.cal--week .evt {
+  height: 30px;
+  font-size: 0.85rem;
+}
+
+/* ---- clash banner ---- */
+
+.collision {
+  margin-bottom: var(--space-3);
+}
+
+.collision-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--ink);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 0.85rem;
+}
+
+.collision-banner__icon {
+  width: 16px;
+  height: 16px;
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+.collision-banner__text {
+  font-weight: 500;
+}
+
+.collision-banner__names {
+  color: var(--ink-2);
+}
+
+.collision-banner__caret {
+  margin-left: auto;
+  color: var(--ink-3);
+  width: 14px;
+  height: 14px;
+}
+
+.collision__list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ---- the calendar's empty nudge ---- */
+
+.hello {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 14px;
+  margin-bottom: var(--space-3);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-md);
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  background: var(--surface);
+}
+
+.hello strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.hello .button {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------------------
+ * Agenda: the calendar as a list, one block per day that has something
+ * ----------------------------------------------------------------------- */
+
+.agenda {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.agenda__day {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line);
+}
+
+.agenda__day:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.agenda__date {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  line-height: 1.2;
+  padding-top: 2px;
+}
+
+.agenda__weekday {
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.agenda__num {
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.agenda__day--today .agenda__num {
+  color: var(--accent-ink);
+}
+
+.agenda__day--today .agenda__weekday {
+  color: var(--accent-ink);
+}
+
+.agenda__month {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.agenda__items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.arow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.arow:hover {
+  border-color: var(--line-2);
+  box-shadow: var(--shadow-1);
+}
+
+.arow__main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.arow__name {
+  font-weight: 500;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arow__sub {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arow__kind {
+  font-size: 0.72rem;
+  color: var(--ink-2);
+  font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.arow__kind svg {
+  width: 13px;
+  height: 13px;
+  color: var(--ink-3);
+}
+
+.arow--milestone {
+  background: var(--surface-2);
+  border-style: dashed;
+}
+
+.arow--milestone .arow__name {
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.arow--tentative .arow__name {
+  color: var(--ink-2);
+}
+
+.arow--completed {
+  opacity: 0.55;
+}
+
+.arow--completed .arow__name {
+  text-decoration: line-through;
+}
+
+.agenda__empty {
+  padding: var(--space-7) var(--space-4);
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.9rem;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-lg);
+}
+
+/* --------------------------------------------------------------------------
+ * Board: one column per stage, cards are launches
+ * ----------------------------------------------------------------------- */
+
+.board {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: var(--space-4);
+  /* Room for the scrollbar so it never sits on the last cards. */
+  margin: 0 calc(-1 * var(--space-5));
+  padding-left: var(--space-5);
+  padding-right: var(--space-5);
+  scroll-padding-left: var(--space-5);
+}
+
+.col {
+  flex: 0 0 18.5rem;
+  width: 18.5rem;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  max-height: calc(100dvh - var(--topbar-h) - 140px);
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+}
+
+.col--over {
+  background: var(--accent-bg);
+  border-color: var(--accent-line);
+}
+
+.col__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  position: sticky;
+  top: 0;
+}
+
+.col__label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col__count {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--ink-3);
+  font-weight: 500;
+  min-width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 0 6px;
+}
+
+.col__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+  min-height: 3rem;
+}
+
+.col__empty {
+  margin: 0 0 4px;
+  padding: 14px 10px;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 0.78rem;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-md);
+}
+
+.bcard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 10px;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-1);
+  position: relative;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out), opacity var(--t-fast) var(--ease-out);
+}
+
+.bcard:hover {
+  border-color: var(--line-2);
+  box-shadow: 0 4px 14px -8px oklch(22% 0.016 255 / 0.3), var(--shadow-1);
+}
+
+.bcard[draggable="true"] {
+  cursor: grab;
+}
+
+.bcard--dragging {
+  opacity: 0.4;
+  transform: rotate(1.5deg);
+}
+
+.bcard--tentative {
+  border-style: dashed;
+}
+
+.bcard--at_risk {
+  border-color: var(--danger-line);
+}
+
+.bcard--completed {
+  opacity: 0.55;
+}
+
+.bcard__hit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  min-width: 0;
+}
+
+.bcard__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bcard__name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.bcard--completed .bcard__name {
+  text-decoration: line-through;
+}
+
+.bcard__date {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.bcard__when {
+  color: var(--ink-3);
+}
+
+.bcard__when--soon {
+  color: var(--warn-ink);
+  font-weight: 500;
+}
+
+.bcard__when--past {
+  color: var(--danger-ink);
+  font-weight: 500;
+}
+
+.bcard__brief {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bcard__tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bcard__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.bcard__owner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bcard__foot .menu {
+  margin-left: auto;
+}
+
+.bcard__assets {
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.bcard__assets:hover {
+  text-decoration: underline;
+}
+
+/* Channel dots on a card: primary channels read as filled, others outlined. */
+.cdots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.cdot {
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line-2);
+  color: var(--ink-3);
+  background: var(--surface);
+}
+
+.cdot--primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+.cdot--supporting {
+  color: var(--ink-2);
+  background: var(--surface-2);
+}
+
+/* --------------------------------------------------------------------------
+ * Empty states
+ * ----------------------------------------------------------------------- */
+
+.empty-state {
+  max-width: 30rem;
+  margin: var(--space-8) auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.empty-state__art {
+  width: 72px;
+  height: 72px;
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.empty-state__title {
+  font-size: 1.15rem;
+}
+
+.empty-state__body {
+  color: var(--ink-2);
+  line-height: 1.55;
+  max-width: 34ch;
+}
+
+.empty-state .button {
+  margin-top: var(--space-2);
+}
+
+.empty {
+  color: var(--ink-3);
+  font-size: 0.9rem;
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+ * Sheet: the event editor, sliding in from the right
+ * ----------------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  z-index: var(--z-scrim);
+  animation: scrim-in var(--t-base) var(--ease-out);
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.scrim--right {
+  justify-content: flex-end;
+  align-items: stretch;
+  padding: 0;
+}
+
+.sheet {
+  background: var(--surface);
+  width: 100%;
+  max-width: 35rem;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  box-shadow: var(--shadow-3);
+  animation: sheet-in var(--t-base) var(--ease-out);
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 14px var(--space-5);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.sheet__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sheet__title {
+  font-size: 1.05rem;
+}
+
+.sheet__sub {
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.sheet__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: 12px var(--space-5) calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+/* A titled group of fields inside the sheet. */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.section__title {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 500;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Stage and status pickers show their mark inline with the select. */
+.pick {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.pick .select {
+  min-width: 0;
+}
+
+/* Dialog shells that are not the sheet (name prompt, confirmations). */
+.dialog {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  width: 100%;
+  max-width: 24rem;
+  box-shadow: var(--shadow-2);
+  animation: dialog-in var(--t-base) var(--ease-out);
+}
+
+@keyframes dialog-in {
+  from {
+    transform: translateY(8px) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.dialog__title {
+  font-size: 1.05rem;
+  margin-bottom: var(--space-2);
+}
+
+.dialog__body {
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  margin: 0 0 var(--space-4);
+  line-height: 1.55;
+}
+
+.dialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.dialog__head .dialog__title {
+  margin-bottom: 0;
+}
+
+.dialog__close {
+  background: none;
+  border: 0;
+  color: var(--ink-3);
+  border-radius: 999px;
+  line-height: 1;
+  font-size: 0.95rem;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.dialog__close:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.dialog--framed {
+  max-width: 34rem;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: min(88vh, 54rem);
+}
+
+.dialog--framed .dialog__head {
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 0;
+  flex: 0 0 auto;
+}
+
+.dialog__scroll {
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.dialog__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+
+.scrim--confirm {
+  z-index: calc(var(--z-scrim) + 20);
+}
+
+/* --------------------------------------------------------------------------
+ * Toast: one line of confirmation, with an undo where one makes sense
+ * ----------------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(32rem, calc(100vw - 32px));
+  padding: 10px 12px 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--ink);
+  color: var(--surface);
+  font-size: 0.875rem;
+  box-shadow: 0 12px 32px -8px oklch(22% 0.016 255 / 0.45);
+  animation: toast-in var(--t-base) var(--ease-out);
+}
+
+@keyframes toast-in {
+  from {
+    transform: translate(-50%, 8px);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+.toast__text {
+  min-width: 0;
+}
+
+.toast__action {
+  background: none;
+  border: 1px solid color-mix(in oklab, var(--surface) 30%, transparent);
+  color: var(--surface);
+  border-radius: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font-weight: 600;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.toast__action:hover {
+  background: color-mix(in oklab, var(--surface) 12%, transparent);
+}
+
+.toast__close {
+  background: none;
+  border: 0;
+  color: color-mix(in oklab, var(--surface) 70%, transparent);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.toast__close:hover {
+  color: var(--surface);
+  background: color-mix(in oklab, var(--surface) 12%, transparent);
+}
+
+.toast--danger {
+  background: var(--danger);
+}
+
+/* --------------------------------------------------------------------------
+ * Generic panels and messages
+ * ----------------------------------------------------------------------- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+}
+
+.error-banner {
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--ink);
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-content: space-between;
+  font-size: 0.875rem;
+}
+
+.sheet__body > .error-banner {
+  position: sticky;
+  top: calc(-1 * var(--space-5));
+  z-index: 2;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.error-banner__fields {
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------------------
+ * The all-brands calendar (agency view)
+ * ----------------------------------------------------------------------- */
+
+.brandkey {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.brandkey__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out), opacity var(--t-fast) var(--ease-out);
+}
+
+.brandkey__item:hover {
+  border-color: var(--line-2);
+  background: var(--surface-2);
+}
+
+.brandkey__item--off {
+  opacity: 0.45;
+}
+
+.brandkey__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.evt__brand {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: var(--brand-c);
+}
+
+/* --------------------------------------------------------------------------
+ * Settings: the Stages panel
+ * ----------------------------------------------------------------------- */
+
+.stages {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stages__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.stages__order {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.stages__move {
+  background: none;
+  border: 0;
+  color: var(--ink-3);
+  width: 22px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 4px;
+}
+
+.stages__move:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.stages__move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.stages__move svg {
+  width: 12px;
+  height: 12px;
+}
+
+.stages__up {
+  transform: rotate(180deg);
+}
+
+.stages__label {
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-right: auto;
+  min-width: 0;
+}
+
+.stages__row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.stages__colors {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.stages__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 0;
+  padding: 0;
+  background: var(--stage-c);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: inset 0 0 0 1px oklch(0% 0 0 / 0.08);
+  transition: transform var(--t-fast) var(--ease-out);
+}
+
+.stages__swatch svg {
+  width: 11px;
+  height: 11px;
+}
+
+.stages__swatch:hover:not(:disabled) {
+  transform: scale(1.15);
+}
+
+.stages__swatch--on {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--stage-c);
+}
+
+@media (max-width: 640px) {
+  .stages__row {
+    flex-wrap: wrap;
+  }
+
+  .stages__colors {
+    order: 10;
+    width: 100%;
+    padding-left: 32px;
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+ * The sign-in screen
+ *
+ * Split in two: the product in miniature on the left — an abstract Pipeline
+ * drawn from brand tokens, with this board's own channel and type names — and
+ * the sign-in card on the right. Full-bleed: the main column's padding and
+ * width cap are lifted for this one page.
+ * ----------------------------------------------------------------------- */
+
+.main:has(> .gate) {
+  max-width: none;
+  padding: 0;
+}
+
+.gate {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ---- the scene ---- */
+
+.gate__scene {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-7) var(--space-6);
+  color: var(--color-text);
+  background:
+    radial-gradient(
+      120% 90% at 0% 0%,
+      color-mix(in srgb, var(--color-primary) 18%, var(--color-background)) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      90% 80% at 100% 100%,
+      color-mix(in srgb, var(--color-primary) 10%, var(--color-background)) 0%,
+      transparent 55%
+    ),
+    color-mix(in srgb, var(--color-primary) 5%, var(--color-background));
+}
+
+/* A faint week grid behind everything — seven columns, like the day strip. */
+.gate__scene::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--border-subtle) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border-subtle) 1px, transparent 1px);
+  background-size: calc(100% / 7) 64px;
+  mask-image: radial-gradient(80% 80% at 50% 50%, black 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(80% 80% at 50% 50%, black 30%, transparent 100%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.scene {
+  position: relative;
+  width: 100%;
+  max-width: 34rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.scene__top {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.scene__today {
+  display: block;
+  min-height: 1.2em;
+  font-size: 0.8rem;
+  font-weight: var(--font-weight-heading);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent-ink);
+}
+
+.scene__headline {
+  margin: 0;
+  font-size: clamp(1.5rem, 2.4vw, 2.1rem);
+  line-height: 1.15;
+  font-weight: var(--font-weight-heading);
+  letter-spacing: -0.01em;
+  max-width: 19ch;
+}
+
+/* The miniature board: a day strip and four week lanes. */
+.scene__board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 24px 60px -30px color-mix(in srgb, var(--color-scrim) 45%, transparent);
+}
+
+.scene__strip {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin-left: calc(4.6rem + var(--space-3));
+  margin-bottom: var(--space-2);
+}
+
+.scene__day {
+  position: relative;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scene__day--today {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-primary) 55%, transparent);
+}
+
+.scene__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: scene-pulse 2.4s ease-in-out infinite;
+}
+
+.scene__mark {
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  opacity: 0.7;
+}
+
+.scene__week {
+  display: grid;
+  grid-template-columns: 4.6rem 1fr;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 30px;
+}
+
+.scene__weeklabel {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-heading);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.scene__week:first-of-type .scene__weeklabel {
+  color: var(--color-text);
+}
+
+.scene__lane {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 10px;
+  gap: 6px 6px;
+  padding: 2px 0;
+}
+
+/* A span: teaser start to promo end. Confirmed is solid, tentative lighter,
+   at-risk in the danger color. Primary is the full bar; supporting is
+   thinner. Grows in from the left, staggered by row. */
+.scene__span {
+  grid-column: var(--start) / var(--end);
+  height: 10px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  transform-origin: left center;
+  animation: scene-grow 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--delay) * 70ms + 200ms);
+}
+
+.scene__span--supporting {
+  height: 6px;
+  align-self: center;
+  opacity: 0.55;
+}
+
+.scene__span--tentative {
+  background: color-mix(in srgb, var(--color-tentative) 70%, var(--color-surface));
+}
+
+.scene__span--risk {
+  background: var(--color-danger);
+}
+
+/* This board's own words: channels first, then a few event types. */
+.scene__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.scene__chip {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-surface) 70%, transparent);
+}
+
+.scene__chip--channel {
+  color: var(--color-accent-ink);
+  border-color: color-mix(in srgb, var(--color-primary) 35%, transparent);
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface));
+  font-weight: var(--font-weight-heading);
+}
+
+.scene__foot {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  letter-spacing: 0.02em;
+}
+
+@keyframes scene-grow {
+  from {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes scene-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-primary) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-primary) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene__span {
+    animation: none;
+  }
+  .scene__dot {
+    animation: none;
+  }
+}
+
+/* ---- the form side ---- */
+
+.gate__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: var(--space-7) var(--space-6);
+  background: var(--color-background);
+}
+
+.gate__card {
+  width: 100%;
+  max-width: 23rem;
+  background: var(--color-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  text-align: center;
+  box-shadow: 0 20px 50px -30px color-mix(in srgb, var(--color-scrim) 40%, transparent);
+}
+
+.gate__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  color: var(--color-accent-ink);
+}
+
+/* The hub has no brand logo to mask, so its own mark is drawn here. */
+.gate__logo--hub {
+  background: currentColor;
+  -webkit-mask: url("/lineup.svg") center / contain no-repeat;
+  mask: url("/lineup.svg") center / contain no-repeat;
+}
+
+/* Larger again on the sign-in card: it is the whole point of that panel, and
+   it has a card to itself rather than a nav bar to share. */
+.gate__logo {
+  width: 44px;
+  height: 44px;
+  color: var(--color-accent-ink);
+}
+
+.gate__brandname {
+  font-weight: var(--font-weight-heading);
+  letter-spacing: 0.02em;
+}
+
+.gate__title {
+  font-size: 1.5rem;
+  margin: 0 0 var(--space-2);
+  letter-spacing: -0.01em;
+}
+
+.gate__subtitle {
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+  margin: 0 0 var(--space-5);
+}
+
+.gate__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.gate__fine {
+  margin: 0;
+  max-width: 23rem;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 860px) {
+  .gate {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .gate__scene {
+    padding: var(--space-6) var(--space-5) var(--space-5);
+    align-items: flex-start;
+  }
+
+  /* On a phone the board would be a smear; keep the words, drop the picture. */
+  .scene {
+    gap: var(--space-4);
+  }
+
+  .scene__board,
+  .scene__foot {
+    display: none;
+  }
+
+  .scene__headline {
+    max-width: none;
+    font-size: 1.35rem;
+  }
+
+  .gate__panel {
+    padding: var(--space-6) var(--space-5) var(--space-7);
+    justify-content: flex-start;
+  }
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Recent changes and full changelog
+ * ----------------------------------------------------------------------- */
+
+.recent {
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-4);
+}
+
+.recent__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.recent__title {
+  font-size: 1rem;
+}
+
+.recent__all {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.recent__all:hover {
+  color: var(--color-text);
+}
+
+.recent__list,
+.log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.recent__item,
+.log-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  border-radius: 0;
+}
+
+.recent__summary,
+.log-item__summary {
+  font-size: 0.92rem;
+}
+
+.recent__meta,
+.log-item__meta {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.recent__empty {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.log-day {
+  margin-bottom: var(--space-5);
+}
+
+.log-day__title {
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-3);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * First run
+ * ----------------------------------------------------------------------- */
+
+/* Sits above the empty-state card so Settings is reachable on a board with
+   nothing on it yet — the very first thing a new team sees. */
+.firstrun__bar {
+  display: flex;
+  justify-content: flex-end;
+  max-width: 34rem;
+  margin: var(--space-5) auto calc(var(--space-5) * -1);
+}
+
+.firstrun {
+  max-width: 34rem;
+  margin: var(--space-7) auto;
+  text-align: center;
+  background: var(--color-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+}
+
+.firstrun__title {
+  font-size: 1.4rem;
+  margin-bottom: var(--space-3);
+}
+
+.firstrun__body {
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-5);
+  line-height: 1.6;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * First-run walkthrough
+ *
+ * The spotlight is a transparent box with an enormous shadow, which dims the
+ * whole page except the element being pointed at — and passes clicks through,
+ * so action steps can be completed on the real control.
+ * ----------------------------------------------------------------------- */
+
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: none;
+}
+
+.tour__dim,
+.tour__spotlight {
+  position: fixed;
+  pointer-events: none;
+}
+
+.tour__dim {
+  inset: 0;
+  background: var(--scrim);
+}
+
+.tour__spotlight {
+  border-radius: var(--radius-md);
+  box-shadow:
+    0 0 0 9999px var(--scrim),
+    0 0 0 2px var(--color-primary);
+  transition: top 120ms ease, left 120ms ease, width 120ms ease, height 120ms ease;
+}
+
+.tour__tip {
+  position: fixed;
+  width: min(24rem, calc(100vw - 32px));
+  background: var(--color-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  pointer-events: auto;
+  box-shadow: 0 12px 32px var(--scrim);
+}
+
+.tour__progress {
+  display: flex;
+  gap: 5px;
+  margin-bottom: var(--space-4);
+}
+
+.tour__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.tour__dot--done {
+  background: color-mix(in srgb, var(--color-primary) 45%, transparent);
+}
+
+.tour__dot--current {
+  background: var(--color-primary);
+  width: 18px;
+  border-radius: 3px;
+}
+
+.tour__title {
+  font-size: 1.1rem;
+  margin-bottom: var(--space-2);
+}
+
+.tour__body {
+  color: var(--color-text-muted);
+  font-size: 0.93rem;
+  line-height: 1.55;
+  margin: 0 0 var(--space-4);
+}
+
+.tour__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* Action steps wait on the reader rather than offering a Next button. */
+.tour__waiting {
+  font-size: 0.85rem;
+  color: var(--color-accent-ink);
+  font-weight: var(--font-weight-heading);
+  text-align: right;
+}
+
+.firstrun__tour {
+  display: block;
+  margin: var(--space-4) auto 0;
+  background: none;
+  border: 0;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.firstrun__tour:hover {
+  color: var(--color-text);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Settings — the nav button, and the window it opens
+ * ----------------------------------------------------------------------- */
+
+.settings {
+  position: relative;
+}
+
+.settings__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.9rem;
+  min-height: 38px;
+}
+
+.settings__trigger:hover {
+  border-color: var(--border-strong);
+  color: var(--color-text);
+}
+
+/*
+ * One window, a rail of sections down the left, one pane beside it. The
+ * dialog itself stops scrolling — the head is pinned, and the rail and the
+ * pane scroll independently, so the list of sections never leaves the screen
+ * while you read a long one.
+ */
+.dialog--settings {
+  max-width: 54rem;
+  width: 100%;
+  height: min(85vh, 42rem);
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-window__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+}
+
+.settings-window__head .dialog__title {
+  margin: 0;
+}
+
+.settings-window__body {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-rail {
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+  padding: var(--space-3) var(--space-2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.settings-rail__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-rail__heading {
+  margin: 0 0 var(--space-1);
+  padding: 0 var(--space-3);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.settings-rail__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text);
+  min-height: 44px;
+}
+
+.settings-rail__item:hover {
+  background: var(--surface-raised);
+}
+
+/* The selected section, marked in the brand color rather than by weight
+   alone, so which one is open survives a glance. */
+.settings-rail__item--active,
+.settings-rail__item--active:hover {
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-primary);
+}
+
+.settings-rail__label {
+  font-size: 0.9rem;
+  font-weight: var(--font-weight-heading);
+}
+
+.settings-rail__hint {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  line-height: 1.3;
+}
+
+.settings-rail__item--active .settings-rail__label {
+  color: var(--color-accent-ink);
+}
+
+.settings-pane {
+  overflow-y: auto;
+  padding: var(--space-5);
+}
+
+.settings-pane__title {
+  font-size: 1.05rem;
+  margin: 0 0 var(--space-4);
+}
+
+/* The pane's own first rule would double the gap under that title. */
+.settings-pane > .dialog__rule:first-of-type {
+  margin-top: var(--space-4);
+}
+
+/* A stated fact with the control that changes it, on one line. */
+.settings-fact {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  margin: 0 0 var(--space-4);
+}
+
+.settings-fact__label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.settings-fact__value {
+  font-weight: var(--font-weight-heading);
+  margin-right: auto;
+}
+
+/*
+ * On a phone there is no room for a rail beside a pane, so the sections
+ * become a scrolling strip of chips across the top and the pane takes the
+ * whole width beneath — the list still stays visible, which is the point.
+ */
+@media (max-width: 640px) {
+  .dialog--settings {
+    /* Nearly the whole screen: the scrim keeps one gutter of padding. */
+    height: calc(100dvh - 2 * var(--space-4));
+    border-radius: var(--radius-md);
+  }
+
+  .settings-window__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-direction: row;
+    gap: var(--space-2);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: var(--space-2);
+  }
+
+  .settings-rail__group {
+    flex-direction: row;
+    gap: var(--space-2);
+  }
+
+  /* The group names are a desktop luxury; the labels carry it on a phone. */
+  .settings-rail__heading {
+    display: none;
+  }
+
+  .settings-rail__item {
+    white-space: nowrap;
+    min-height: 38px;
+    justify-content: center;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .settings-rail__item--active,
+  .settings-rail__item--active:hover {
+    box-shadow: none;
+    border-color: var(--color-primary);
+  }
+
+  .settings-rail__hint {
+    display: none;
+  }
+
+  .settings-pane {
+    padding: var(--space-4);
+  }
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Sign-in settings — mode choice, invite list, Google button on the gate
+ * ----------------------------------------------------------------------- */
+
+.dialog--wide {
+  max-width: 34rem;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.dialog__rule {
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  margin: var(--space-5) 0;
+}
+
+/* A heading and the status beside it sit on one line, and wrap together on a
+   phone rather than the status dropping out of reach. */
+.dialog__section {
+  font-size: 0.95rem;
+  margin: 0 0 var(--space-2);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dialog__body--muted {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.choice {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.choice__option,
+.checkbox {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.choice__option:hover,
+.checkbox:hover {
+  border-color: var(--color-primary);
+}
+
+.choice__option input,
+.checkbox input {
+  margin-top: 0.2rem;
+  accent-color: var(--color-primary);
+}
+
+.choice__label {
+  display: block;
+  font-weight: var(--weight-heading);
+}
+
+.choice__hint {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin-top: 0.15rem;
+}
+
+.checkbox {
+  margin-top: var(--space-4);
+}
+
+.emails {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+/*
+ * A row is one thing and the actions on it. `space-between` used to spread
+ * three children across the full width, which left Rename stranded in the
+ * middle of the row looking like a caption rather than a control — so the
+ * label takes the slack and the buttons stay paired at the right edge.
+ */
+.emails__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-background);
+  border-radius: var(--radius-md);
+}
+
+.emails__address {
+  font-size: 0.9rem;
+  word-break: break-all;
+  margin-right: auto;
+  min-width: 0;
+}
+
+/* The rename box, when a row is being edited, should fill the row rather than
+   sit at its natural input width with the buttons far off to the right. */
+.emails__row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.emails__add {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.emails__add .input {
+  flex: 1;
+  min-width: 0;
+}
+
+
+/* The Google button is rendered by Google's own script, so this only positions
+   it and the messages around it. */
+.gate__google {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.gate__hint {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.gate__alt {
+  margin-top: var(--space-5);
+  text-align: left;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-4);
+}
+
+.gate__alt summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.gate__alt summary:hover {
+  color: var(--color-accent-ink);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Sign-in settings: blocked option, folded setup, banner error
+ * ----------------------------------------------------------------------- */
+
+.field__error--banner {
+  background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.choice__option--blocked {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+.choice__option--blocked:hover {
+  border-color: var(--border-subtle);
+}
+
+.choice__blocker {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--color-accent-ink);
+}
+
+.disclose {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.disclose__summary {
+  cursor: pointer;
+  font-weight: var(--weight-heading);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/*
+ * The status beside a section heading — "connected", or which token is in
+ * place. It is a separate thought from the heading, so it needs its own space:
+ * without this it rendered as "Slackxoxb-…nJ0B", which reads as a glitch
+ * rather than as a connected account.
+ */
+.disclose__state {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin-left: var(--space-3);
+  padding: 0.1rem var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  white-space: nowrap;
+}
+
+
+.disclose[open] .disclose__summary {
+  margin-bottom: var(--space-3);
+}
+
+/* Tour progress: a count and a bar, rather than a row of dots that got
+   unreadable once the tour grew past a handful of steps. */
+.tour__count {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tour__bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-subtle);
+  margin-top: var(--space-2);
+  overflow: hidden;
+}
+
+.tour__bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 200ms ease;
+}
+
+/* A long step on a short screen scrolls inside the tip rather than growing
+   past the bottom of the window. */
+.tour__tip {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+
+/* Getting back to the list after choosing to type a name instead. The arrow
+   keeps the button's own padding — zeroing the left edge pinned it against
+   the border and read as a mistake. */
+.owner__back {
+  align-self: flex-start;
+  margin-top: var(--space-1);
+}
+
+/* How many events use a type, beside its name in Settings. */
+.types__usage {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  margin-top: 0.1rem;
+}
+
+
+/* A single-color logo painted through a CSS mask, so the file supplies the
+   shape and the page supplies the color. */
+.logo--tinted {
+  display: inline-block;
+  background-color: currentColor;
+}
+
+/* A full-color logo in a fixed square slot. Without object-fit the browser
+   stretches it to the box and the mark comes out crushed. */
+.logo--raster {
+  object-fit: contain;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Squaring a logo up on upload
+ * ----------------------------------------------------------------------- */
+
+.cropper {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--space-4);
+}
+
+/* The chequerboard is the usual way of saying "this part is transparent", and
+   it is the difference between a mark with no background and one with a white
+   box behind it — which is the mistake this dialog exists to catch. */
+.cropper__canvas {
+  width: 260px;
+  height: 260px;
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  cursor: grab;
+  touch-action: none;
+  background-color: var(--color-surface);
+  background-image:
+    linear-gradient(45deg, var(--surface-raised) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--surface-raised) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--surface-raised) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--surface-raised) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+
+.cropper__canvas:active {
+  cursor: grabbing;
+}
+
+.cropper__zoom {
+  width: 100%;
+  accent-color: var(--color-primary);
+}
+
+.cropper__option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-4);
+  font-size: 0.9rem;
+}
+
+.cropper__option input {
+  margin-top: 0.2rem;
+  accent-color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.cropper__option-hint {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Slack settings: the channel map, reminder timing, confirmation note
+ * ----------------------------------------------------------------------- */
+
+.slack-map {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.slack-map__row {
+  display: grid;
+  /* The label column is fixed so the four pickers line up as one list rather
+     than stepping in and out with the width of "Organic" versus "SMS". */
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.slack-map__label {
+  font-weight: var(--font-weight-heading);
+  font-size: 0.9rem;
+}
+
+/* A mapping somebody may read but not change. */
+.slack-map__fixed {
+  font-size: 0.9rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.slack-map__unmapped {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.slack-timing {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+.slack-timing .field {
+  flex: 1 1 10rem;
+}
+
+/* Success is quieter than failure: it confirms and gets out of the way. */
+.dialog__note {
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 520px) {
+  .slack-map__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .slack-map__label {
+    grid-column: 1 / -1;
+  }
+}
+
+/* The assets link on a card: quiet, but a real link. It sits in the footer so
+   it reads as a fact about the event rather than a call to action. */
+.card__assets {
+  color: var(--color-accent-ink);
+  font-size: 0.8rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.card__assets:hover {
+  text-decoration: underline;
+}
+
+/* The Slack queue line: a count and, when there is something to send, a button. */
+.slack-queue {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.slack-queue .button {
+  min-height: 32px;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Offline screen (served by the service worker when there is no connection)
+ * ----------------------------------------------------------------------- */
+
+.offline {
+  max-width: 28rem;
+  margin: 10vh auto 0;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.offline__title {
+  font-size: 1.5rem;
+}
+
+.offline__body {
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * "Add to your phone" guide
+ * ----------------------------------------------------------------------- */
+
+.install__steps {
+  margin: 0 0 var(--space-4);
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+}
+
+.install__steps li::marker {
+  color: var(--color-accent-ink);
+  font-weight: var(--font-weight-heading);
+}
+
+.install__device {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.install__device:first-of-type {
+  margin-top: 0;
+}
+
+.install__note {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.install__tab {
+  display: flex;
+  width: 100%;
+  margin-bottom: var(--space-4);
+}
+
+.install__tab .segmented__option {
+  flex: 1 1 0;
+  white-space: nowrap;
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+/* Already on the home screen: a thank-you, not instructions. */
+.install__done {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 0.9rem;
+  margin: 0 0 var(--space-4);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Board switcher — the brand name as a menu, for people on several boards
+ * ----------------------------------------------------------------------- */
+
+.switcher {
+  position: relative;
+}
+
+.switcher__trigger {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.switcher__caret {
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+  margin-left: var(--space-1);
+}
+
+.switcher__list {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 8px);
+  z-index: 60;
+  min-width: 14rem;
+  background: var(--color-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.switcher__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--color-text);
+  font-size: 0.9rem;
+  min-height: 40px;
+}
+
+a.switcher__item:hover {
+  background: var(--surface-raised);
+}
+
+.switcher__item--current {
+  color: var(--color-text-muted);
+}
+
+.switcher__check {
+  color: var(--color-accent-ink);
+  font-weight: var(--font-weight-heading);
+}
+
+/* Settings → Other boards */
+
+.boards {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.boards__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunken);
+}
+
+.boards__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.boards__label {
+  font-weight: var(--font-weight-heading);
+  font-size: 0.9rem;
+}
+
+.boards__url,
+.boards__who {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * The hub's own screens: front door and Clients (admin)
+ * These render outside any brand, in the default palette.
+ * ----------------------------------------------------------------------- */
+
+.door {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.door__panel {
+  width: min(24rem, 100%);
+  background: var(--color-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-7) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.door__panel--wide {
+  width: min(40rem, 100%);
+}
+
+.door__title {
+  font-size: 1.4rem;
+}
+
+.door__sub {
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.door__note {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.door__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--space-3);
+}
+
+.door__card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  text-decoration: none;
+  color: var(--color-text);
+  background: var(--surface-raised);
+}
+
+.door__card:hover {
+  border-color: var(--border-strong);
+}
+
+.door__swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+
+.door__swatch--admin {
+  background:
+    linear-gradient(135deg, var(--color-primary) 50%, var(--color-text-muted) 50%);
+}
+
+.door__name {
+  font-weight: var(--font-weight-heading);
+  font-size: 0.95rem;
+}
+
+.admin {
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-8);
+}
+
+.admin__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+  flex-wrap: wrap;
+}
+
+.admin__title {
+  font-size: 1.5rem;
+}
+
+.admin__top-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.admin__empty {
+  color: var(--color-text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-7);
+  text-align: center;
+}
+
+.admin__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+  gap: var(--space-4);
+}
+
+.client-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.client-card__bar {
+  height: 6px;
+}
+
+.client-card__body {
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.client-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.client-card__name {
+  font-size: 1.05rem;
+}
+
+.client-card__url {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.client-card__pw {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-sunken);
+}
+
+.client-card__pw code {
+  color: var(--color-accent-ink);
+  font-weight: var(--font-weight-heading);
+}
+
+.client-card__label {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.client-card__none {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.client-card__members {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 2px var(--space-2) 2px var(--space-3);
+  font-size: 0.8rem;
+  align-self: flex-start;
+}
+
+.member-chip button {
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.member-add {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.member-add .input {
+  flex: 1;
+}
+
+/* Real buttons, spaced, with the irreversible one pushed to the far end. */
+.client-card__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.client-card__delete {
+  margin-left: auto;
+}
+
+/* The name to retype, shown exactly as it is stored — an instruction to copy
+   must not be uppercased by the stylesheet the way .field__label would. */
+.confirm-name {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.confirm-name strong {
+  color: var(--color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.palette-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.palette-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.palette-pick input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  padding: 2px;
+}
+
+.palette-preview {
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.palette-preview__chip {
+  font-size: 0.75rem;
+  border-radius: 999px;
+  padding: 3px var(--space-3);
+}
+
+.switcher__item--admin {
+  border-top: 1px solid var(--border-subtle);
+  color: var(--color-accent-ink);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Clients screen, take two: roomier cards, real controls
+ * ----------------------------------------------------------------------- */
+
+.admin__sub {
+  color: var(--color-text-muted);
+  margin: var(--space-2) 0 0;
+  font-size: 0.95rem;
+  max-width: 40ch;
+}
+
+.admin__grid {
+  gap: var(--space-5);
+}
+
+.client-card__body {
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  gap: var(--space-5);
+}
+
+.client-card__head {
+  align-items: flex-start;
+}
+
+/* A card this narrow cannot hold a name and a button on one line without
+   something losing — the button breaking in half, or the event count being
+   trimmed away. So the row is allowed to wrap: the button drops underneath
+   when there is no room, and nothing is hidden. */
+.client-card__head {
+  flex-wrap: wrap;
+}
+
+.client-card__head .button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.client-card__id {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.client-card__id > div {
+  min-width: 0;
+}
+
+.client-card__url {
+  font-size: 0.78rem;
+}
+
+.client-card__name {
+  overflow-wrap: anywhere;
+}
+
+.client-card__name {
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+}
+
+.client-card__url {
+  margin-top: var(--space-1);
+}
+
+.client-card__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.client-card__label {
+  margin-bottom: 0;
+}
+
+.member-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.member-chip {
+  align-self: auto;
+  background: var(--surface-sunken);
+}
+
+.client-card__foot {
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.field-group {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field-group legend {
+  padding: 0;
+  margin-bottom: var(--space-1);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Color picking
+ * ----------------------------------------------------------------------- */
+
+.colorfield__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-4);
+}
+
+.colorfield {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.colorfield__label {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-heading);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.colorfield__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.colorfield__swatch {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  box-shadow: inset 0 0 0 2px var(--color-surface);
+}
+
+/* The OS color dialog is opened by the swatch; the input itself never shows. */
+.colorfield__native {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.colorfield__hex {
+  min-height: 44px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  text-transform: lowercase;
+  min-width: 0;
+}
+
+.colorfield__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.colorfield__preset {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  padding: 0;
+}
+
+.colorfield__preset--on {
+  box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-primary);
+}
+
+.colorfield__hint {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Brand preview + file picker
+ * ----------------------------------------------------------------------- */
+
+.brand-preview {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.brand-preview__label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.brand-preview__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 1.05rem;
+}
+
+.brand-preview__mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.brand-preview__row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.brand-preview__chip {
+  font-size: 0.78rem;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 4px var(--space-3);
+}
+
+.brand-preview__chip--solid {
+  border-color: transparent;
+  font-weight: var(--font-weight-heading);
+}
+
+/* The preview, the picker and the undo, on one line. */
+.filepick {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+
+.filepick__main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.filepick__name {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The real input is driven by the button beside it. */
+.filepick__input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * The brand switcher should look like a control, not a title
+ * ----------------------------------------------------------------------- */
+
+.switcher__trigger {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface);
+}
+
+.switcher__trigger:hover {
+  background: var(--surface-raised);
+  border-color: var(--border-strong);
+}
+
+.switcher__caret {
+  font-size: 0.65rem;
+  margin-left: var(--space-2);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * A brand's mark on its own color — used on the front door and Clients, so
+ * a client is found by color before the name is read.
+ * ----------------------------------------------------------------------- */
+
+.brandmark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
+.brandmark svg {
+  width: 60%;
+  height: 60%;
+  display: block;
+}
+
+/* No accent behind a raster: see BrandMark. A white-backed PNG has to be able
+   to sit flush rather than as a pale rectangle inside a colored square. */
+.brandmark--raster {
+  background: var(--color-surface);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.brandmark--raster img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Front door: the same cards, given some air and a reason to look at them.
+ * The faint grid is the sign-in screen's, so the two read as one product.
+ * ----------------------------------------------------------------------- */
+
+.door {
+  position: relative;
+  overflow: hidden;
+}
+
+.door::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--border-subtle) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border-subtle) 1px, transparent 1px);
+  background-size: 96px 64px;
+  mask-image: radial-gradient(70% 60% at 50% 45%, black 20%, transparent 100%);
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 45%, black 20%, transparent 100%);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.door__panel {
+  position: relative;
+}
+
+.door__title {
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.door__grid {
+  gap: var(--space-3);
+}
+
+.door__card {
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  transition:
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.door__card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px -12px var(--color-scrim);
+}
+
+.door__card--admin {
+  background: var(--surface-sunken);
+}
+
+.door__swatch--admin {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(135deg, var(--color-primary) 50%, var(--color-text-muted) 50%);
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Clients: cards as they were, with the client's own color leading the card
+ * instead of a plain bar.
+ * ----------------------------------------------------------------------- */
+
+.client-card {
+  transition:
+    border-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.client-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 6px 20px -14px var(--color-scrim);
+}
+
+.client-card__head {
+  gap: var(--space-3);
+}
+
+.client-card__id {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .door__card,
+  .client-card {
+    transition: none;
+  }
+
+  .door__card:hover {
+    transform: none;
+  }
+}
+
+
+
+
+
+
+
+/* --------------------------------------------------------------------------
+ * Legacy tweaks: the surfaces kept from before, nudged onto the new tokens
+ * ----------------------------------------------------------------------- */
+
+.switcher__list {
+  box-shadow: var(--shadow-2);
+  border: 0;
+  border-radius: var(--radius-md);
+}
+
+.settings__trigger {
+  display: none;
+}
+
+.recent__item,
+.log-item {
+  border-left: 2px solid var(--line-2);
+}
+
+.log-day__title {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  font-weight: 500;
+}
+
+.firstrun {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.settings-rail__item--active,
+.settings-rail__item--active:hover {
+  background: var(--accent-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.emails__row {
+  background: var(--surface-2);
+}
+
+/* --------------------------------------------------------------------------
+ * Touch: hover-only affordances do not exist on a phone
+ * ----------------------------------------------------------------------- */
+
+@media (pointer: coarse) {
+  .day__add {
+    opacity: 0.5;
+  }
+
+  .pill-menu {
+    height: 30px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Tablet: the bar keeps its tabs, the toolbar starts to wrap
+ * ----------------------------------------------------------------------- */
+
+@media (max-width: 1040px) {
+  .topbar {
+    grid-template-columns: auto auto 1fr;
+  }
+
+  .topbar__product {
+    display: none;
+  }
+
+  .who__name {
+    display: none;
+  }
+
+  .who {
+    padding-right: 4px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Phone: app chrome, not a shrunken website
+ *
+ * The views move to a bottom tab bar, the primary action becomes a floating
+ * button, the calendar defaults to its agenda, the board columns swipe, and
+ * every sheet takes the whole screen. This block stays at the VERY END of
+ * the stylesheet on purpose: media queries add no specificity, so placed
+ * earlier they silently lose to later base rules.
+ * ----------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  body {
+    font-size: 15px;
+  }
+
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-left: var(--space-4);
+    padding-right: var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .topbar__tabs {
+    display: none;
+  }
+
+  .topbar__right .button--primary,
+  .topbar__right .conn,
+  .conn--connecting {
+    display: none;
+  }
+
+  .main {
+    padding: var(--space-4) var(--space-4) calc(var(--tabbar-h) + 84px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-fab);
+    display: flex;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .tabbar__item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: 48px;
+    padding: 4px 2px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: none;
+    font-size: 0.66rem;
+    font-weight: 500;
+    color: var(--ink-3);
+    text-decoration: none;
+  }
+
+  .tabbar__item svg {
+    width: 22px;
+    height: 22px;
+    flex: none;
+  }
+
+  .tabbar__item--active {
+    color: var(--accent-ink);
+  }
+
+  .fab {
+    position: fixed;
+    right: var(--space-4);
+    bottom: calc(var(--tabbar-h) + var(--space-4) + env(safe-area-inset-bottom, 0px));
+    z-index: var(--z-fab);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 54px;
+    height: 54px;
+    border-radius: 999px;
+    border: 0;
+    background: var(--accent);
+    color: var(--accent-text);
+    box-shadow: 0 10px 24px -8px color-mix(in oklab, var(--accent) 70%, var(--ink));
+    transition: transform var(--t-fast) var(--ease-out);
+  }
+
+  .fab:active {
+    transform: scale(0.96);
+  }
+
+  .fab svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .toolbar {
+    gap: var(--space-2);
+  }
+
+  .toolbar__lead {
+    width: 100%;
+    order: -2;
+    margin: 0;
+  }
+
+  .toolbar__title {
+    font-size: 1.2rem;
+  }
+
+  .toolbar__nav {
+    order: -1;
+  }
+
+  .toolbar__spacer {
+    display: none;
+  }
+
+  .toolbar__group {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .segmented {
+    flex: 1;
+  }
+
+  .segmented__option {
+    flex: 1;
+    padding: 0 6px;
+  }
+
+  .filters {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    margin: 0 calc(-1 * var(--space-4));
+    padding: 0 var(--space-4);
+  }
+
+  .filters::-webkit-scrollbar {
+    display: none;
+  }
+
+  .filters__chips {
+    flex-wrap: nowrap;
+  }
+
+  .filters__note {
+    display: none;
+  }
+
+  .cal__weekday {
+    padding: 6px 4px;
+    font-size: 0.62rem;
+    text-align: center;
+  }
+
+  .day {
+    padding: 4px 4px 2px;
+    justify-content: center;
+  }
+
+  .day__add {
+    display: none;
+  }
+
+  .cal-week__lanes {
+    padding: 2px 2px 6px;
+  }
+
+  .evt {
+    padding: 0 4px;
+    height: 20px;
+    font-size: 0.7rem;
+  }
+
+  .evt--launch-first {
+    padding-left: 14px;
+  }
+
+  .cal--week .evt {
+    height: 24px;
+  }
+
+  .agenda__day {
+    grid-template-columns: 3.75rem minmax(0, 1fr);
+  }
+
+  /* Board columns swipe one at a time and take most of the width. */
+  .board {
+    scroll-snap-type: x mandatory;
+    margin: 0 calc(-1 * var(--space-4));
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+    gap: var(--space-2);
+  }
+
+  .col {
+    flex-basis: 84vw;
+    width: 84vw;
+    scroll-snap-align: start;
+    max-height: calc(100dvh - var(--topbar-h) - var(--tabbar-h) - 150px);
+  }
+
+  .bcard[draggable="true"] {
+    cursor: default;
+  }
+
+  /* The sheet takes the whole screen; its footer sits above the home bar. */
+  .sheet {
+    max-width: none;
+  }
+
+  .field-row,
+  .date-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Dialogs arrive as bottom sheets. */
+  .scrim:not(.scrim--right) {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .scrim:not(.scrim--right) .dialog {
+    max-width: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    max-height: 92dvh;
+    overflow-y: auto;
+    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  }
+
+  .scrim:not(.scrim--right) .dialog--settings {
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    height: calc(100dvh - var(--space-7));
+    max-height: none;
+    overflow-y: hidden;
+    padding-bottom: var(--space-4);
+  }
+
+  .toast {
+    bottom: calc(var(--tabbar-h) + var(--space-3) + env(safe-area-inset-bottom, 0px));
+  }
+
+  .tour__tip {
+    margin-bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .menu__list {
+    min-width: 13rem;
+  }
+}
+
+/* A dialog floats over the page; the page must not scroll under it. */
+body:has(.scrim) {
+  overflow: hidden;
+}
+
+.scrim {
+  overscroll-behavior: contain;
+}
+
+/* The Producer's button: bottom right, above the phone tab bar. */
+.ask-producer-fab{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:50;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:#111;color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+.ask-producer-fab:hover{background:#000}
+@media (max-width: 760px){.ask-producer-fab{bottom:calc(76px + env(safe-area-inset-bottom));padding:10px}.ask-producer-fab span{display:none}}
+@media print{.ask-producer-fab{display:none}}
