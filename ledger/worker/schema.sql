@@ -1,0 +1,79 @@
+-- Mobius Ledger — D1 schema (idempotent; re-run after adding tables)
+-- npx wrangler d1 execute mobius-ledger --remote --file=schema.sql
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,                    -- YYYY-MM-DD
+  month TEXT NOT NULL,                   -- YYYY-MM, denormalized for month queries
+  type TEXT NOT NULL,                    -- 'in' (revenue) | 'out' (expense) | 'fee' (merchant fee)
+  vendor TEXT NOT NULL,                  -- vendor name, or client name for money in
+  amount REAL NOT NULL,                  -- positive; refunds are negative 'in' rows
+  bucket TEXT,                           -- Cole's layer: Software/Contractors/Payroll/Ads-Marketing/Other/Revenue/Merchant fee
+  tax_cat TEXT,                          -- CPA layer, from settings.taxCats
+  note TEXT,
+  one_time INTEGER DEFAULT 0,            -- excluded from the recurring baseline/forecast
+  expected INTEGER DEFAULT 0,            -- pre-created by the recurring engine, awaiting confirm
+  status TEXT DEFAULT 'ok',              -- 'ok' | 'review' (Review inbox)
+  receipt_key TEXT,                      -- KV key of the attached receipt file
+  receipt_name TEXT,
+  receipt_type TEXT,                     -- MIME type of the stored file
+  receipt_hash TEXT,                     -- SHA-256 of the file: the only certain "same receipt twice" test
+  receipt_skip INTEGER NOT NULL DEFAULT 0, -- acknowledged "no receipt exists" — stops the missing count/nudges
+  -- (vendors.billing_url holds the deep link for vendors that never email one)
+  source TEXT DEFAULT 'manual',          -- manual | recurring | import | backfill | stripe
+  created_at TEXT DEFAULT (datetime('now')),
+  stripe_id TEXT,                        -- Stripe charge/refund id — sync dedupe key
+  stripe_cus TEXT,                       -- Stripe customer id, for the learn-the-mapping flow
+  fee REAL,                              -- Stripe fee on this charge; monthly fee row = SUM(fee)
+  plaid_id TEXT                          -- Plaid transaction id — bank-feed dedupe key
+);
+CREATE INDEX IF NOT EXISTS idx_txn_month ON transactions(month);
+CREATE INDEX IF NOT EXISTS idx_txn_vendor ON transactions(vendor);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_txn_stripe ON transactions(stripe_id) WHERE stripe_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_txn_plaid ON transactions(plaid_id) WHERE plaid_id IS NOT NULL;
+
+-- Vendor rules: one row per known vendor (recurring AND one-off — the rule IS
+-- the categorization, a known vendor never asks again). recurring=1 rows are
+-- pre-created by the engine: cadence 'monthly' every month, 'yearly' only in
+-- renew_month (1–12) — domains, Amex, annual plans.
+CREATE TABLE IF NOT EXISTS vendors (
+  name TEXT PRIMARY KEY,
+  bucket TEXT NOT NULL,
+  tax_cat TEXT NOT NULL,
+  recurring INTEGER DEFAULT 0,
+  expected_amount REAL,
+  active INTEGER DEFAULT 1,
+  cadence TEXT DEFAULT 'monthly',
+  renew_month INTEGER,
+  -- Where to fetch an invoice by hand. Some vendors never email one; the link
+  -- to their billing page rides along with the month-end missing-receipt nudge
+  -- so collecting it is a click rather than a hunt.
+  billing_url TEXT
+);
+
+-- Clients. billing 'retainer' = fixed monthly amount; 'percent' = % of ad
+-- spend, so the amount varies — retainer then holds the ESTIMATE (forecast +
+-- the pre-created expected row, which Cole overwrites with the actual when
+-- invoicing) and pct records the agreed percentage. active=0 keeps history
+-- but stops expecting money.
+CREATE TABLE IF NOT EXISTS clients (
+  name TEXT PRIMARY KEY,
+  retainer REAL,
+  active INTEGER DEFAULT 1,
+  billing TEXT DEFAULT 'retainer',
+  pct REAL
+);
+
+-- Month close state. A closed month's report card is FROZEN in report_json —
+-- edits to old transactions never silently change a report Cole already used.
+CREATE TABLE IF NOT EXISTS months (
+  month TEXT PRIMARY KEY,                -- YYYY-MM
+  status TEXT DEFAULT 'open',            -- 'open' | 'closed'
+  closed_at TEXT,
+  report_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);

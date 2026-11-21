@@ -1,0 +1,4415 @@
+/**
+ * Mobius Ledger — money in / money out for Mobius Digital (Cloudflare Workers)
+ *
+ * Phase 1, manual mode: the ledger, vendor rules, the recurring engine,
+ * receipts (KV), month close with frozen report cards, and the CPA pack.
+ * No external connectors yet — Stripe/bank sync is Phase 3, by design.
+ *
+ * Bindings (wrangler.toml): DB (D1), RECEIPTS (KV)
+ * Secrets: ADMIN_TOKEN (master key), ANTHROPIC_API_KEY (optional receipt reading)
+ *
+ * Auth: Mobius Google sessions are verified by DELEGATING to the
+ * mobius-account-health worker's /api/me (it owns SESSION_SECRET; this worker
+ * deliberately has no copy — one secret, one owner). ADMIN_TOKEN and the
+ * dashboard-set password work as fallbacks, same shape as Pulse/Restock.
+ */
+import { buildPnlPdf, buildPnlColumnsPdf } from './pdf.js';
+import { zipStream, zipSafe } from './zip.js';
+import { buildController, applyAskEdit } from './controller.js';
+import { driveReady, driveAuthUrl, driveExchangeCode, driveListReceipts,
+         driveDownload, driveFolderId } from './drive.js';
+import { gmailAuthUrl, gmailSearch, gmailMessage, gmailAttachment, gmailDay,
+         amountTerms, vendorWord } from './gmail.js';
+
+const AUTH_WORKER = 'https://mobius-account-health.mobius-digital.workers.dev';
+const RECEIPT_MAX = 4 * 1024 * 1024; // 4MB post-downscale ceiling per file
+
+const BUCKETS_OUT = ['Software', 'Contractors', 'Payroll', 'Ads/Marketing', 'Other'];
+
+/* ------------------------------------------------------------------ */
+/*  helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+  // the app names downloads from this; without it the browser hides the header
+  'Access-Control-Expose-Headers': 'Content-Disposition',
+};
+const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+  status, headers: { 'Content-Type': 'application/json', ...CORS },
+});
+
+/* A receipt's fingerprint. Two dates can never prove "same receipt" - a card
+ * posts days after the purchase, and a subscription bills the identical
+ * amount every month - but the bytes can: the same file is the same file.
+ * Stored on attach so a re-forward is recognised with certainty, not a guess. */
+async function sha256bytes(buf) {
+  const d = await crypto.subtle.digest('SHA-256', buf instanceof ArrayBuffer ? buf : new Uint8Array(buf).buffer);
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/* Session check goes over the AUTH service binding — a Worker cannot fetch
+ * another Worker's *.workers.dev URL on the same account (the public-URL
+ * version of this failed closed and locked everyone out on day one).
+ * Verdicts cache per isolate: passes 10 min, failures 60s so a transient
+ * error can't lock the door for long. */
+const sessCache = new Map();
+async function validSession(env, tok) {
+  if (!/^mds\./.test(tok || '')) return false;
+  const cacheKey = (env.LEDGER_ALLOWED_EMAILS || env.OWNER_EMAIL || '') + ':' + tok;
+  const hit = sessCache.get(cacheKey);
+  if (hit && hit.until > Date.now()) return hit.ok;
+  let ok = false;
+  try {
+    const req = new Request(AUTH_WORKER + '/api/me', { headers: { Authorization: 'Bearer ' + tok } });
+    const r = env.AUTH ? await env.AUTH.fetch(req) : await fetch(req);
+    const j = await r.json();
+    const allowed = String(env.LEDGER_ALLOWED_EMAILS || env.OWNER_EMAIL || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
+    ok = r.ok && typeof j.email === 'string' && allowed.includes(j.email.toLowerCase());
+  } catch (e) { /* auth worker unreachable — fail closed */ }
+  sessCache.set(cacheKey, { ok, until: Date.now() + (ok ? 10 * 60e3 : 60e3) });
+  return ok;
+}
+
+/* The owner, and only the owner, is shown a feature hand-off (a prompt for
+   Claude Code). ADMIN_TOKEN counts as the owner; a session counts when it is
+   the owner's email. */
+async function isOwner(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  const tok = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!tok) return false;
+  if (env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) return true;
+  try {
+    const r = await fetch(new Request(AUTH_WORKER + '/api/me', { headers: { Authorization: 'Bearer ' + tok } }));
+    const j = await r.json().catch(() => ({}));
+    return r.ok && String(j.email || '').toLowerCase() === String(env.OWNER_EMAIL || 'cole@go-mobius-digital.com').toLowerCase();
+  } catch (e) { return false; }
+}
+async function isAdmin(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  if (!auth.startsWith('Bearer ')) return false;
+  const tok = auth.slice(7);
+  if (env.ADMIN_TOKEN && tok === env.ADMIN_TOKEN) return true;
+  if (await validSession(env, tok)) return true;
+  return false; // Recovery uses ADMIN_TOKEN; legacy unsalted passwords are disabled.
+}
+
+// Every mutation in a leased job atomically checks its fencing token in the same D1 batch.
+async function withLedgerLease(env, name, fn) {
+  const base=env._ledgerRawDB || env.DB, owner=crypto.randomUUID(), ttl=10*60e3;
+  const lock=await base.prepare(`INSERT INTO ledger_leases(name,owner,expires) VALUES(?1,?2,?3)
+    ON CONFLICT(name) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE ledger_leases.expires < ?4`)
+    .bind(name,owner,Date.now()+ttl,Date.now()).run();
+  if (!lock.meta.changes) return { skipped: 'another ' + name + ' run in progress' };
+  const fence=()=>base.prepare(`INSERT OR REPLACE INTO ledger_fence_guard(id,valid)
+    SELECT 1,EXISTS(SELECT 1 FROM ledger_leases WHERE name=?1 AND owner=?2 AND expires>=?3)`).bind(name,owner,Date.now());
+  const guards=[...(env._ledgerFences || []),fence];
+  const db={ prepare(sql) {
+    let stmt=base.prepare(sql);
+    return { _ledgerStatement:()=>stmt, bind(...args){stmt=stmt.bind(...args);return this;}, first(...args){return stmt.first(...args);}, all(){return stmt.all();},
+      async run(){const r=await base.batch([...guards.map(f=>f()),stmt]);return r[r.length-1];} };
+  }, async batch(stmts){const r=await base.batch([...guards.map(f=>f()),...stmts.map(s=>s._ledgerStatement?s._ledgerStatement():s)]);return r.slice(guards.length);} };
+  try { return await fn({...env,DB:db,_ledgerRawDB:base,_ledgerFences:guards}); }
+  finally { await base.prepare('DELETE FROM ledger_leases WHERE name=?1 AND owner=?2').bind(name,owner).run(); }
+}
+async function saveJob(env,id,kind,payload,error=null) {
+  await env.DB.prepare(`INSERT INTO ledger_jobs(id,kind,payload,error) VALUES(?1,?2,?3,?4)
+    ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,error=excluded.error,status='pending',updated_at=CURRENT_TIMESTAMP`)
+    .bind(id,kind,JSON.stringify(payload),error).run();
+}
+async function finishJob(env,id) { await env.DB.prepare("UPDATE ledger_jobs SET status='done',error=NULL WHERE id=?1").bind(id).run(); }
+
+/* The three editions the front end knows (ledger/lg-edition.js). */
+const EDITIONS = ['service', 'product', 'household'];
+async function getSetting(env, key) {
+  const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?1').bind(key).first();
+  return row ? row.value : null;
+}
+const putSetting = (env, key, value) =>
+  env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)').bind(key, value).run();
+
+const safeJson = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
+
+const DEFAULT_MONEY = { taxPct: 30, distPct: 0, split: { personal: 50, tax: 30, ads: 10, savings: 5, other: 5 }, feePct: 2.93 };
+async function getMoney(env) {
+  return { ...DEFAULT_MONEY, ...safeJson(await getSetting(env, 'money'), {}) };
+}
+
+/* Trailing average of each client's last 3 confirmed months of revenue —
+ * what a "retainer + % of ad spend" client's next invoice most plausibly is. */
+async function recentRevenueAvg(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT vendor, month, SUM(amount) AS amt FROM transactions
+     WHERE type = 'in' AND expected = 0 GROUP BY vendor, month ORDER BY month DESC`).all();
+  const by = {};
+  for (const r of results) { const a = (by[r.vendor] ||= []); if (a.length < 3) a.push(r.amt); }
+  return Object.fromEntries(Object.entries(by).map(([k, a]) =>
+    [k, Math.round(a.reduce((s, v) => s + v, 0) / a.length * 100) / 100]));
+}
+
+const fmtMoney = n => '$' + Math.abs(Number(n) || 0).toFixed(2);
+const monthOf = date => String(date).slice(0, 7);
+const validMonth = m => /^\d{4}-\d{2}$/.test(m || '');
+const round2 = n => Math.round(n * 100) / 100;
+
+async function monthStatus(env, month) {
+  const row = await env.DB.prepare('SELECT status FROM months WHERE month = ?1').bind(month).first();
+  return row?.status || 'open';
+}
+
+/* ------------------------------------------------------------------ */
+/*  report math (the sheet's own formulas, verified against Jan–Jul)   */
+/* ------------------------------------------------------------------ */
+
+async function computeReport(env, month) {
+  const money = await getMoney(env);
+  const { results: txns } = await env.DB.prepare(
+    'SELECT * FROM transactions WHERE month = ?1 AND expected = 0 ORDER BY date, id'
+  ).bind(month).all();
+
+  let revenue = 0, fees = 0, expenses = 0, transfers = 0, personal = 0, incomeTax = 0;
+  const byBucket = {}, byTax = {}, byClient = {};
+  for (const t of txns) {
+    // transfers are money MOVING, not money made or spent: the Amex payment
+    // from Novo, Stripe payouts landing, the 50/30/10/5/5 moves — counting
+    // them would double every dollar that already counted as a charge
+    if (t.type === 'transfer') { transfers += t.amount; continue; }
+    if (t.type === 'in') { revenue += t.amount; byClient[t.vendor] = (byClient[t.vendor] || 0) + t.amount; }
+    else if (t.type === 'fee') fees += t.amount;
+    // a personal purchase on a business card is an owner draw, not a business
+    // expense — kept in the ledger so it still ties to the bank statement,
+    // excluded from the P&L so it never inflates costs
+    else if (/^Personal/i.test(t.tax_cat || '')) personal += t.amount;
+    /* Same treatment, different reason: a real payment, visible in the books,
+     * kept out of the deductible total because the IRS does not allow it. */
+    else if (/^Income tax/i.test(t.tax_cat || '')) incomeTax += t.amount;
+    else {
+      expenses += t.amount;
+      byBucket[t.bucket || 'Other'] = (byBucket[t.bucket || 'Other'] || 0) + t.amount;
+      byTax[t.tax_cat || 'Uncategorized'] = (byTax[t.tax_cat || 'Uncategorized'] || 0) + t.amount;
+    }
+  }
+  /* Fees are whatever Stripe actually charged — never a percentage guess. The
+   * real number varies far too much to model anyway: August ran 1.1% because
+   * the two largest payments arrived by ACH at $5 flat instead of 2.9% on a
+   * card. A month with no fee row reports zero, which is the truth. */
+  const feeEstimated = false;
+
+  const net = round2(revenue - expenses - fees);
+  const taxes = round2(net * money.taxPct / 100);
+  const dist = round2(net * money.distPct / 100);
+  const profit = round2(net - taxes - dist);
+  const split = {};
+  for (const [k, pct] of Object.entries(money.split)) split[k] = round2(net * pct / 100);
+  const opCost = round2((byBucket['Software'] || 0) + (byBucket['Contractors'] || 0) + (byBucket['Payroll'] || 0));
+
+  return {
+    month, generatedAt: new Date().toISOString(),
+    revenue: round2(revenue), expenses: round2(expenses), fees: round2(fees), feeEstimated,
+    net, taxes, distributions: dist, profit,
+    margin: revenue > 0 ? round2(net / revenue * 100) : null,
+    transfers: round2(transfers), personal: round2(personal), incomeTax: round2(incomeTax),
+    opCost, split, splitPct: money.split, taxPct: money.taxPct, distPct: money.distPct,
+    byBucket: mapRound(byBucket), byTax: mapRound(byTax), byClient: mapRound(byClient),
+    policyVersion: 1, transactions: txns, txnCount: txns.length,
+  };
+}
+const mapRound = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, round2(v)]).sort((a, b) => b[1] - a[1]));
+
+/* A quarter or a year is the months summed — same shape as one month's report,
+ * plus the per-month rows the statement prints underneath. */
+async function resolveReport(env, month) {
+  const row = await env.DB.prepare('SELECT status, report_json FROM months WHERE month = ?1').bind(month).first();
+  if (row?.status === 'closed') {
+    const report = safeJson(row.report_json, null);
+    if (!report) throw new Error('Invalid frozen report: ' + month);
+    return report;
+  }
+  return computeReport(env, month);
+}
+
+async function computeRange(env, fromMo, toMo) {
+  const money = await getMoney(env);
+  const months = [];
+  for (let m = fromMo; m <= toMo; m = monthOf(addMonthsYmd(m + '-01', 1))) months.push(m);
+  const parts = [];
+  for (const m of months) parts.push(await resolveReport(env, m));
+  const add = (into, from) => { for (const [k, v] of Object.entries(from)) into[k] = round2((into[k] || 0) + v); };
+  const byBucket = {}, byTax = {}, byClient = {};
+  let revenue = 0, expenses = 0, fees = 0, personal = 0, transfers = 0, incomeTax = 0, feeEstimated = false;
+  for (const p of parts) {
+    revenue += p.revenue; expenses += p.expenses; fees += p.fees;
+    personal += p.personal || 0; transfers += p.transfers; incomeTax += p.incomeTax || 0;
+    feeEstimated = feeEstimated || p.feeEstimated;
+    add(byBucket, p.byBucket); add(byTax, p.byTax); add(byClient, p.byClient);
+  }
+  revenue = round2(revenue); expenses = round2(expenses); fees = round2(fees);
+  const net = round2(revenue - expenses - fees);
+  const split = {};
+  for (const p of parts) add(split, p.split || {});
+  return {
+    from: fromMo, to: toMo, revenue, expenses, fees, feeEstimated,
+    net, personal: round2(personal), transfers: round2(transfers), incomeTax: round2(incomeTax),
+    taxes: round2(parts.reduce((sum,p)=>sum+p.taxes,0)),
+    distributions: round2(parts.reduce((sum,p)=>sum+(p.distributions||0),0)),
+    profit: round2(parts.reduce((sum,p)=>sum+p.profit,0)),
+    margin: revenue > 0 ? round2(net / revenue * 100) : null,
+    split, splitPct: money.split,
+    byBucket: mapRound(byBucket), byTax: mapRound(byTax), byClient: mapRound(byClient),
+    monthRows: parts.map(p => ({ month: p.month, label: moLabel(p.month),
+      revenue: p.revenue, expenses: round2(p.expenses + p.fees), net: p.net })),
+    monthParts: parts.map(({ transactions, ...p }) => p),
+  };
+}
+
+/* Period → the report behind it, plus how the statement should be titled. */
+/* ------------------------------------------------------------------ */
+/*  the computations the Overview, Dashboards and the Controller share */
+/* ------------------------------------------------------------------ */
+
+/* Month by month over a range, plus the top vendors and the contractors in
+ * it. Drawn by Dashboards; read by the Controller's `series` view. */
+async function seriesSummary(env, from, to) {
+  const months = [];
+  for (let m = from; m <= to && months.length < 60; m = monthOf(addMonthsYmd(m + '-01', 1))) months.push(m);
+  const status = Object.fromEntries((await env.DB.prepare(
+    'SELECT month, status FROM months WHERE month >= ?1 AND month <= ?2').bind(from, to).all()).results.map(r => [r.month, r.status]));
+  const out = [];
+  for (const m of months) {
+    const r = await resolveReport(env, m);
+    const { transactions, ...rest } = r;
+    out.push({ ...rest, month: m, status: status[m] || 'open' });
+  }
+  const { results: vend } = await env.DB.prepare(`SELECT vendor, bucket, tax_cat, SUM(amount) AS amount, COUNT(*) AS n
+    FROM transactions WHERE month >= ?1 AND month <= ?2 AND expected = 0 AND type = 'out'
+      AND (tax_cat IS NULL OR (tax_cat NOT LIKE 'Personal%' AND tax_cat NOT LIKE 'Income tax%'))
+    GROUP BY vendor ORDER BY amount DESC LIMIT 15`).bind(from, to).all();
+  const { results: con } = await env.DB.prepare(`SELECT vendor, SUM(amount) AS amount, COUNT(*) AS n
+    FROM transactions WHERE month >= ?1 AND month <= ?2 AND expected = 0 AND type = 'out'
+      AND tax_cat LIKE 'Contract labor%' GROUP BY vendor ORDER BY amount DESC`).bind(from, to).all();
+  const { results: taxp } = await env.DB.prepare(`SELECT date, vendor, amount FROM transactions
+    WHERE month >= ?1 AND month <= ?2 AND expected = 0 AND tax_cat LIKE 'Income tax%' ORDER BY date`).bind(from, to).all();
+  return { from, to, months: out, money: await getMoney(env), taxPayments: taxp,
+    topVendors: vend.map(v => ({ ...v, amount: round2(v.amount) })),
+    contractors: con.map(v => ({ ...v, amount: round2(v.amount) })) };
+}
+
+/* /accounts/get serves Plaid's cached balances and is not the metered
+ * Balance product. Cached here for three hours on top of that. */
+async function bankBalances(env, fresh = false) {
+  const items = await getPlaidItems(env);
+  if (!plaidReady(env) || !items.length) return { connected: false };
+  const cached = safeJson(await getSetting(env, 'balancesCache'), null);
+  if (cached && cached.at > Date.now() - 3 * 3600e3 && !fresh) return { connected: true, ...cached };
+  const accounts = [];
+  for (const it of items) {
+    try {
+      const r = await plaid(env, '/accounts/get', { access_token: it.access_token });
+      for (const a of r.accounts || []) accounts.push({ item: it.name, name: a.name, mask: a.mask, type: a.type,
+        current: a.balances?.current ?? null, available: a.balances?.available ?? null, limit: a.balances?.limit ?? null });
+    } catch (e) { accounts.push({ item: it.name, error: String(e.message || e).slice(0, 160) }); }
+  }
+  const sum = t => round2(accounts.filter(a => a.type === t).reduce((s, a) => s + (a.current || 0), 0));
+  const out = { at: Date.now(), accounts, cash: sum('depository'), cards: sum('credit') };
+  if (accounts.some(a => !a.error)) await putSetting(env, 'balancesCache', JSON.stringify(out));
+  return { connected: true, ...out };
+}
+
+/* The Home screen: the month's report card, the year so far, what needs
+ * attention, the renewals. */
+async function dashSummary(env, month) {
+  const year = month.slice(0, 4);
+  const [report, yearRows, renewals] = await Promise.all([
+    resolveReport(env, month),
+    env.DB.prepare(`SELECT month,
+        SUM(CASE WHEN type='in' AND expected=0 THEN amount ELSE 0 END) AS revenue,
+        -- personal purchases are owner draws, not business costs: the home
+        -- chart must agree with the report card on that
+        SUM(CASE WHEN type='out' AND expected=0
+             AND (tax_cat IS NULL OR (tax_cat NOT LIKE 'Personal%' AND tax_cat NOT LIKE 'Income tax%'))
+             THEN amount ELSE 0 END) AS expenses,
+        SUM(CASE WHEN type='fee' AND expected=0 THEN amount ELSE 0 END) AS fees
+      FROM transactions WHERE month LIKE ?1 GROUP BY month ORDER BY month`).bind(year + '-%').all(),
+    env.DB.prepare('SELECT name, expected_amount FROM vendors WHERE recurring = 1 AND active = 1 ORDER BY expected_amount DESC').all(),
+  ]);
+  const attn = await env.DB.prepare(`SELECT
+      SUM(CASE WHEN status='review' AND expected=0 THEN 1 ELSE 0 END) AS review,
+      SUM(CASE WHEN expected=1 THEN 1 ELSE 0 END) AS expected,
+      SUM(CASE WHEN type='out' AND expected=0 AND receipt_key IS NULL AND receipt_skip=0 THEN 1 ELSE 0 END) AS noReceipt
+    FROM transactions WHERE month = ?1`).bind(month).first();
+  return { month, report, year: await Promise.all(yearRows.results.map(async x => ({ ...x, ...await resolveReport(env, x.month) }))), renewals: renewals.results, attention: attn };
+}
+
+/* An action's Apply is the same request the screen sends, through this
+ * worker's own front door, as the caller (the app) or the owner (a Slack tap,
+ * which slack-interact has already checked is Cole). */
+function askCaller(env, auth, execCtx) {
+  return { call: async (method, path, body) => {
+    const res = await LEDGER.fetch(new Request('https://ledger.internal' + path, { method,
+      headers: { 'Authorization': auth, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }), env, execCtx || { waitUntil() {} });
+    const j = await res.json().catch(() => ({}));
+    return res.ok ? j : { error: j.error || `HTTP ${res.status}` };
+  } };
+}
+
+/* The Controller's night: the checks, the watches, and a word in Slack only
+ * about what is urgent. Everything else waits for Monday. */
+async function controllerNightly(env) {
+  const { engine, h } = controller();
+  const r = await engine.nightly(env, h());
+  const urgent = r.fresh.filter(f => f.severity === 'high');
+  for (const f of urgent.slice(0, 3))
+    await alertSlack(env, `*${f.title}*\n${f.detail || ''}`).catch(() => {});
+  return { found: r.found, fresh: r.fresh.length, urgent: urgent.length };
+}
+async function controllerBriefing(env, force = false) {
+  const { engine, h } = controller();
+  const text = await engine.briefing(env, h(), { force });
+  if (text) await alertSlack(env, `*Monday briefing from Cashew*\n\n${text}`).catch(() => {});
+  return text;
+}
+
+async function periodReport(env, period, anchor) {
+  if (period === 'quarter') {
+    const q = Math.floor((+anchor.slice(5, 7) - 1) / 3);
+    const from = `${anchor.slice(0, 4)}-${String(q * 3 + 1).padStart(2, '0')}`;
+    const to = `${anchor.slice(0, 4)}-${String(q * 3 + 3).padStart(2, '0')}`;
+    const r = await computeRange(env, from, to);
+    return { r, title: 'Profit & Loss', label: `Q${q + 1} ${anchor.slice(0, 4)}`,
+             file: `Mobius Digital P&L Q${q + 1} ${anchor.slice(0, 4)}.pdf`, months: r.monthRows };
+  }
+  if (period === 'year') {
+    const y = anchor.slice(0, 4);
+    const r = await computeRange(env, `${y}-01`, `${y}-12`);
+    return { r, title: 'Profit & Loss', label: y,
+             file: `Mobius Digital P&L ${y}.pdf`, months: r.monthRows };
+  }
+  const r = await resolveReport(env, anchor);
+  return { r, title: 'Profit & Loss', label: moLabel(anchor),
+           file: `Mobius Digital P&L ${moLabel(anchor)}.pdf`, months: null,
+           frozen: (await monthStatus(env, anchor)) === 'closed' };
+}
+
+/* Slack's external-upload dance: reserve a URL, PUT the bytes, then complete
+ * the upload into the channel. Needs the files:write scope. */
+async function slackUploadFile(env, channel, bytes, filename, comment) {
+  const res1 = await slack(env, 'files.getUploadURLExternal',
+    { filename, length: String(bytes.length) });
+  if (!res1.ok) return { ok: false, error: res1.error || 'getUploadURLExternal failed' };
+  const form = new FormData();
+  form.append('file', new Blob([bytes], { type: 'application/pdf' }), filename);
+  const up = await fetch(res1.upload_url, { method: 'POST', body: form });
+  if (!up.ok) return { ok: false, error: 'upload POST ' + up.status };
+  const res2 = await slack(env, 'files.completeUploadExternal', {
+    files: [{ id: res1.file_id, title: filename.replace(/\.pdf$/, '') }],
+    channel_id: channel, initial_comment: comment || undefined,
+  }, true);
+  return res2.ok ? { ok: true } : { ok: false, error: res2.error };
+}
+
+/* Applies the vendor rule to a row missing categories; unknown vendors land
+ * in the Review inbox instead of being silently guessed. */
+/* Banks do not send the same name twice. The card calls Squarespace
+ * "SQSP* WORKSP#2186907NEW" this month and "SQSP* WORKSP#2444996NEW" next, and
+ * Amazon arrives in half a dozen spellings · an exact-name rule catches none
+ * of them, so the same merchant lands in Review every month and the rules table
+ * never actually learns anything. A rule whose name appears anywhere in the
+ * bank's description counts, longest rule first so a specific rule always beats
+ * a general one. */
+/* COMPANIES THAT RENAMED, MERGED, OR BILL UNDER SOMEONE ELSE'S NAME. Requiring
+ * the vendor names to agree is what stops a receipt landing on the wrong
+ * charge, and it is right · but a Twitter receipt genuinely is an X Corp charge,
+ * and demanding they look alike asks a question nobody should have to answer.
+ * Each row is one company under every name it appears as, on a receipt or on a
+ * statement. Add to it as the world keeps renaming itself. */
+const VENDOR_ALIASES = [
+  ['twitter', 'x corp'],
+  ['anthropic', 'claude'],
+  ['artifex', 'pdfco'],          // Pdf.co & Artifex bill as one line
+  ['atlassian', 'loom'],         // Atlassian bought Loom
+  ['amex gold', 'renewal membership fee'],  // Amex's statement line for the annual card fee
+  ['squarespace', 'sqsp'],
+  ['western union', 'wu'],
+  ['meta platforms', 'facebook', 'instagram'],
+  ['seller systems', 'datadive'],  // DataDive's receipts come from its parent company
+];
+/* Same company, whatever the two names look like. Both must be found in the
+ * SAME row for this to say yes, so an unlisted vendor simply falls through to
+ * the ordinary name comparison. */
+function sameCompany(a, b) {
+  const flat = v => String(v || '').toLowerCase().replace(/[^a-z0-9 ]/g, '');
+  const x = flat(a), y = flat(b);
+  if (!x || !y) return false;
+  return VENDOR_ALIASES.some(row => row.some(n => x.includes(n)) && row.some(n => y.includes(n)));
+}
+
+/* A card line and a receipt rarely spell a restaurant the same way. The slip
+ * says "Margarita Bar & Mexican Restaurant"; Amex says
+ * "SPO*OAXACAMARGARITABEDWARDSVILLE", all one word. First-word comparison
+ * cannot see that, so a photographed receipt and its charge became two
+ * expenses. This squashes both to letters and asks whether a distinctive word
+ * (4+ letters, not a generic trade word) of one sits inside the other. Only
+ * ever used together with an amount check, never on its own. */
+const GENERIC_WORDS = new Set(['restaurant', 'restaurants', 'mexican', 'grill', 'cafe', 'coffee', 'store', 'stores',
+  'shop', 'market', 'sporting', 'goods', 'company', 'services', 'service', 'online', 'payment', 'purchase',
+  'the', 'and', 'inc', 'llc', 'corp', 'bar', 'kitchen', 'pizza', 'bistro', 'tavern', 'cantina', 'group', 'center']);
+function looseNameMatch(a, b) {
+  if (sameCompany(a, b)) return true;
+  const words = v => String(v || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+    .filter(w => w.length >= 4 && !GENERIC_WORDS.has(w) && !/^\d+$/.test(w));
+  const squash = v => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+  const sa = squash(a), sb = squash(b);
+  if (!sa || !sb) return false;
+  return words(a).some(w => sb.includes(w.replace(/[^a-z]/g, ''))) ||
+         words(b).some(w => sa.includes(w.replace(/[^a-z]/g, '')));
+}
+
+async function findRule(env, vendor) {
+  const exact = await env.DB.prepare('SELECT * FROM vendors WHERE name = ?1 COLLATE NOCASE')
+    .bind(vendor).first();
+  if (exact) return exact;
+  const { results: all } = await env.DB.prepare(
+    'SELECT * FROM vendors WHERE active = 1 AND LENGTH(name) >= 4').all();
+  const v = String(vendor || '').toUpperCase();
+  return all.filter(r => v.includes(String(r.name).toUpperCase()))
+            .sort((a, b) => b.name.length - a.name.length)[0] || null;
+}
+
+async function applyRule(env, row) {
+  if (row.type === 'in') { row.bucket = 'Revenue'; row.tax_cat = 'Client revenue'; return row; }
+  if (row.type === 'fee') { row.bucket = 'Merchant fee'; row.tax_cat = 'Bank & merchant fees'; return row; }
+  if (row.type === 'transfer') { row.bucket = 'Transfer'; row.tax_cat = 'Transfer — not P&L'; return row; }
+  if (row.bucket && row.tax_cat) return row;
+  const rule = await findRule(env, row.vendor);
+  if (rule) { row.bucket = row.bucket || rule.bucket; row.tax_cat = row.tax_cat || rule.tax_cat; }
+  else row.status = 'review';
+  return row;
+}
+
+/* The tax category is the choice that matters; the bucket follows from it.
+ * One tap (or one guess) sets both layers. Unknown/custom categories fall to
+ * Other, which is also where the sheet always put the unclassifiable. */
+/* ONE choice, two audiences. The tax category is what Cole picks; the bucket is
+ * the plain-English group the dashboard and report card total by, derived from
+ * it. Only four categories used to map, so ten of fourteen collapsed into
+ * "Other" — which is exactly why the second dropdown felt pointless: it was.
+ * Every category now lands somewhere meaningful and the picker is gone. */
+const TAX2BUCKET = {
+  'Software & subscriptions': 'Software',
+  'Contract labor (1099)': 'Contractors',
+  'Advertising & marketing': 'Ads/Marketing',
+  'Bank & merchant fees': 'Merchant fee',
+  'Meals': 'Meals & entertainment',
+  'Meals (50%)': 'Meals & entertainment',                 // the old name, still read
+  'Entertainment — Ask CPA': 'Ads/Marketing',             // ditto
+  'Office supplies & equipment': 'Office & equipment',
+  'Product testing': 'Product testing',
+  'Travel & gas': 'Travel',
+  'Utilities & phone': 'Utilities & phone',
+  'Dues & memberships': 'Dues & memberships',
+  'Taxes & licenses': 'Taxes & licenses',
+  'Personal': 'Personal (not a business cost)',
+  'Personal — review': 'Personal (not a business cost)',   // the old name, still read
+  /* Income tax is not a business expense · an LLC pays none, the profit lands
+   * on Cole's own return and he pays it there. It is money leaving the business
+   * all the same, so it gets a line of its own rather than disappearing into
+   * "transfers", which is where it used to hide. */
+  'Income tax': 'Income tax',
+  'Client revenue': 'Revenue',
+  'Other': 'Other',
+  'Other — Ask CPA': 'Other',                             // the old name, still read
+};
+const bucketFor = tax => TAX2BUCKET[tax] || 'Other';
+
+/* Every confirmed categorization becomes that vendor's default suggestion —
+ * automatically, so the "remembered vendors" list maintains itself. A vendor
+ * marked recurring keeps its rule: one odd Best Buy run must not rewrite how
+ * the monthly Slack bill files. */
+async function learnDefault(env, vendor, bucket, tax_cat) {
+  if (!vendor || !bucket || !tax_cat) return;
+  await env.DB.prepare(`INSERT INTO vendors (name, bucket, tax_cat, recurring, active)
+    VALUES (?1, ?2, ?3, 0, 1)
+    ON CONFLICT(name) DO UPDATE SET bucket = ?2, tax_cat = ?3 WHERE recurring = 0`)
+    .bind(String(vendor).slice(0, 120), bucket, tax_cat).run();
+}
+
+/* Claude reads a receipt: vendor, total, date, note — and proposes the tax
+ * category from the app's own list, with runner-up guesses for the buttons. */
+async function claudeExtract(env, b64, mediaType, textContent = null) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const cats = safeJson(await getSetting(env, 'taxCats'), []) || [];
+  const block = textContent
+    ? { type: 'text', text: 'EMAIL CONTENT:\n' + String(textContent).slice(0, 12000) }
+    : mediaType === 'application/pdf'
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+    : { type: 'image', source: { type: 'base64', media_type: mediaType, data: b64 } };
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 400,
+      messages: [{ role: 'user', content: [block, { type: 'text', text:
+        'This is a receipt or invoice for a small marketing agency\'s bookkeeping. Reply with ONLY a JSON object:\n' +
+        '{"vendor": string, "amount": number (the total), "date": "YYYY-MM-DD" or null, "note": short string or null,\n' +
+        ' "tax_category": the single best fit from this exact list, or null if genuinely unclear: ' + JSON.stringify(cats) + ',\n' +
+        ' "alternates": up to 2 other plausible categories from the same list (e.g. a restaurant could be "Meals" or "Advertising & marketing")}.\n' +
+        'Use the list values verbatim.\n\n' +
+        'EXCEPTION — several payments in one document. Some documents are not one receipt: a bank confirmation ' +
+        'listing several direct deposits, or an email thread stacking separate notifications back to back. When the ' +
+        'document records TWO OR MORE payments to DIFFERENT recipients, add:\n' +
+        '"payments": [{"vendor": recipient name, "amount": number, "date": "YYYY-MM-DD" or null}, ...] listing every one.\n' +
+        'Only use "payments" for genuinely separate payments. One receipt with several line items, or a subtotal ' +
+        'plus tax plus total, is ONE payment — leave "payments" out entirely. Set the top-level fields from the ' +
+        'largest payment when you do use it. No other text.' }] }],
+    }),
+  });
+  const j = await r.json().catch(() => ({}));
+  const m = (j?.content?.[0]?.text || '').match(/\{[\s\S]*\}/);
+  const out = m ? safeJson(m[0], null) : null;
+  if (out) {
+    if (!cats.includes(out.tax_category)) out.tax_category = null;
+    out.alternates = (out.alternates || []).filter(c => cats.includes(c) && c !== out.tax_category).slice(0, 2);
+    out.payments = Array.isArray(out.payments)
+      ? out.payments
+          .map(p => ({ vendor: p && p.vendor ? String(p.vendor).slice(0, 120) : null,
+                       amount: Number(p && p.amount), date: p && p.date }))
+          .filter(p => p.vendor && Number.isFinite(p.amount) && p.amount !== 0)
+          .slice(0, 20)
+      : [];
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Slack #receipts intake (Phase 3)                                   */
+/* ------------------------------------------------------------------ */
+
+/* Cole is notified when an email lands in the channel, which is the one ping
+ * he does not want, and NOT notified of thread replies, which are the ones he
+ * does. Muting the channel fixes the first; an @mention is what still pierces
+ * a muted channel, so anything needing a decision addresses him by name. The
+ * id is looked up once from his email and then cached in settings. */
+async function ownerUserId(env) {
+  const cached = await getSetting(env, 'ownerUserId');
+  if (cached) return cached;
+  const email = (await getSetting(env, 'ownerEmail')) || env.OWNER_EMAIL;
+  if (!email) return null;
+  const r = await slack(env, 'users.lookupByEmail', { email }).catch(() => ({}));
+  if (!r?.ok || !r.user?.id) return null;
+  await putSetting(env, 'ownerUserId', r.user.id);
+  return r.user.id;
+}
+async function ownerMention(env) {
+  const id = await ownerUserId(env);
+  return id ? `<@${id}> ` : '';
+}
+
+/* How each kind of Slack message reaches Cole, set in Settings.
+ *   ping    : @mention, so the phone buzzes (default)
+ *   channel : shown in the main channel as well as the thread, no buzz
+ *   quiet   : a thread reply only
+ * Kinds: landed (a held receipt went through), decisions (a receipt needs
+ * a tap), problems (the nightly check or a sync found something wrong). */
+const NOTIFY_KINDS = ['landed', 'decisions', 'problems'];
+const NOTIFY_MODES = ['ping', 'channel', 'quiet'];
+async function getNotify(env) {
+  const saved = safeJson(await getSetting(env, 'notify'), {}) || {};
+  return Object.fromEntries(NOTIFY_KINDS.map(k => [k, NOTIFY_MODES.includes(saved[k]) ? saved[k] : 'ping']));
+}
+async function notifyStyle(env, kind) {
+  const mode = (await getNotify(env))[kind];
+  return { at: mode === 'ping' ? await ownerMention(env) : '', broadcast: mode === 'channel' };
+}
+
+async function slack(env, method, params = {}, post = false) {
+  // Cashew has its own Slack app since 2026-10-14 (it shared "Mobius Digital" with Locus before,
+  // and answered as Controller in group DMs meant for Locus). Name and face stay explicit.
+  if (method === 'chat.postMessage')
+    params = { username: 'Cashew',
+               icon_url: 'https://tools.go-mobius-digital.com/logo/cashew/icons/icon-512.png', ...params };
+  const send = async p => {
+    const r = post
+      ? await fetch(`https://slack.com/api/${method}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(p) })
+      : await fetch(`https://slack.com/api/${method}?${new URLSearchParams(p)}`, {
+          headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } });
+    return r.json();
+  };
+  let j = await send(params);
+  if (j.error === 'missing_scope' && params.username) {
+    const { username, icon_url, ...rest } = params;
+    j = await send(rest);
+  }
+  return j;
+}
+
+/* Anything the automation cannot recover from goes here: addressed to Cole
+ * by name, because silence about a broken sync is indistinguishable from a
+ * quiet month. */
+async function alertSlack(env, text) {
+  const jobId='alert:'+await sha256hex(text);
+  await saveJob(env,jobId,'slack-alert',{text},'Awaiting Slack delivery');
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  if (!sr.channelId || !env.SLACK_BOT_TOKEN) throw new Error('Slack notification unavailable');
+  const { at } = await notifyStyle(env, 'problems');
+  const sent = await slack(env, 'chat.postMessage',
+    { channel: sr.channelId, text: at + text, unfurl_links: false }, true);
+  if (!sent.ok) throw new Error('Slack delivery failed: ' + sent.error);
+  await finishJob(env,jobId);
+  return sent;
+}
+
+async function findReceiptsChannel(env) {
+  let cursor = '';
+  do {
+    const r = await slack(env, 'conversations.list',
+      { types: 'public_channel,private_channel', exclude_archived: 'true', limit: '200', ...(cursor ? { cursor } : {}) });
+    if (!r.ok) return { error: r.error };
+    // #finance is the one financial channel; #receipts was its original name
+    const hit = (r.channels || []).find(c => c.name === 'finance')
+             || (r.channels || []).find(c => c.name === 'receipts');
+    if (hit) return { id: hit.id, is_member: !!hit.is_member };
+    cursor = r.response_metadata?.next_cursor || '';
+  } while (cursor);
+  return { error: 'no #finance (or #receipts) channel found' };
+}
+
+/* Slack signs every event: HMAC of "v0:<timestamp>:<raw body>". Verifying it is
+ * what makes the events endpoint safe to leave unauthenticated — without this
+ * anyone who learned the URL could make the worker file transactions. */
+async function verifySlackSig(env, ts, rawBody, sig) {
+  if (!env.SLACK_SIGNING_SECRET || !ts || !sig) return false;
+  if (Math.abs(Date.now() / 1000 - +ts) > 300) return false;   // replay guard
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.SLACK_SIGNING_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`v0:${ts}:${rawBody}`));
+  const mine = 'v0=' + [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, '0')).join('');
+  if (mine.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < mine.length; i++) diff |= mine.charCodeAt(i) ^ sig.charCodeAt(i);
+  return diff === 0;
+}
+
+const SEEN_CAP = 300;
+
+/* ------------------------------------------------------------------ */
+/*  receipt files: R2 for keeps, KV for the short-lived ones           */
+/* ------------------------------------------------------------------ */
+/* Receipts used to live in KV because R2 was not enabled on the account. It is
+ * now, so every stored receipt goes to R2 — but reads still fall back to KV so
+ * the ones written before keep opening, with no migration and no flag day.
+ * "pend:" blobs (an emailed receipt awaiting a yes/no) stay in KV either way:
+ * they want an expiry, which KV has and R2 does not. */
+const isPending = key => String(key).startsWith('pend:');
+
+async function receiptPut(env, key, body, ttlSeconds) {
+  if (isPending(key) || !env.R2)
+    return void await env.RECEIPTS.put(key, body, ttlSeconds ? { expirationTtl: ttlSeconds } : undefined);
+  await env.R2.put(key, body);
+}
+async function receiptGet(env, key) {
+  if (!isPending(key) && env.R2) {
+    const obj = await env.R2.get(key);
+    if (obj) return await obj.arrayBuffer();
+  }
+  return await env.RECEIPTS.get(key, 'arrayBuffer');   // pre-R2 receipts
+}
+async function receiptDelete(env, key) {
+  if (env.R2) await env.R2.delete(key).catch(() => {});
+  await env.RECEIPTS.delete(key).catch(() => {});
+}
+
+/**
+ * Poll #receipts: each new image/PDF is downloaded, read by Claude, then
+ * matched to an unreceipted expense (this month or last, amount to the cent)
+ * or filed as a new transaction — and the thread gets a reply saying which.
+ * Dedupe: Slack file ids in settings.slackReceipts.seen; cursor on lastTs.
+ */
+/* WHY WAIT UNTIL TONIGHT. A receipt arriving is the one moment we know a charge
+ * probably exists, so that is the moment to go and look, rather than filing the
+ * question away for a nightly job.
+ *
+ * What no amount of looking can fix: Amex sits on a purchase for a day or two
+ * as PENDING before it becomes real, and a pending line has no final amount or
+ * date, so it cannot be booked · but it CAN be seen. "I can see it on your
+ * Amex, still pending" is a different sentence from "no charge matches", and
+ * the difference is the whole reason the wait felt like a shrug. */
+/* GO AND ASK THE CARD, don't wait to be told. Plaid's copy of an account is
+ * refreshed on its own schedule, so a charge visible in the Amex app minutes
+ * after buying something is not visible here for hours · SIMPLI SODA $36.72 sat
+ * on his phone while this said "not posted yet", which reads as broken even
+ * though both were telling the truth about what they could see.
+ *
+ * /transactions/refresh asks the institution for an update right now. It
+ * returns as soon as the request is accepted rather than when the data lands,
+ * so a short wait follows and the caller looks again · which is why this is
+ * only ever done for a receipt somebody just sent, never on a schedule. */
+async function bankRefresh(env) {
+  return { ok: false, why: 'Paid Plaid refresh disabled by Mobius policy' };
+}
+
+async function bankPending(env, amount, sinceYmd) {
+  if (!plaidReady(env)) return null;
+  const items = await getPlaidItems(env);
+  for (const item of items) {
+    const page = await plaid(env, '/transactions/get', {
+      access_token: item.access_token, start_date: sinceYmd,
+      end_date: centralDate(Date.now() / 1000), options: { count: 250 },
+    }).catch(() => null);
+    const hit = (page?.transactions || []).find(t => t.pending
+      && Math.abs(Math.abs(round2(t.amount)) - Math.abs(amount)) < 0.005);
+    if (hit) return { vendor: String(hit.merchant_name || hit.name || 'the card').slice(0, 60),
+                      date: hit.date, account: item.accounts?.[hit.account_id]?.name || item.name || '' };
+  }
+  return null;
+}
+
+function receiptMatch(rows, vendor, amount, date, allowTip=false) {
+  const eligible=rows.filter(t=>t.type==='out' && !t.expected && !t.receipt_key && (String(t.vendor).trim().toLowerCase() === String(vendor || '').trim().toLowerCase() || sameCompany(t.vendor,vendor))
+    && (!date || Math.abs(Date.parse(t.date)-Date.parse(date))<=12*86400e3));
+  const exact=eligible.filter(t=>Math.abs(t.amount-Number(amount))<0.005);
+  if(exact.length) return exact.length===1?exact[0]:null;
+  /* The receipt and the bank rarely spell a company the same way ("01TESSERACT
+   * PTE. LTD. (Atria)" vs "Atria", "Docusign Inc." vs "Docusign"). Second
+   * pass: the looser name test (one name contains a real word of the other)
+   * with the exact total inside a week, and only when exactly one charge
+   * fits. Names must still not contradict: an Anthropic receipt never lands
+   * on an OpenAI charge. Without this, two dropped PDFs were filed as NEW
+   * expenses on 2026-10-03 and September counted $74 of spending twice. */
+  if (date && Number(amount) > 0) {
+    const near = rows.filter(t => t.type==='out' && !t.expected && !t.receipt_key && looseNameMatch(t.vendor, vendor)
+      && Math.abs(t.amount-Number(amount))<0.005 && Math.abs(Date.parse(t.date)-Date.parse(date))<=7*86400e3);
+    if (near.length === 1) return near[0];
+  }
+  const tips=allowTip && Number(amount)>0 ? eligible.filter(t=>t.amount>=Number(amount)/1.35 && t.amount<=Number(amount)*1.35) : [];
+  return tips.length===1?tips[0]:null;
+}
+/* The ⏳ on a receipt message is its status, so it has to change when the
+ * status does. Without this the hourglass stayed forever and a finished
+ * receipt looked exactly like a stuck one. Reactions never notify anyone. */
+async function markReceiptMessage(env, channel, ts, done = 'white_check_mark') {
+  if (!channel || !ts || !env.SLACK_BOT_TOKEN) return;
+  for (const name of ['hourglass_flowing_sand', 'question'])
+    await slack(env, 'reactions.remove', { channel, timestamp: ts, name }, true).catch(() => {});
+  if (done) await slack(env, 'reactions.add', { channel, timestamp: ts, name: done }, true).catch(() => {});
+}
+
+/* Clears hourglasses left by receipts that are no longer waiting, including
+ * every one from before markReceiptMessage existed. A tick goes on only when
+ * the thread shows the receipt was attached or filed. */
+async function tidyHourglasses(env) {
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  if (!sr.channelId || !env.SLACK_BOT_TOKEN) return { skipped: 'Slack not connected' };
+  const held = new Set((await env.DB.prepare(`SELECT value FROM settings WHERE key LIKE 'pend:%'`).all())
+    .results.map(r => safeJson(r.value, {})?.ts).filter(Boolean));
+  const oldest = String(Math.floor(Date.now() / 1000 - 60 * 86400));
+  let cursor = '', cleared = 0;
+  do {
+    const h = await slack(env, 'conversations.history',
+      { channel: sr.channelId, oldest, limit: '200', ...(cursor ? { cursor } : {}) });
+    if (!h.ok) throw new Error('Slack history: ' + h.error);
+    for (const m of h.messages || []) {
+      const hg = (m.reactions || []).find(r => r.name === 'hourglass_flowing_sand'
+        && (!sr.selfUserId || (r.users || []).includes(sr.selfUserId)));
+      if (!hg || held.has(m.ts)) continue;
+      const rep = await slack(env, 'conversations.replies', { channel: sr.channelId, ts: m.ts, limit: '50' });
+      const done = (rep.messages || []).some(x => x.ts !== m.ts
+        && /^(:white_check_mark:|:heavy_check_mark:|✅|✓|✔)/.test(x.text || '') && !/Discarded/.test(x.text || ''));
+      await markReceiptMessage(env, sr.channelId, m.ts, done ? 'white_check_mark' : null);
+      cleared++;
+    }
+    cursor = h.response_metadata?.next_cursor || '';
+  } while (cursor);
+  return { cleared };
+}
+
+/* The held-receipt sweep's matcher, in order of trust:
+ *   1. same name (or a listed alias), exact amount       -> attach
+ *   2. card spelling differs, exact amount, within a week -> attach
+ *   3. same name, amount within the tip band             -> attach
+ *   4. card spelling differs AND amount differs          -> ask first
+ * Every step needs exactly one candidate; two plausible charges is a question
+ * for Cole, never a guess. Returns { row, confirm } or null. */
+function heldReceiptMatch(rows, vendor, amount, date) {
+  const amt = Number(amount);
+  const days = t => Math.abs(Date.parse(t.date) - Date.parse(date)) / 86400e3;
+  const open = rows.filter(t => t.type === 'out' && !t.expected && !t.receipt_key && days(t) <= 12);
+  const strictName = t => String(t.vendor).trim().toLowerCase() === String(vendor || '').trim().toLowerCase() || sameCompany(t.vendor, vendor);
+  const strict = open.filter(strictName);
+  const loose = open.filter(t => !strictName(t) && days(t) <= 7 && looseNameMatch(t.vendor, vendor));
+  const exactAmt = t => Math.abs(t.amount - amt) < 0.005;
+  const inTipBand = t => amt > 0 && t.amount >= amt / 1.35 && t.amount <= amt * 1.35;
+  const one = (list, confirm) => list.length === 1 ? { row: list[0], confirm } : null;
+
+  const strictExact = strict.filter(exactAmt), looseExact = loose.filter(exactAmt);
+  if (strictExact.length) return strictExact.length === 1 && !looseExact.length ? one(strictExact, false) : null;
+  const strictTip = strict.filter(inTipBand);
+  if (looseExact.length) return !strictTip.length ? one(looseExact, false) : null;
+  if (strictTip.length) return one(strictTip, false);
+  return one(loose.filter(inTipBand), true);
+}
+/* ------------------------------------------------------------------ */
+/*  Ask the ledger (see ask.js)                                        */
+/* ------------------------------------------------------------------ */
+
+/* The Controller (controller.js, on the shared Ask engine) gets the plumbing
+ * and the computations handed to it rather than importing back into this
+ * file, so every function keeps one owner. Built once per isolate. */
+let _ctl = null;
+/* ------------------------------------------------------------------ */
+/*  Receipt hunt: go to Gmail and fetch what is missing                */
+/* ------------------------------------------------------------------ */
+/* Cole asked for the Controller to fetch receipts instead of him. The bank
+ * feed already says a charge exists, so this only ever ATTACHES, never files
+ * a new row. Per charge: search Gmail by its exact total inside a date window
+ * (the strongest key there is), then by vendor word; read the best candidate
+ * (a "receipt" PDF, then any PDF/image, then the email itself); attach only
+ * when the total agrees to the cent AND either the name agrees or no other
+ * open charge in the window has that total. A wrong attachment is worse than
+ * a missing one, so anything short of that is left for him.
+ *
+ * Volume: about seven Google/Claude calls per charge, so a request does a few
+ * and the 10-minute cron finishes the queue. Each charge is tried at most
+ * three times over three weeks, then it is a "download it from their site"
+ * row with the billing link, which is the part email cannot do. */
+const HUNT_PER_RUN = 4;
+const htmlText = html => String(html || '')
+  .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
+  .replace(/&nbsp;|&#8199;|&#847;|&zwnj;/gi, ' ')
+  .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+  .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&#36;/g, '$')
+  .replace(/\s+/g, ' ').trim();
+const toB64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
+
+async function gmailStore(env) {
+  const s = safeJson(await getSetting(env, 'gmailAuth'), null);
+  return s?.refresh ? s : null;
+}
+
+async function huntOne(env, store, t) {
+  const amt = round2(Math.abs(t.amount));
+  const terms = amountTerms(amt);
+  const after = gmailDay(addDaysYmd(t.date, -6)), before = gmailDay(addDaysYmd(t.date, 9));
+  const base = `after:${after} before:${before} -in:sent -in:chats`;
+  const word = vendorWord(t.vendor);
+  /* Most precise first: the company word AND the amount. A common total
+   * ("20.00") alone can match a dozen emails in two weeks and push the real
+   * receipt past the cap (Anthropic $20 on Sep 20, 2026-10-03). */
+  const amt$ = `(${terms.map(x => `"${x}"`).join(' OR ')})`;
+  const ids = [...new Set([
+    ...(word ? await gmailSearch(env, store, `${base} ${word} ${amt$}`, 4) : []),
+    ...await gmailSearch(env, store, `${base} ${amt$}`, 4),
+    ...(word ? await gmailSearch(env, store, `${base} ${word} (receipt OR invoice OR paid OR payment OR order OR billing OR statement)`, 3) : []),
+  ])].slice(0, 7);
+  if (!ids.length) return { found: false, why: 'nothing in Gmail' };
+
+  const tried = [];
+  for (const id of ids) {
+    const m = await gmailMessage(env, store, id);
+    const body = (m.text && m.text.length > 200 ? m.text : htmlText(m.html)) || m.text || '';
+    const atts = m.attachments.filter(a => (a.mimeType === 'application/pdf' || /^image\//.test(a.mimeType || '')) && a.size < 4.5 * 1024 * 1024);
+    const named = re => atts.find(a => re.test(a.name));
+    const att = named(/receipt/i) || named(/invoice|statement|bill/i) || atts[0];
+    const amountInText = terms.some(x => body.includes(x) || m.snippet.includes(x) || m.subject.includes(x));
+    // Cheap gate before paying for a read: the total is in the text, or there
+    // is a PDF/image that might hold it (Gmail does not always index those).
+    if (!amountInText && !att) { tried.push(m.subject); continue; }
+
+    let bytes, mime, fname, ext;
+    if (att && (!amountInText || /receipt/i.test(att.name))) {
+      bytes = await gmailAttachment(env, store, id, att.attachmentId);
+      mime = att.mimeType; fname = att.name;
+      ext = await claudeExtract(env, toB64(bytes), mime);
+    }
+    if (!ext?.amount || Math.abs(round2(Math.abs(ext.amount)) - amt) >= 0.005) {
+      if (!amountInText) { tried.push(m.subject); continue; }
+      const text = [`Subject: ${m.subject}`, `From: ${m.from}`, `Date: ${m.date}`, body].join('\n');
+      ext = await claudeExtract(env, null, null, text);
+      bytes = new TextEncoder().encode(m.html || `<pre>${text.replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;')}</pre>`);
+      mime = 'text/html'; fname = (m.subject || 'email receipt').slice(0, 110) + '.html';
+    }
+    if (!ext) { tried.push(m.subject); continue; }
+    // A stacked bank confirmation lists several payments: one of them may be ours.
+    const pays = [{ vendor: ext.vendor, amount: ext.amount, date: ext.date }, ...(ext.payments || [])];
+    const pay = pays.find(p => Math.abs(round2(Math.abs(Number(p.amount))) - amt) < 0.005);
+    if (!pay) { tried.push(m.subject); continue; }
+    if (pay.date && Math.abs(Date.parse(pay.date) - Date.parse(t.date)) > 12 * 86400e3) { tried.push(m.subject); continue; }
+
+    const nameOk = sameCompany(t.vendor, pay.vendor) || looseNameMatch(t.vendor, pay.vendor)
+      || (word && (m.from + ' ' + m.subject).toLowerCase().includes(word));
+    if (!nameOk) {
+      const { results: rivals } = await env.DB.prepare(`SELECT id FROM transactions WHERE type='out' AND expected=0
+        AND receipt_key IS NULL AND id != ?1 AND ABS(ABS(amount) - ?2) < 0.005 AND date BETWEEN ?3 AND ?4`)
+        .bind(t.id, amt, addDaysYmd(t.date, -12), addDaysYmd(t.date, 12)).all();
+      if (rivals.length) { tried.push(m.subject); continue; }
+    }
+    const hash = await sha256bytes(bytes);
+    const dupe = await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1').bind(hash).first();
+    if (dupe) { tried.push(m.subject + ' (already on another row)'); continue; }
+    const key = `rcpt:${t.id}:${Date.now()}`;
+    await receiptPut(env, key, bytes);
+    const done = await env.DB.prepare(`UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5
+      WHERE id=?1 AND receipt_key IS NULL`).bind(t.id, key, String(fname).slice(0, 120), mime, hash).run();
+    if (!done.meta.changes) { await receiptDelete(env, key); return { found: false, why: 'already has one' }; }
+    return { found: true, subject: m.subject, from: m.from, link: m.link, kind: mime === 'text/html' ? 'email' : 'attachment' };
+  }
+  return { found: false, why: tried.length ? `looked at ${tried.length} email${tried.length > 1 ? 's' : ''}, none had this total` : 'nothing in Gmail' };
+}
+
+/**
+ * Queue charges and work through them. opts: { ids, month, all, auto, origin:{channel,thread}, limit }.
+ * Returns what this call did plus how much is still queued.
+ */
+async function huntReceipts(env, opts = {}) {
+  const store = await gmailStore(env);
+  if (!store) return { error: 'Gmail is not connected yet. Settings > Receipts from Gmail > Connect Gmail.' };
+  const state = safeJson(await getSetting(env, 'receiptHunt'), null) || { tries: {} };
+  state.tries = state.tries || {};
+  state.found = state.found || []; state.missed = state.missed || []; state.queue = state.queue || [];
+  if (opts.ids?.length || opts.month || opts.all || opts.auto) {
+    const where = [`t.type='out'`, `t.expected=0`, `t.receipt_key IS NULL`, `t.receipt_skip=0`, `t.amount > 0`];
+    const bind = [];
+    if (opts.ids?.length) { where.push(`t.id IN (${opts.ids.map(() => '?').join(',')})`); bind.push(...opts.ids.map(Number)); }
+    else if (opts.month) { where.push(`t.month = ?`); bind.push(opts.month); }
+    else { where.push(`t.date >= ?`); bind.push(addDaysYmd(centralDate(Date.now() / 1000), opts.auto ? -45 : -120)); }
+    if (opts.auto) { where.push(`t.date <= ?`); bind.push(addDaysYmd(centralDate(Date.now() / 1000), -2)); }
+    const { results } = await env.DB.prepare(`SELECT t.id FROM transactions t WHERE ${where.join(' AND ')} ORDER BY t.date DESC LIMIT 150`).bind(...bind).all();
+    const now = Date.now();
+    let ids = results.map(r => r.id);
+    // The daily sweep looks ONCE, two days after a charge posts (receipts often
+    // arrive after the charge). Looking again is Cole's call: the "Check Gmail
+    // again" button on the month-end message, or asking the Controller.
+    if (opts.auto) ids = ids.filter(id => !state.tries[id]);
+    state.queue = [...new Set([...state.queue, ...ids])];
+    if (opts.origin) { state.origin = opts.origin; state.auto = false; }
+    else if (!opts.auto) state.auto = false;
+    else if (state.auto === undefined || !state.origin) state.auto = true;
+  }
+  const did = [];
+  const limit = opts.limit || HUNT_PER_RUN;
+  while (state.queue.length && did.length < limit) {
+    const id = state.queue.shift();
+    const t = await env.DB.prepare(`SELECT t.*, v.billing_url FROM transactions t LEFT JOIN vendors v ON v.name = t.vendor WHERE t.id=?1`).bind(id).first();
+    if (!t || t.receipt_key || t.receipt_skip) continue;
+    let r;
+    try { r = await huntOne(env, store, t); }
+    catch (e) { r = { found: false, why: String(e.message || e).slice(0, 120), error: true }; }
+    /* Out of Worker subrequests for this run: not the charge's fault, so it
+     * goes back on the queue untouched and the next tick carries on. */
+    if (r.error && /subrequest|exceeded|cpu|time limit/i.test(r.why)) { state.queue.unshift(id); break; }
+    // Google refusing the whole connection (revoked, or the Gmail API switched
+    // off in the Cloud project) is not this charge's fault: stop, don't count it.
+    if (r.error && /invalid_grant|unauthor|401|403|insufficient|disabled|has not been used|accessNotConfigured|PERMISSION_DENIED/i.test(r.why)) {
+      state.queue.unshift(id);
+      await putSetting(env, 'receiptHunt', JSON.stringify(state));
+      return { error: 'Gmail refused: ' + r.why + '. Reconnect it under Settings.', did, left: state.queue.length };
+    }
+    const x = state.tries[id] || { n: 0 };
+    state.tries[id] = { n: x.n + 1, at: Date.now() };
+    const line = { id, vendor: t.vendor, amount: round2(Math.abs(t.amount)), date: t.date, billing_url: t.billing_url || null, ...r };
+    (r.found ? state.found : state.missed).push(line);
+    did.push(line);
+  }
+  // keep the tries map from growing forever
+  const keys = Object.keys(state.tries);
+  if (keys.length > 600) for (const k of keys.sort((a, b) => state.tries[a].at - state.tries[b].at).slice(0, keys.length - 600)) delete state.tries[k];
+  await putSetting(env, 'gmailAuth', JSON.stringify(store));   // keep the fresh access token
+  const left = state.queue.length;
+  let reported = false;
+  if (!left && (state.found.length || state.missed.length)) {
+    reported = await huntReport(env, state).catch(e => { console.log('hunt report failed: ' + e.message); return false; });
+    state.lastRun = { at: Date.now(), found: state.found.length, missed: state.missed.length };
+    state.found = []; state.missed = []; state.origin = null; state.auto = undefined;
+  }
+  await putSetting(env, 'receiptHunt', JSON.stringify(state));
+  return { did, left, found: did.filter(d => d.found).length, reported };
+}
+
+/* One message when a hunt finishes. Found receipts are a list, not pings;
+ * what is left is split the same way the month-end nudge splits it: the ones
+ * with a billing page (a link to go and download) and the rest. */
+async function huntReport(env, state) {
+  if (!env.SLACK_BOT_TOKEN) return false;
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  const channel = state.origin?.channel || sr.channelId;
+  if (!channel) return false;
+  const found = state.found || [];
+  // a receipt dropped in by hand while the hunt ran is no longer missing
+  const stillOpen = new Set();
+  for (const m of state.missed || []) {
+    const r = await env.DB.prepare('SELECT 1 AS x FROM transactions WHERE id=?1 AND receipt_key IS NULL AND receipt_skip=0').bind(m.id).first();
+    if (r) stillOpen.add(m.id);
+  }
+  const missed = (state.missed || []).filter(m => m.why !== 'already has one' && stillOpen.has(m.id));
+  if (state.auto && !found.length) return false;   // a quiet night says nothing
+  const money = n => '$' + Number(n).toFixed(2);
+  let text = found.length
+    ? `:mag: *Found ${found.length} receipt${found.length > 1 ? 's' : ''} in Gmail and attached ${found.length > 1 ? 'them' : 'it'}:*\n` +
+      found.slice(0, 15).map(f => `• ${f.vendor} ${money(f.amount)} · ${f.date} · <${f.link}|${(f.subject || 'email').replace(/[<>|]/g, '').slice(0, 60)}>`).join('\n') +
+      (found.length > 15 ? `\n• and ${found.length - 15} more` : '')
+    : `:mag: *Looked through Gmail and none of these were there.*`;
+  if (missed.length && !state.auto) {
+    const link = missed.filter(m => m.billing_url), rest = missed.filter(m => !m.billing_url);
+    text += `\n\n*Not in your email (${missed.length})*`;
+    if (link.length) text += `\n_Download from their site:_\n` + link.slice(0, 10).map(m => `• ${m.vendor} ${money(m.amount)} · ${m.date} · <${m.billing_url}|billing page>`).join('\n');
+    if (rest.length) text += `\n${link.length ? '_No billing link saved yet:_\n' : ''}` + rest.slice(0, 12).map(m => `• ${m.vendor} ${money(m.amount)} · ${m.date}`).join('\n') +
+      (rest.length > 12 ? `\n• and ${rest.length - 12} more` : '');
+  }
+  const r = await slack(env, 'chat.postMessage', { channel, text, unfurl_links: false, unfurl_media: false,
+    ...(state.origin?.thread ? { thread_ts: state.origin.thread } : {}) }, true);
+  return !!r?.ok;
+}
+
+function controller() {
+  if (!_ctl) _ctl = buildController({
+    getSetting, putSetting, safeJson, centralDate, monthOf, addMonthsYmd, validMonth, slack,
+    sendStatement, monthStatus, bucketFor, learnDefault, huntReceipts,
+    resolveReport, periodReport, seriesSummary, bankBalances, dashSummary, recentRevenueAvg, getMoney, getNotify,
+  });
+  return _ctl;
+}
+/* kept for the one caller that still spells it this way */
+const askHelpers = () => controller().h();
+
+/* A thread Cole has mentioned the bot in stays open for follow-ups, so he can
+ * keep talking in it without @-ing every line. The mark is what separates a
+ * conversation from the rest of the channel: a receipt thread he never
+ * addressed the bot in is still just a receipt thread, and his replies in it
+ * are not questions. */
+const askThreadKey = (channel, ts) => `askthread:${channel}:${ts}`;
+const openAskThread = (env, channel, ts) => env.DB.prepare(
+  "INSERT OR IGNORE INTO ledger_jobs(id,kind,payload,status) VALUES(?1,'ask-thread',?2,'done')")
+  .bind(askThreadKey(channel, ts), JSON.stringify({ channel, ts, at: new Date().toISOString() })).run();
+const askThreadIsOpen = async (env, channel, ts) => !!(await env.DB
+  .prepare("SELECT 1 AS x FROM ledger_jobs WHERE id = ?1").bind(askThreadKey(channel, ts)).first());
+
+async function askGate(env, body, ev) {
+  const mentioned = ev.type === 'app_mention';
+  const dm = ev.channel_type === 'im';
+  /* A mention inside a channel thread ALSO arrives as a plain message event,
+   * often first. If that copy claimed the message below and then bowed out
+   * (thread not open yet), the app_mention copy would be thrown away as a
+   * duplicate and the question never answered. So a plain thread reply that
+   * is not ours to answer leaves without claiming anything. */
+  if (!mentioned && !dm) {
+    if (!ev.thread_ts) return { skipped: 'not in a thread' };
+    if (!(await askThreadIsOpen(env, ev.channel, ev.thread_ts)))
+      return { skipped: 'thread was never addressed to the bot' };
+  }
+  /* Slack retries any event it did not get a 200 for inside 3 seconds, and an
+   * AI answer takes longer than that — we always ack instantly, so a retry
+   * here is a duplicate. An @mention inside a DM is delivered twice as well,
+   * once as app_mention and once as message.im, under two different event ids.
+   * Claiming the MESSAGE (channel + ts) rather than the event id covers both,
+   * so a question is answered, and billed, once. */
+  const claim = await env.DB.prepare(
+    "INSERT OR IGNORE INTO ledger_jobs(id,kind,payload,status) VALUES(?1,'slack-ask',?2,'done')")
+    .bind(`ask:${ev.channel}:${ev.ts}`,
+          JSON.stringify({ channel: ev.channel, ts: ev.ts, event: body.event_id || null })).run();
+  if (!claim.meta.changes) return { skipped: 'duplicate event' };
+
+  /* The books answer to Cole. Anyone else in the channel is ignored in
+   * silence — a refusal posted every time a colleague says something would be
+   * worse than saying nothing. */
+  const owner = await ownerUserId(env);
+  if (!owner) {
+    await slack(env, 'chat.postMessage', { channel: ev.channel, thread_ts: ev.thread_ts || ev.ts,
+      text: `I can't tell who owns this ledger, so I won't answer. Check that the Slack app has the users:read.email scope and that ${env.OWNER_EMAIL || 'the owner email'} is on the workspace.` }, true);
+    return { skipped: 'owner unknown' };
+  }
+  if (ev.user !== owner) return { skipped: 'not the owner' };
+
+  if (mentioned) {
+    // whichever thread this mention is in is now a conversation, including a
+    // receipt thread he has just pulled the bot into
+    await openAskThread(env, ev.channel, ev.thread_ts || ev.ts);
+  }
+  const { engine, h } = controller();
+  const findings = await engine.openFindings(env, h()).catch(() => []);
+  return engine.answerSlack(env, ev, h(), { findings: findings.slice(0, 6) });
+}
+
+async function processSlackReceipts(env) { return withLedgerLease(env, 'receipts', env => processSlackReceiptsInner(env)); }
+async function processSlackReceiptsInner(env) {
+  if (!env.SLACK_BOT_TOKEN) return { skipped: 'no SLACK_BOT_TOKEN' };
+  const cfg = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  cfg.seen = cfg.seen || [];
+  // An event and the cron can fire on the same file within seconds of each
+  // other; both would read the same `seen` list and file the receipt twice.
+  // A short lease makes the loser skip instead.
+  // Atomic fenced lease is acquired by processSlackReceipts.
+  if (!cfg.channelId) {
+    const ch = await findReceiptsChannel(env);
+    if (ch.error) { cfg.lastError = ch.error; await putSetting(env, 'slackReceipts', JSON.stringify(cfg)); return { error: ch.error }; }
+    cfg.channelId = ch.id;
+  }
+  const messages=[], latest=String(Date.now()/1000); let cursor='';
+  do {
+    const hist=await slack(env,'conversations.history',{channel:cfg.channelId,limit:'100',latest,
+      ...(cfg.lastTs?{oldest:cfg.lastTs}:{}),...(cursor?{cursor}:{})});
+    if(!hist.ok) throw new Error('Slack history: '+hist.error);
+    messages.push(...(hist.messages||[])); cursor=hist.response_metadata?.next_cursor || '';
+  } while(cursor);
+  for(const msg of messages) for(const f of ((msg.files||[]).some(f=>f.filetype==='email'||['message/rfc822','text/html'].includes(f.mimetype)) ? [(msg.files||[]).find(f=>f.filetype==='email'||['message/rfc822','text/html'].includes(f.mimetype))] : (msg.files||[])))
+    await env.DB.prepare("INSERT OR IGNORE INTO ledger_jobs(id,kind,payload) VALUES(?1,'slack-file',?2)")
+      .bind('slack-file:'+f.id,JSON.stringify({...msg,files:[f]})).run();
+  const pending=await env.DB.prepare("SELECT payload FROM ledger_jobs WHERE kind='slack-file' AND status='pending'").all();
+  const msgs=pending.results.map(r=>JSON.parse(r.payload)).sort((a,b)=>Number(a.ts)-Number(b.ts));
+  cfg.lastError=null;
+  const taxCats = safeJson(await getSetting(env, 'taxCats'), []) || [];
+  /* Skip OUR OWN posts only. The first version of this skipped every bot
+   * message, which silently swallowed the entire email intake: Slack delivers
+   * mail sent to a channel address as a post from SLACKBOT, so ten forwarded
+   * receipts arrived and none was ever read. Identify ourselves properly. */
+  let selfId = cfg.selfUserId;
+  if (!selfId) {
+    const who = await slack(env, 'auth.test');
+    if (who.ok) { selfId = cfg.selfUserId = who.user_id; }
+  }
+  let handled = 0, needsYou = 0, pulledBank = false, refreshed = null;
+  const filed = [];
+  for (const msg of msgs) {
+    if (+msg.ts > +(cfg.lastTs || 0)) cfg.lastTs = msg.ts;
+    if (selfId && msg.user === selfId) { for(const file of msg.files || [])await finishJob(env,'slack-file:'+file.id); continue; }              // our own P&L posts
+    /* One forwarded email lands as TWO Slack files: the email container and
+     * a copy of its text/html body. Reading both filed the same payment twice,
+     * onto rows in two different months (the second copy could not use the row
+     * the first had just receipted, so it went hunting in the window). When an
+     * email container exists it is the only file worth reading. */
+    const mails = (msg.files || []).filter(f => f.filetype === 'email'
+      || f.mimetype === 'message/rfc822' || f.mimetype === 'text/html');
+    const flist = mails.length ? [mails[0]] : (msg.files || []);
+    for (const f of flist) {
+      const isPdf = f.mimetype === 'application/pdf';
+      // Slack's email-to-channel arrives as filetype 'email', and the forwarded
+      // body itself comes through as a text/html file. Both are receipts.
+      const isEmail = f.filetype === 'email' || f.mimetype === 'text/html'
+        || f.mimetype === 'message/rfc822';
+      if (!isEmail && !isPdf && !/^image\//.test(f.mimetype || '')) {await finishJob(env,'slack-file:'+f.id);continue;}
+      if (cfg.seen.includes(f.id)) { await finishJob(env, 'slack-file:'+f.id); continue; }
+      let fileFailed = false;
+      const reply = (text, blocks, broadcast = false) => slack(env, 'chat.postMessage',
+        { channel: cfg.channelId, thread_ts: msg.ts, text, unfurl_links: false,
+          ...(broadcast ? { reply_broadcast: true } : {}),
+          ...(blocks ? { blocks } : {}) }, true).then(r=>{if(!r.ok)throw new Error('Slack delivery: '+r.error);return r;});
+      /* A reaction is the whole status report when nothing is wrong. It does
+       * not notify anyone, so twenty forwarded receipts stop being twenty
+       * pings: the tick just appears on each one. Anything that actually
+       * needs Cole still replies in the thread, which does notify. */
+      const react = name => slack(env, 'reactions.add',
+        { channel: cfg.channelId, timestamp: msg.ts, name }, true).catch(() => {});
+      /* Only used where a decision is genuinely waiting, so the mention keeps
+       * meaning "this one needs you" rather than becoming background noise. */
+      const nudge = async (text, blocks) => {
+        const { at, broadcast } = await notifyStyle(env, 'decisions');
+        const withAt = at + text;
+        if (blocks && blocks[0]?.type === 'section' && blocks[0].text?.type === 'mrkdwn')
+          blocks = [{ ...blocks[0], text: { ...blocks[0].text, text: at + blocks[0].text.text } }, ...blocks.slice(1)];
+        return reply(withAt, blocks, broadcast);
+      };
+      /* Filed without incident: still say exactly what happened and where it
+       * went — a thread reply does not notify him, so a running record costs
+       * nothing. What it does NOT do is @mention him. The mention is reserved
+       * for the ones holding a decision, so a ping always means "you". */
+      const quiet = async (t, text, blocks) => {
+        if (t) filed.push(t);
+        await react('white_check_mark');
+        if (text) await reply(text, blocks);
+      };
+      /* The category controls live IN the thread, so a wrong guess is one tap
+       * to fix and the app never has to be opened for a receipt. */
+      const catControls = (txnId, current, alternates) => {
+        const short = c => c.length > 24 ? c.slice(0, 23) + '…' : c;
+        const els = alternates.map((c, i) => ({
+          type: 'button', action_id: 'cat' + i,
+          text: { type: 'plain_text', text: short(c) },
+          value: JSON.stringify({ id: txnId, tax: c }) }));
+        els.push({
+          type: 'static_select', action_id: 'cat_sel',
+          placeholder: { type: 'plain_text', text: 'Change category…' },
+          options: taxCats.map(c => ({ text: { type: 'plain_text', text: short(c) },
+            value: JSON.stringify({ id: txnId, tax: c }) })) });
+        return { type: 'actions', elements: els.slice(0, 5) };
+      };
+      try {
+        let dlUrl = f.url_private_download || f.url_private;
+        let mimetype = f.mimetype, fname = f.name || 'receipt', emailText = null;
+        if (isEmail) {
+          const info = await slack(env, 'files.info', { file: f.id });
+          const fi = info.file || f;
+          /* Which attachment, when a vendor sends more than one? Prefer the
+           * word "receipt" — it is proof of payment, which is what a deduction
+           * needs; an invoice only proves it was asked for. Failing that take
+           * any PDF or image, and failing THAT keep the email itself, because
+           * plenty of vendors put the whole receipt in the body. */
+          const atts = (fi.attachments || []).filter(a =>
+            a.mimetype === 'application/pdf' || /^image\//.test(a.mimetype || ''));
+          const named = re => atts.find(a => re.test(String(a.filename || a.name || '')));
+          const att = named(/receipt/i) || named(/invoice|statement|bill/i) || atts[0];
+          if (att && (att.url || att.url_private)) {
+            dlUrl = att.url || att.url_private; mimetype = att.mimetype;
+            fname = att.filename || att.name || fname;
+          } else {
+            // No usable attachment: read the email itself, and store it as the
+            // receipt so there is still a document behind the number.
+            const from = Array.isArray(fi.from) && fi.from[0] ? (fi.from[0].address || fi.from[0].original || '') : '';
+            const body = fi.plain_text || fi.preview_plain_text || fi.preview || '';
+            emailText = [fi.subject ? 'Subject: ' + fi.subject : '', from ? 'From: ' + from : '', body]
+              .filter(Boolean).join('\n');
+            fname = ((fi.subject || 'email receipt') + '.html').slice(0, 120);
+            mimetype = f.mimetype || 'text/html';
+          }
+        }
+        const dl = await fetch(dlUrl, { headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } });
+        const buf = await dl.arrayBuffer();
+        if (buf.byteLength > 8 * 1024 * 1024) { await react('x'); needsYou++; await nudge('⚠️ That file is over 8MB — attach it from the app instead.'); continue; }
+        const existingReceipt = await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1').bind(await sha256bytes(buf)).first();
+
+        const bytes = new Uint8Array(buf);
+        let b64 = '';
+        for (let i = 0; i < bytes.length; i += 0x8000)
+          b64 += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        b64 = btoa(b64);
+        /* Slack hands the forwarded mail over as an HTML file, and files.info
+         * often carries no plain_text for it — so the readable version has to
+         * come out of the markup itself. Strip script/style, drop the tags,
+         * unescape the handful of entities that matter, and let Claude read
+         * what a person would see. */
+        if (isEmail && (!emailText || emailText.length < 200) && /html|text\//.test(mimetype || '')) {
+          const html = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          const text = html
+            .replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&nbsp;|&#8199;|&#847;|&zwnj;/gi, ' ')
+            .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (text.length > (emailText || '').length) emailText = text.slice(0, 12000);
+        }
+        // Claude's image ceiling is ~5MB of data; oversize files still get stored
+        const ext = emailText
+          ? await claudeExtract(env, null, null, emailText)
+          : bytes.length < 4.5 * 1024 * 1024 ? await claudeExtract(env, b64, mimetype) : null;
+        const today = centralDate(Date.now() / 1000);
+        // THE RECEIPT'S OWN DATE DECIDES THE MONTH. A receipt photographed in
+        // September for an April lunch belongs to April — filing it under
+        // "today" would silently move spend between months (and years).
+        const rDate = /^\d{4}-\d{2}-\d{2}$/.test(ext?.date || '') && ext.date <= today ? ext.date : today;
+        const rMonth = monthOf(rDate);
+
+        /* 0) ONE DOCUMENT, SEVERAL PAYMENTS. Cole pays his contractors in a
+         * single batch, so the bank sends back one confirmation covering four
+         * people at once. Read as a single receipt it would attach to whoever
+         * happened to be extracted first and leave the rest bare. Each payment
+         * gets matched on its own and the same file is attached to every row
+         * it settles. Strictly ATTACH-ONLY: the bank feed already carries these
+         * charges, so inventing rows from the confirmation would double-count. */
+        const many = (ext?.payments || []).length > 1 ? ext.payments : null;
+        if(existingReceipt && !many) { await quiet(null, 'This receipt is already attached to transaction '+existingReceipt.id+'.'); continue; }
+        if (many) {
+          const hit = [], miss = [];
+          const documentHash=await sha256bytes(buf);
+          for (const [paymentIndex,p] of many.entries()) {
+            const paymentKey=await sha256hex(JSON.stringify([p.vendor,p.amount,p.date || rDate,paymentIndex]));
+            const allocation=await env.DB.prepare('SELECT transaction_id FROM receipt_allocations WHERE document_hash=?1 AND payment_key=?2').bind(documentHash,paymentKey).first();
+            if(allocation) { const prior=await env.DB.prepare('SELECT * FROM transactions WHERE id=?1').bind(allocation.transaction_id).first(); if(prior){hit.push(prior);continue;} }
+            const pDate = /^\d{4}-\d{2}-\d{2}$/.test(p.date || '') && p.date <= today ? p.date : rDate;
+            const { results } = await env.DB.prepare(
+              `SELECT * FROM transactions WHERE type = 'out' AND expected = 0 AND receipt_key IS NULL
+               AND month >= ?1 AND month <= ?2 AND ABS(amount - ?3) < 0.005
+               ORDER BY ABS(julianday(date) - julianday(?4)) LIMIT 5`)
+              .bind(monthOf(addMonthsYmd(pDate, -1)), monthOf(addMonthsYmd(pDate, 1)), Math.abs(p.amount), pDate).all();
+            const first = String(p.vendor).toLowerCase().split(' ')[0];
+            const row = receiptMatch(results,p.vendor,p.amount,pDate);
+            if (!row) { miss.push(p); continue; }
+            const key = `rcpt:${row.id}:${Date.now()}:${hit.length}`;
+            await receiptPut(env, key, buf);
+            await env.DB.batch([
+              env.DB.prepare('INSERT INTO receipt_allocations(document_hash,payment_key,transaction_id) VALUES(?1,?2,?3)').bind(documentHash,paymentKey,row.id),
+              env.DB.prepare('UPDATE transactions SET receipt_key=?2,receipt_name=?3,receipt_type=?4,receipt_hash=?5 WHERE id=?1')
+                .bind(row.id,key,fname.slice(0,120),mimetype,documentHash)
+            ]);
+            hit.push(row);
+          }
+          if (hit.length) {
+            if (miss.length) {
+              const lines = hit.map(t => `• *${t.vendor}* $${t.amount.toFixed(2)} — ${moLabel(monthOf(t.date))}`).join('\n');
+              const msg = `🧾 Attached to *${hit.length} payment${hit.length > 1 ? 's' : ''}*:\n${lines}\n\n` +
+                `⚠️ ${miss.length} more in there matched no charge: ${miss.map(p => `${p.vendor} $${Math.abs(p.amount).toFixed(2)}`).join(', ')}. ` +
+                `Either it has not posted to Novo or Amex yet, or it went on a different card.`;
+              await react('warning'); needsYou++;
+              await nudge(msg, [{ type: 'section', text: { type: 'mrkdwn', text: msg } },
+                { type: 'actions', elements: hit.slice(0, 5).map(t => ({ type: 'button', action_id: 'unmatch',
+                    text: { type: 'plain_text', text: `Not ${String(t.vendor).slice(0, 18)} ↩︎` },
+                    value: JSON.stringify({ undo: t.id }) })) }]);
+            } else {
+              const lines = hit.map(t => `• *${t.vendor}* $${t.amount.toFixed(2)} — ${moLabel(monthOf(t.date))}`).join('\n');
+              const ok = `✅ Covered *${hit.length} payment${hit.length > 1 ? 's' : ''}* — receipt attached to each:\n${lines}`;
+              for (const t of hit) filed.push(t);
+              await quiet(null, ok, [
+                { type: 'section', text: { type: 'mrkdwn', text: ok } },
+                { type: 'actions', elements: hit.slice(0, 5).map(t => ({ type: 'button', action_id: 'unmatch',
+                    text: { type: 'plain_text', text: `Not ${String(t.vendor).slice(0, 18)} ↩︎` },
+                    value: JSON.stringify({ undo: t.id }) })) }]);
+            }
+            handled++; continue;
+          }
+          // nothing matched: fall through and treat it as one ordinary receipt
+        }
+
+        // 1) best case: it pays off an expense already in the ledger. Search the
+        // receipt's own month ±1 (a card posts a day or two after the purchase);
+        // attaching to a CLOSED month is allowed — only new rows are frozen out.
+        let target = null;
+        if (ext?.amount) {
+          const words = v => String(v || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+          /* The name has to agree. Two subscriptions at the same price in the
+           * same month is ordinary, and taking the nearest by date regardless
+           * of who it was paid to is how an Anthropic receipt ended up on an
+           * OpenAI charge. Where the names disagree nothing is attached · the
+           * candidates are offered as buttons below instead, and he decides. */
+          const agrees = t => {
+            if (sameCompany(t.vendor, ext.vendor)) return true;
+            const a = words(t.vendor), b = words(ext.vendor);
+            return a.length && b.length && (a[0] === b[0] || a.includes(b[0]) || b.includes(a[0]));
+          };
+          /* Same tip window as the held-receipt sweep: the card can settle up
+           * to a third above the printed slip and never below it. Safe only
+           * because `agrees` still has to hold. */
+          const look = async () => (await env.DB.prepare(
+            `SELECT * FROM transactions WHERE type = 'out' AND expected = 0 AND receipt_key IS NULL
+             AND month >= ?1 AND month <= ?2 AND amount >= ?3 AND amount <= ?4
+             ORDER BY ABS(amount - ?5), ABS(julianday(date) - julianday(?6)) LIMIT 5`)
+            .bind(monthOf(addMonthsYmd(rDate, -1)), monthOf(addMonthsYmd(rDate, 1)),
+                  Number(ext.amount) / 1.35 - 0.005, Number(ext.amount) * 1.35 + 0.005,
+                  Number(ext.amount), rDate).all()).results;
+          /* Exact first; then a charge LARGER than the slip, which is a tip
+           * added after printing; then a SMALLER one only if it is the only
+           * candidate from that vendor, because a smaller charge is usually a
+           * different purchase. */
+          const pick = rows => receiptMatch(rows,ext.vendor,ext.amount,rDate,true);
+          target = pick(await look());
+          /* Nothing yet, so go and ask the bank NOW instead of waiting for
+           * tonight. Once per run, however many receipts arrived together. */
+          if (!target) {
+            if (!pulledBank) {
+              pulledBank = true;
+              /* Ask the card for an immediate update, give it a moment, then
+               * pull the feed. Once per run, however many receipts arrived. */
+              refreshed = await bankRefresh(env).catch(e => ({ ok: false, why: String(e.message || e) }));
+              await syncPlaid(env).catch(() => {});
+            }
+            target = pick(await look());
+          }
+        }
+        /* 2) An EMAILED receipt that matches nothing is not filed. A photo is
+         * something Cole chose to take, so it is his by definition — but email
+         * arrives on its own, and plenty of it is a copy of somebody else's
+         * charge: Shopify billing a client's store, Triple Whale on a client's
+         * card. Inventing an expense from those would quietly inflate his costs.
+         * Now that the bank feed carries every real charge, "nothing matched"
+         * is a strong signal, so it asks instead of guessing. */
+        if (!target && isEmail && ext?.vendor && ext?.amount) {
+          const fp = await sha256bytes(buf);
+          const pendKey = `pend:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+          await receiptPut(env, pendKey, buf, 30 * 24 * 3600);
+          await putSetting(env, pendKey, JSON.stringify({
+            /* The file's own fingerprint, so a hold can recognise itself. Two
+             * holds of one file is not a money error, but it is two follow-up
+             * questions and two week-later nags about a single receipt. */
+            fp,
+            vendor: String(ext.vendor).slice(0, 120), amount: round2(Number(ext.amount)),
+            date: rDate, month: rMonth, name: fname.slice(0, 120), type: mimetype,
+            note: ext.note ? String(ext.note).slice(0, 300) : null,
+            tax_cat: ext.tax_category || null,
+            // where it arrived · the week-later follow-up belongs in the same
+            // thread as the receipt, not shouted into the channel
+            ch: cfg.channelId, ts: msg.ts,
+          }));
+          /* "No match" is usually true, but not always: the exact-cent rule
+           * misses a receipt whose total differs from what the card actually
+           * took (foreign VAT, a rounded conversion, a tip added after). So
+           * before shrugging, look for a charge that is CLOSE on the same
+           * vendor and offer it by name. Never auto-attached — offered. */
+          /* An invoice charges the exact amount, so the cent rule stays. When
+           * it still finds nothing, the useful thing is not a looser guess:
+           * it is saying WHICH of the filters rejected it. The same amount is
+           * looked up again with each restriction dropped in turn, and the
+           * first hit explains itself and offers the action that fits. */
+          const amt = Number(ext.amount);
+          const win = [monthOf(addMonthsYmd(rDate, -1)), monthOf(addMonthsYmd(rDate, 1))];
+          const same = String(ext.vendor || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)[0] || '';
+          const q = async (sql, binds) => (await env.DB.prepare(sql).bind(...binds).all()).results;
+
+          /* (a) the charge is there, but something already claimed the receipt.
+           * DATE-TIGHT on purpose: a subscription bills the same amount every
+           * single month, so the +/-1 month window used for MATCHING would
+           * call September's Canva receipt a duplicate of August's. Ten days
+           * covers a receipt arriving before or after its charge posts;
+           * anything a month away is next month's bill, not this one twice. */
+          const sameFile = await q(
+            `SELECT * FROM transactions WHERE receipt_hash = ?1 LIMIT 3`, [fp]);
+          /* ONLY THE FILE ITSELF PROVES A DUPLICATE. "Same amount, within ten
+           * days, already has a receipt" proves nothing: Anthropic bills API
+           * usage several times a week and the amounts repeat, so a genuinely
+           * new $10.62 receipt was refused AND DELETED because a different
+           * $10.62 charge four days earlier was already covered.
+           *
+           * The two mistakes are not the same size. Refusing loses a real
+           * receipt the IRS may ask for. A second receipt sitting on a charge
+           * costs nothing, because a receipt is not money and cannot double
+           * count. So a near miss is now a note attached to the normal flow,
+           * never a reason to discard the file. */
+          const taken = sameFile;
+          const similar = sameFile.length ? [] : await q(
+            `SELECT * FROM transactions WHERE type='out' AND expected=0 AND receipt_key IS NOT NULL
+             AND ABS(amount - ?1) < 0.005 AND ABS(julianday(date) - julianday(?2)) <= 10
+             ORDER BY ABS(julianday(date) - julianday(?2)) LIMIT 3`, [amt, rDate]);
+          // (b) it is still only a prediction — the bank has not confirmed it
+          const pending = await q(
+            `SELECT * FROM transactions WHERE type='out' AND expected=1
+             AND month >= ?1 AND month <= ?2 AND ABS(amount - ?3) < 0.005 LIMIT 3`, [...win, amt]);
+          // (c) right amount, wrong month — the date on the receipt misled us
+          const elsewhere = await q(
+            `SELECT * FROM transactions WHERE type='out' AND expected=0 AND receipt_key IS NULL
+             AND ABS(amount - ?1) < 0.005 AND ABS(julianday(date) - julianday(?2)) <= 75
+             ORDER BY ABS(julianday(date) - julianday(?2)) LIMIT 3`, [amt, rDate]);
+          // (d) the vendor is known, so what DID it charge around then?
+          const byVendor = same ? await q(
+            `SELECT * FROM transactions WHERE type='out' AND expected=0
+             AND month >= ?1 AND month <= ?2 AND LOWER(vendor) LIKE ?3
+             ORDER BY date DESC LIMIT 3`, [...win, `%${same}%`]) : [];
+
+          /* Already waiting for the same charge · say so once and stop. */
+          const heldSame = (await env.DB.prepare(
+            `SELECT key, value FROM settings WHERE key LIKE 'pend:%'`).all()).results
+            .filter(r => r.key !== pendKey && safeJson(r.value, {})?.fp === fp);
+          if (heldSame.length) {
+            await receiptDelete(env, pendKey).catch(() => {});
+            await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(pendKey).run();
+            await react('repeat');
+            await reply(`\u23f3 *${ext.vendor}* $${amt.toFixed(2)} \u00b7 already holding this exact receipt, waiting for the charge to reach Novo or Amex. Nothing to do.`);
+            handled++; continue;
+          }
+
+          /* A duplicate is CLOSED, not open: the charge is covered, so there is
+           * no decision, no mention, and above all no "file as new" button —
+           * that button on a duplicate is a one-tap double count. The pending
+           * blob is deleted on the spot so nothing lingers to act on later. */
+          if (taken.length) {
+            await receiptDelete(env, pendKey).catch(() => {});
+            await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(pendKey).run();
+            await react('repeat');
+            await reply(`🔁 *${ext.vendor}* $${amt.toFixed(2)} — this is the exact same file already attached to *${taken[0].vendor}* ${fmtMoney(taken[0].amount)} (${taken[0].date}). Nothing filed, nothing needed.`);
+            handled++; continue;
+          }
+          const head = `🔍 *${ext.vendor}* $${amt.toFixed(2)}`;
+          let why, btns = [], fresh = false;
+          /* AGE DECIDES FIRST, and it has to. A receipt forwarded the moment
+           * the money left is not a puzzle, it is early: the bank feed runs
+           * overnight, so the charge cannot be here yet and the only correct
+           * answer is to hold it.
+           *
+           * This test used to sit LAST, behind three checks that fire on any
+           * vendor billing more than once a month. Anthropic bills API usage
+           * several times a week, so "that vendor charged you, but $12.27 and
+           * $10.55, not $10.62" always won, and a receipt that needed nothing
+           * from Cole arrived as a question with a question mark on it. The
+           * hints those checks produce are worth keeping · they now ride along
+           * inside the hold instead of replacing it. */
+          const isFresh = rDate >= today || (Date.parse(today) - Date.parse(rDate)) <= 4 * 86400e3;
+          if (isFresh) {
+            fresh = true;
+            /* The bank was asked a moment ago and had nothing settled. Look
+             * once more for a PENDING line, so the answer is what the card
+             * actually shows rather than a shrug. */
+            const pend = await bankPending(env, amt, addDaysYmd(rDate, -6)).catch(() => null);
+            why = pend
+              ? `I can see it on your *${pend.account || 'card'}* as *${pend.vendor}*, still pending \u00b7 a pending charge has no final amount yet, so it cannot be booked. `
+                + `Holding this receipt and attaching it the moment it settles. Nothing for you to do.`
+              /* Only claim to have asked when the bank actually let us. An
+               * on-demand refresh is a paid Plaid product this account is not
+               * signed up for, so the request comes back refused and the honest
+               * sentence is simply that the feed has not caught up. */
+              : (refreshed && refreshed.ok
+                  ? `I asked Novo and Amex for an update just now and this one has not reached the feed yet \u00b7 `
+                  : `This has not reached the bank feed yet \u00b7 `)
+                + `a charge can sit on the card's own app for a few hours before the feed carries it, and longer before it settles. `
+                + `Holding this receipt and attaching it the moment it lands. Nothing for you to do.`;
+            /* One exception worth offering: an unreceipted charge for exactly
+             * this amount already exists. Hold anyway, but let him take it. */
+            if (elsewhere.length) {
+              why += `\n_If it is really this one, tap it:_`;
+              btns = elsewhere.slice(0, 3).map(t => ({ type: 'button', action_id: 'led_attach',
+                text: { type: 'plain_text', text: `${String(t.vendor).slice(0, 14)} ${t.date}` },
+                value: JSON.stringify({ file: pendKey, to: t.id }) }));
+            }
+          } else if (pending.length) {
+            why = `There is a matching *expected* row (${pending[0].vendor}, ${moLabel(pending[0].month)}) that the bank has not confirmed yet. Confirm it in the app and drop this receipt again, and it will attach.`;
+          } else if (elsewhere.length) {
+            why = `The amount exists but in *${moLabel(elsewhere[0].month)}* (${elsewhere[0].vendor}, ${elsewhere[0].date}), outside the window around this receipt's date. Tap it to attach it there:`;
+            btns = elsewhere.slice(0, 3).map(t => ({ type: 'button', action_id: 'led_attach',
+              text: { type: 'plain_text', text: `${String(t.vendor).slice(0, 14)} ${t.date}` },
+              value: JSON.stringify({ file: pendKey, to: t.id }) }));
+          } else if (byVendor.length) {
+            why = `*${byVendor[0].vendor}* did charge you in that window, but ${byVendor.map(t => '$' + t.amount.toFixed(2)).join(', ')} — not $${amt.toFixed(2)}. Either I misread the total, or this receipt covers a different card.`;
+          } else {
+            why = `Nothing at that amount anywhere, and this receipt is more than a few days old. That usually means it went on a card Ledger does not see, or it is somebody else's card (a client's Shopify or ad tool).`;
+          }
+          const near = similar.length
+            ? `\n_Note: *${similar[0].vendor}* ${fmtMoney(similar[0].amount)} on ${similar[0].date} already has a receipt for the same amount. If this is that same one, ignore this._`
+            : '';
+          const body = `${head} \u00b7 ${fresh ? 'held' : 'no charge on Novo or Amex matches that amount yet'}.\n${why}${near}`;
+          await react(fresh ? 'hourglass_flowing_sand' : 'question');
+          if (!fresh) needsYou++;
+          await (fresh ? reply : nudge)(body, [
+            { type: 'section', text: { type: 'mrkdwn', text: body } },
+            { type: 'actions', elements: [...btns,
+              { type: 'button', action_id: 'led_file',
+                style: 'primary', text: { type: 'plain_text', text: 'File as a new expense' },
+                value: JSON.stringify({ file: pendKey }) },
+            ].slice(0, 5) }]);
+          handled++; continue;
+        }
+        // 3) otherwise a readable receipt files itself as a new expense
+        if (!target && ext?.vendor && ext?.amount) {
+          const date = rDate, month = rMonth;
+          if ((await monthStatus(env, month)) === 'closed') {
+            /* Attaching to a closed month is fine and happens silently above.
+             * This is the other case: no charge matched, so filing it would
+             * mean CREATING a row in a month whose report is already frozen,
+             * which would change a number that has been reported. */
+            await react('lock'); needsYou++;
+            await nudge(`🔒 *${ext.vendor}* $${Number(ext.amount).toFixed(2)} from ${date} matches no charge in ${moLabel(month)}, and that month is closed — so I can't add it without changing a report you've already filed.\n` +
+              `Attaching receipts to a closed month is fine; it's only *new* rows that are frozen out. If this really belongs there, reopen ${moLabel(month)} in the app and drop it again.`);
+            handled++; continue;
+          }
+          const row = await applyRule(env, {
+            date, month, type: 'out', vendor: String(ext.vendor).slice(0, 120),
+            amount: round2(Number(ext.amount)), bucket: null, tax_cat: null,
+            note: ext.note ? String(ext.note).slice(0, 300) : null, status: 'ok',
+          });
+          // no rule for this vendor → Claude's read of the receipt decides,
+          // and the choice is learned as the vendor's default for next time
+          let guessed = false;
+          if (row.status === 'review' && ext.tax_category) {
+            row.tax_cat = ext.tax_category; row.bucket = bucketFor(ext.tax_category);
+            row.status = 'ok'; guessed = true;
+            await learnDefault(env, row.vendor, row.bucket, row.tax_cat);
+          }
+          const res = await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+            (date, month, type, vendor, amount, bucket, tax_cat, note, status, source, import_id)
+            VALUES (?1,?2,'out',?3,?4,?5,?6,?7,?8,'manual',?9)`)
+            .bind(row.date, row.month, row.vendor, row.amount, row.bucket, row.tax_cat, row.note, row.status,'slack-photo:'+f.id).run();
+          const saved=await env.DB.prepare('SELECT id FROM transactions WHERE import_id=?1').bind('slack-photo:'+f.id).first();
+          target = { id: saved.id, vendor: row.vendor, amount: row.amount, date: row.date,
+                     __new: true, __review: row.status === 'review', __guessed: guessed,
+                     __cat: row.tax_cat, __alts: ext.alternates || [] };
+        }
+        if (target) {
+          const key = `rcpt:${target.id}:${Date.now()}`;
+          await receiptPut(env, key, buf);
+          await env.DB.prepare('UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5 WHERE id=?1')
+            .bind(target.id, key, fname.slice(0, 120), mimetype, await sha256bytes(buf)).run();
+          // the month is always stated: a receipt filed into the wrong month is
+          // the one mistake that would quietly move spend around behind him
+          if (target.__new) {
+            const base = `🧾 Filed: *${target.vendor}* $${target.amount.toFixed(2)} — dated ${target.date}, lands in *${moLabel(monthOf(target.date))}*. Receipt attached.`;
+            /* A brand new row is money the bank feed did not have, so it is
+             * always worth a word — but only an uncertain category is worth
+             * a ping. A vendor with a known rule just gets its tick. */
+            if (target.__review || target.__guessed) {
+              const text = target.__review
+                ? base + `\n⚠️ I couldn't tell what this was — pick a category below and I'll remember it.`
+                : base + `\nCategorized as *${target.__cat}* (my read of the receipt — tap below if it was something else, like client entertainment).`;
+              await react(target.__review ? 'warning' : 'eyes'); needsYou++;
+              await nudge(text, [
+                { type: 'section', text: { type: 'mrkdwn', text } },
+                catControls(target.id, target.__cat, target.__alts),
+              ]);
+            } else {
+              await quiet(target, base + `\nCategorized as *${target.__cat}* — your usual for this vendor.`, [
+                { type: 'section', text: { type: 'mrkdwn', text: base + `\nCategorized as *${target.__cat}* — your usual for this vendor.` } },
+                catControls(target.id, target.__cat, target.__alts),
+              ]);
+            }
+          } else {
+            /* A restaurant slip is printed before the tip is written on it, so
+             * the card settles higher. Say so rather than leaving a gap between
+             * receipt and charge for someone to query later. */
+            const over = ext?.amount ? round2(target.amount - Number(ext.amount)) : 0;
+            const mt = `✅ Matched to *${target.vendor}* $${target.amount.toFixed(2)} in *${moLabel(monthOf(target.date))}* (${target.date}) — receipt attached.`
+              + (over > 0.005
+                  ? ` The receipt says $${Number(ext.amount).toFixed(2)} and the card took $${over.toFixed(2)} more · a tip, most likely. The charge is what counts.`
+                  : over < -0.005
+                  ? ` The receipt says $${Number(ext.amount).toFixed(2)} and the card has only taken $${target.amount.toFixed(2)} so far · the tip usually lands a day later, and the ledger takes the correction on its own.`
+                  : '');
+            await quiet(target, mt, [
+              { type: 'section', text: { type: 'mrkdwn', text: mt } },
+              { type: 'actions', elements: [{ type: 'button', action_id: 'unmatch',
+                  text: { type: 'plain_text', text: 'Not a match ↩︎' },
+                  value: JSON.stringify({ undo: target.id }) }] },
+            ]);
+          }
+        } else {
+          await react('question'); needsYou++;
+          await nudge(isEmail
+            ? `⚠️ No amount anywhere in this email — some vendors only say "view your receipt" behind a link.\n` +
+              `Open it, download the actual receipt, and drop that here instead. If it is a vendor that never emails one, ` +
+              `save their billing page under Settings → Remembered vendors and month-end will hand you the link.`
+            : `⚠️ Couldn't read a vendor + total off this one — add it from the app's Receipts tab instead.`);
+        }
+        handled++;
+      } catch (e) {
+        fileFailed = true;
+        await saveJob(env,'slack-file:'+f.id,'slack-file',{...msg,files:[f]},String(e.message || e));
+        await react('x').catch(() => {});
+        needsYou++;
+        await nudge(`⚠️ Something went wrong handling this file: ${String(e.message || e).slice(0, 140)}`).catch(() => {});
+      } finally {
+        if (!fileFailed) { await finishJob(env,'slack-file:'+f.id); cfg.seen.push(f.id); cfg.seen=cfg.seen.slice(-SEEN_CAP); }
+      }
+    }
+  }
+  /* Held receipts whose 30-day blob has already expired leave a settings row
+   * behind forever if the button is never pressed; sweep them here. The key
+   * embeds its own creation time, so age is a string comparison away. */
+  try {
+    const cutoff = Date.now() - 35 * 24 * 3600e3;
+    const { results: stale } = await env.DB.prepare(
+      `SELECT key FROM settings WHERE key LIKE 'pend:%'`).all();
+    for (const r of stale) {
+      const ts = Number(r.key.split(':')[1]);
+      if (Number.isFinite(ts) && ts < cutoff)
+        await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(r.key).run();
+    }
+  } catch (e) { /* housekeeping only — never let it break the poll */ }
+
+  /* No end-of-run summary: every receipt now reports in its own thread, and a
+   * channel-level post is the one shape that WOULD ping him. */
+  cfg.lockUntil = 0;
+  await putSetting(env, 'slackReceipts', JSON.stringify(cfg));
+  return { handled, filed: filed.length, needsYou, channel: cfg.channelId, refreshed };
+}
+
+/* The old first-of-month ritual, delivered instead of performed: on the 1st
+ * the previous month's Profit & Loss lands in the finance channel as a real
+ * PDF, with the numbers and whatever still blocks the close in the message.
+ * Quarters follow on the 1st of Jan/Apr/Jul/Oct, the year on Jan 1. */
+async function sendStatement(env, period, anchor, opts = {}) {
+  if (!env.SLACK_BOT_TOKEN) return { skipped: 'no SLACK_BOT_TOKEN' };
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  if (!sr.channelId) {
+    const ch = await findReceiptsChannel(env);
+    if (ch.error) return { skipped: ch.error };
+    sr.channelId = ch.id;
+    await putSetting(env, 'slackReceipts', JSON.stringify(sr));
+  }
+  const { r, title, label, file, months, frozen } = await periodReport(env, period, anchor);
+  const $$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const SPLIT_LABELS = { personal: 'Personal', tax: 'Tax reserve', ads: 'Ads / Marketing', savings: 'Savings', other: 'Other' };
+
+  let blockers = [];
+  if (period === 'month') {
+    const f = await env.DB.prepare(`SELECT
+        SUM(CASE WHEN status='review' AND expected=0 THEN 1 ELSE 0 END) AS review,
+        SUM(CASE WHEN expected=1 THEN 1 ELSE 0 END) AS expected,
+        SUM(CASE WHEN type='out' AND expected=0 AND receipt_key IS NULL AND receipt_skip=0 THEN 1 ELSE 0 END) AS noRcpt
+      FROM transactions WHERE month=?1`).bind(anchor).first() || {};
+    blockers = [
+      +f.review ? `${f.review} in Review` : null,
+      +f.expected ? `${f.expected} expected row(s) unconfirmed` : null,
+      +f.noRcpt ? `${f.noRcpt} missing receipt(s)` : null,
+    ].filter(Boolean);
+  }
+  const heading = period === 'month' ? `📊 *${label} — Profit & Loss*`
+    : period === 'quarter' ? `📊 *${label} — Quarterly Profit & Loss*`
+    : `📊 *${label} — Annual Profit & Loss*`;
+  const comment = [
+    heading,
+    `Revenue ${$$(r.revenue)}  ·  Expenses ${$$(round2(r.expenses + r.fees))}  ·  *Net ${$$(r.net)}*` +
+      (r.margin != null ? `  ·  ${r.margin}% margin` : ''),
+    '',
+    '*Move the money* — from Novo:',
+    Object.entries(r.split).map(([k, v]) => `• ${SPLIT_LABELS[k] || k} (${r.splitPct[k]}%) — ${$$(v)}`).join('\n'),
+    '',
+    frozen ? '✅ The month is closed — these figures are frozen.'
+      : blockers.length ? `⚠️ Before you close ${label}: ${blockers.join(' · ')}.`
+      : period === 'month' ? '✅ Nothing blocks the close — one click in the app freezes this.' : '',
+    'Full statement attached · <https://tools.go-mobius-digital.com/ledger/|Open Mobius Ledger>',
+    /* The one manual step in the whole system, and it only comes round once:
+     * take the year's receipts somewhere that is not Cloudflare. Said here
+     * because a reminder nobody sees is not a backup policy. */
+    period === 'year'
+      ? '\n📦 *Once-a-year housekeeping:* Reports → Receipt archive → *All of ' + label +
+        '* downloads every receipt as one ZIP. Drop it in Drive beside this year\'s tax return — ' +
+        'that is your off-Cloudflare copy.'
+      : '',
+  ].filter(x => x !== '').join('\n');
+
+  const bytes = buildPnlPdf(r, {
+    title, period: label, months,
+    sub: period === 'month' ? 'Monthly statement' : period === 'quarter' ? 'Quarterly statement' : 'Annual statement',
+    frozen,
+  });
+  const up = await slackUploadFile(env, sr.channelId, bytes, file, comment);
+  return { period, anchor, label, bytes: bytes.length, sent: up.ok, error: up.error };
+}
+
+/* What the 1st of the month owes him: last month always, the quarter when one
+ * just ended, and the year every January — each sent once. */
+async function monthlyReportSlack(env, force = false, moOverride = null, periodOverride = null) {
+  const today = centralDate(Date.now() / 1000);
+  const prev = monthOf(addMonthsYmd(today, -1));
+  if (force) {
+    const anchor = /^\d{4}-\d{2}$/.test(moOverride || '') ? moOverride : prev;
+    return await sendStatement(env, periodOverride || 'month', anchor);
+  }
+  if (+today.slice(8) !== 1) return { skipped: 'not the 1st' };
+  const cfg = safeJson(await getSetting(env, 'monthlyReportSent'), {}) || {};
+  const out = [];
+  const once = async (key, period, anchor) => {
+    if (cfg[key]) return;
+    const res = await sendStatement(env, period, anchor);
+    out.push(res);
+    if (res.sent) { cfg[key] = today; await putSetting(env, 'monthlyReportSent', JSON.stringify(cfg)); }
+  };
+  await once(prev, 'month', prev);
+  // a quarter ends in Mar/Jun/Sep/Dec — the month that just finished
+  if ([3, 6, 9, 12].includes(+prev.slice(5, 7))) await once('q:' + prev, 'quarter', prev);
+  if (+prev.slice(5, 7) === 12) await once('y:' + prev.slice(0, 4), 'year', prev);
+  return out.length ? { sent: out } : { skipped: 'already sent' };
+}
+
+/* Month-end receipt sweep: two Slack nudges per month cycle — the 28th about
+ * the closing month, the 2nd–4th about the one just ended — never daily spam.
+ * Each missing expense carries a "No receipt — that's fine" button, which sets
+ * receipt_skip so the item stops being counted and chased. */
+async function receiptNudge(env, force = false, moOverride = null) {
+  if (!env.SLACK_BOT_TOKEN) return { skipped: 'no SLACK_BOT_TOKEN' };
+  const today = centralDate(Date.now() / 1000);
+  const day = +today.slice(8);
+  let mo = null, phase = null;
+  if (day >= 28) { mo = monthOf(today); phase = 'pre'; }
+  else if (day >= 2 && day <= 4) { mo = monthOf(addMonthsYmd(today, -1)); phase = 'post'; }
+  if (force) { mo = /^\d{4}-\d{2}$/.test(moOverride || '') ? moOverride : (mo || monthOf(today)); phase = 'forced'; }
+  if (!mo) return { skipped: 'not a nudge day' };
+  if ((await monthStatus(env, mo)) === 'closed') return { skipped: mo + ' already closed' };
+  const cfg = safeJson(await getSetting(env, 'receiptNudge'), {}) || {};
+  if (!force && cfg[mo + ':' + phase]) return { skipped: 'already sent' };
+  /* Carry each vendor's billing link along: the ones that never email an
+   * invoice are the ones that cost him a hunt, so the link travels with the
+   * nudge rather than living somewhere he has to go and look for it. */
+  const { results } = await env.DB.prepare(`SELECT t.id, t.vendor, t.amount, t.date, v.billing_url
+    FROM transactions t LEFT JOIN vendors v ON v.name = t.vendor
+    WHERE t.month = ?1 AND t.type = 'out' AND t.expected = 0
+      AND t.receipt_key IS NULL AND t.receipt_skip = 0
+    ORDER BY (v.billing_url IS NULL), ABS(t.amount) DESC`).bind(mo).all();
+  if (!results.length) return { skipped: 'nothing missing' };
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  if (!sr.channelId) return { skipped: 'no #receipts channel yet' };
+  const withLink = results.filter(t => t.billing_url);
+  const noLink = results.filter(t => !t.billing_url);
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn',
+    text: `📎 *${moLabel(mo)}: ${results.length} expense${results.length > 1 ? 's' : ''} still missing a receipt.*\n` +
+          `Drop a photo or forward the invoice email here — it attaches itself. None exists? One tap and it stops counting.` } }];
+  const line = t => ({
+    type: 'section',
+    text: { type: 'mrkdwn', text: `*${t.vendor}* — $${Math.abs(t.amount).toFixed(2)}  ·  ${t.date}` +
+      (t.billing_url ? `\n<${t.billing_url}|Open billing page →>` : '') },
+    accessory: { type: 'button', action_id: 'skip' + t.id,
+      text: { type: 'plain_text', text: "No receipt — that's fine" },
+      value: JSON.stringify({ skip: t.id }) } });
+  if (withLink.length) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn',
+      text: `*Download these yourself* — they never email an invoice. The link goes straight to their billing page.` }] });
+    for (const t of withLink.slice(0, 8)) blocks.push(line(t));
+  }
+  if (noLink.length) {
+    blocks.push({ type: 'divider' });
+    if (withLink.length) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn',
+      text: `*Everything else still missing a receipt*` }] });
+    for (const t of noLink.slice(0, 8)) blocks.push(line(t));
+  }
+  /* Retries are Cole's call, not a timer's: the daily sweep looks once, and
+   * this button is how he says "look again" for whatever is still missing. */
+  if (await gmailStore(env)) blocks.splice(1, 0, { type: 'actions', elements: [{ type: 'button', action_id: 'led_hunt',
+    style: 'primary', text: { type: 'plain_text', text: 'Check Gmail again' }, value: JSON.stringify({ hunt: mo }) }] });
+  const shown = Math.min(withLink.length, 8) + Math.min(noLink.length, 8);
+  if (results.length > shown) blocks.push({ type: 'context',
+    elements: [{ type: 'mrkdwn', text: `…and ${results.length - shown} more — the Receipts tab in the app has the full list.` }] });
+  const r = await slack(env, 'chat.postMessage',
+    { channel: sr.channelId, text: `${moLabel(mo)}: missing receipts`, blocks, unfurl_links: false }, true);
+  if (r.ok && !force) { cfg[mo + ':' + phase] = today; await putSetting(env, 'receiptNudge', JSON.stringify(cfg)); }
+  return { month: mo, missing: results.length, sent: !!r.ok, error: r.error };
+}
+
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const moLabel = m => `${MONTH_NAMES[+m.slice(5, 7) - 1]} ${m.slice(0, 4)}`;
+/* How a range is named on a document and its file: "September 2026",
+ * "Q3 2026", "2026", "Jan to Aug 2026", "Oct 2025 to Mar 2026". */
+function rangeLabelW(from, to) {
+  if (from === to) return moLabel(from);
+  const y1 = from.slice(0, 4), y2 = to.slice(0, 4), m1 = +from.slice(5, 7), m2 = +to.slice(5, 7);
+  const short = m => MONTH_NAMES[m - 1].slice(0, 3);
+  if (y1 === y2 && m1 === 1 && m2 === 12) return y1;
+  if (y1 === y2 && (m1 - 1) % 3 === 0 && m2 === m1 + 2) return `Q${(m1 - 1) / 3 + 1} ${y1}`;
+  return y1 === y2 ? `${short(m1)} to ${short(m2)} ${y1}` : `${short(m1)} ${y1} to ${short(m2)} ${y2}`;
+}
+
+/* Plaid's end_date is INCLUSIVE, and every date range in this file is
+ * half-open (to = the first day NOT wanted). Without this the last day of a
+ * month is read twice, once at the end of the month and again at the start of
+ * the next · which is how a $60 haircut on July 1st appeared in both June's
+ * and July's statement. */
+const addDaysYmd = (ymd, n) => {
+  const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const plaidEnd = ymd => addDaysYmd(ymd, -1);
+const addMonthsYmd = (ymd, n) => {
+  const d = new Date(ymd + 'T12:00:00Z'); d.setUTCMonth(d.getUTCMonth() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+/* ------------------------------------------------------------------ */
+/*  Stripe sync (Phase 3)                                              */
+/* ------------------------------------------------------------------ */
+
+async function stripeGet(env, path, params = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) for (const x of v) qs.append(k, x); else qs.append(k, v);
+  }
+  const r = await fetch('https://api.stripe.com/v1/' + path + '?' + qs, {
+    headers: { Authorization: 'Bearer ' + env.STRIPE_KEY },
+  });
+  const j = await r.json();
+  if (j.error) throw new Error('Stripe: ' + j.error.message);
+  return j;
+}
+
+/* Money lands on the day it landed in Cole's timezone, matching the sheet. */
+const centralDate = ts => new Intl.DateTimeFormat('en-CA',
+  { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts * 1000));
+
+/* Which client is this charge from? Order: the learned customer→client map,
+ * then a conservative name/email match against the client list (which also
+ * LEARNS the mapping). No match → Review inbox, never a silent guess. */
+function resolveClient(clients, map, cusId, texts) {
+  if (cusId && map[cusId]) return { client: map[cusId], learned: false };
+  const hay = texts.filter(Boolean).map(s => String(s).toLowerCase());
+  for (const c of clients) {
+    const name = c.name.toLowerCase();
+    const first = name.split(' ')[0];
+    const hit = hay.some(h => h.includes(name) || (first.length >= 4 && h.includes(first)));
+    if (hit) return { client: c.name, learned: !!cusId };
+  }
+  return { client: null, learned: false };
+}
+
+/**
+ * Pull charges + refunds for [fromYmd..toYmd] (Central dates) into the ledger.
+ * Idempotent: rows key on stripe_id; the monthly Stripe-fee row is recomputed
+ * from SUM(fee) after every run. Closed months are never written into.
+ */
+async function syncStripe(env, fromYmd, toYmd) { return withLedgerLease(env, 'stripe', env => syncStripeInner(env, fromYmd, toYmd)); }
+async function syncStripeInner(env, fromYmd, toYmd) {
+  if (!env.STRIPE_KEY) throw new Error('STRIPE_KEY is not set on the worker');
+  const [clientsQ, mapRaw, monthsQ] = await Promise.all([
+    env.DB.prepare('SELECT name FROM clients').all(),
+    getSetting(env, 'stripeMap'),
+    env.DB.prepare('SELECT month, status FROM months').all(),
+  ]);
+  const clients = clientsQ.results;
+  // JSON.parse(null) is null, not a throw — the fallback alone doesn't save us
+  const map = safeJson(mapRaw, {}) || {};
+  const closed = new Set(monthsQ.results.filter(m => m.status === 'closed').map(m => m.month));
+  // coarse window (±1 day) — precise bucketing happens on the Central date
+  const gte = Math.floor(Date.parse(fromYmd + 'T00:00:00Z') / 1000) - 86400;
+  const lte = Math.floor(Date.parse(toYmd + 'T23:59:59Z') / 1000) + 86400;
+
+  let mapDirty = false, added = 0, review = 0, skippedClosed = 0;
+  const touched = new Set();
+
+  const walk = async (path, expand, handler) => {
+    let after = null;
+    do {
+      const page = await stripeGet(env, path, {
+        limit: 100, 'created[gte]': gte, 'created[lte]': lte,
+        'expand[]': expand, ...(after ? { starting_after: after } : {}),
+      });
+      for (const item of page.data) await handler(item);
+      after = page.has_more ? page.data[page.data.length - 1].id : null;
+    } while (after);
+  };
+
+  const handleCharge = async (c, replay=false) => {
+    if (!c.paid || c.status !== 'succeeded') return;
+    const date = centralDate(c.created), month = monthOf(date);
+    if (!replay && (date < fromYmd || date > toYmd)) return;
+    await saveJob(env,'stripe-charge:'+c.id,'stripe-charge',{id:c.id},'Charge or fee requires reconciliation');
+    if (closed.has(month)) { skippedClosed++; return; }
+    const cus = typeof c.customer === 'object' && c.customer ? c.customer : null;
+    const cusId = cus?.id || (typeof c.customer === 'string' ? c.customer : null);
+    const { client, learned } = resolveClient(clients, map, cusId,
+      [cus?.name, cus?.email, cus?.description, c.description, c.calculated_statement_descriptor, c.billing_details?.name, c.billing_details?.email]);
+    if (learned && cusId) { map[cusId] = client; mapDirty = true; }
+    const vendor = client || (cus?.name || cus?.email || c.billing_details?.name || c.description || 'Stripe customer');
+    const prior=await env.DB.prepare('SELECT id FROM transactions WHERE stripe_id=?1').bind(c.id).first();
+    if (!prior) {
+      const candidates=await env.DB.prepare("SELECT id FROM transactions WHERE month=?1 AND vendor=?2 AND type='in' AND expected=0 AND stripe_id IS NULL AND source IN ('recurring','manual')")
+        .bind(month,vendor).all();
+      if(candidates.results.length) {
+        await saveJob(env,'stripe-duplicate:'+c.id,'stripe-duplicate',{charge:c.id,candidateIds:candidates.results.map(r=>r.id)},'Review payment provenance before import');
+        review++; return;
+      }
+    }
+    const fee = c.balance_transaction && typeof c.balance_transaction === 'object' ? c.balance_transaction.fee / 100 : null;
+    const res = await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+      (date, month, type, vendor, amount, bucket, tax_cat, note, status, source, stripe_id, stripe_cus, fee)
+      VALUES (?1, ?2, 'in', ?3, ?4, 'Revenue', 'Client revenue', ?5, ?6, 'stripe', ?7, ?8, ?9)
+      ON CONFLICT(stripe_id) WHERE stripe_id IS NOT NULL DO UPDATE SET fee=COALESCE(excluded.fee, transactions.fee)`)
+      .bind(date, month, vendor, round2(c.amount / 100),
+            client ? null : 'New Stripe customer — pick the client and Ledger remembers it',
+            client ? 'ok' : 'review', c.id, cusId, fee).run();
+    if (res.meta.changes) { if(!prior)added++; touched.add(month); if (!client) review++; }
+    if(fee !== null) await finishJob(env,'stripe-charge:'+c.id);
+  };
+  const pendingCharges=await env.DB.prepare("SELECT payload FROM ledger_jobs WHERE kind='stripe-charge' AND status='pending'").all();
+  for(const job of pendingCharges.results) {
+    const charge=await stripeGet(env,'charges/'+encodeURIComponent(JSON.parse(job.payload).id),{'expand[]':['balance_transaction','customer']});
+    await handleCharge(charge,true);
+  }
+  await walk('charges',['data.balance_transaction','data.customer'],handleCharge);
+
+  const handleRefund=async(r,replay=false)=>{
+    if (r.status && r.status !== 'succeeded') return;
+    const date = centralDate(r.created), month = monthOf(date);
+    if (!replay && (date < fromYmd || date > toYmd)) return;
+    await saveJob(env,'stripe-refund:'+r.id,'stripe-refund',{id:r.id},'Refund awaiting open period');
+    if (closed.has(month)) { skippedClosed++; return; }
+    const ch = typeof r.charge === 'object' && r.charge ? r.charge : null;
+    const cusId = ch ? (typeof ch.customer === 'string' ? ch.customer : ch.customer?.id) : null;
+    const client = cusId && map[cusId] ? map[cusId] : null;
+    const res = await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+      (date, month, type, vendor, amount, bucket, tax_cat, note, status, source, stripe_id, stripe_cus)
+      VALUES (?1, ?2, 'in', ?3, ?4, 'Revenue', 'Client revenue', 'Refund', ?5, 'stripe', ?6, ?7)`)
+      .bind(date, month, client || ch?.description || 'Stripe refund', -round2(r.amount / 100),
+            client ? 'ok' : 'review', r.id, cusId).run();
+    if (res.meta.changes) { added++; touched.add(month); if (!client) review++; }
+    await finishJob(env,'stripe-refund:'+r.id);
+  };
+  const pendingRefunds=await env.DB.prepare("SELECT payload FROM ledger_jobs WHERE kind='stripe-refund' AND status='pending'").all();
+  for(const job of pendingRefunds.results) await handleRefund(await stripeGet(env,'refunds/'+encodeURIComponent(JSON.parse(job.payload).id),{'expand[]':['charge']}),true);
+  await walk('refunds',['data.charge'],handleRefund);
+
+  if (mapDirty) await putSetting(env, 'stripeMap', JSON.stringify(map));
+
+  // fee rows + expected-row cleanup run for every stripe month in the window,
+  // not just fresh inserts — so a rerun after a mid-sync failure still finishes
+  const { results: mrows } = await env.DB.prepare(
+    `SELECT DISTINCT month FROM transactions WHERE source = 'stripe' AND month >= ?1 AND month <= ?2`)
+    .bind(monthOf(fromYmd), monthOf(toYmd)).all();
+  for (const r of mrows) if (!closed.has(r.month)) touched.add(r.month);
+
+  for (const month of touched) {
+    // one aggregated fee row per month, recomputed from the stored per-charge fees
+    const f = await env.DB.prepare(`SELECT SUM(fee) AS fees FROM transactions WHERE month = ?1 AND source = 'stripe'`).bind(month).first();
+    const fees = round2(f?.fees || 0);
+    {
+      await env.DB.prepare(`INSERT INTO transactions (date, month, type, vendor, amount, bucket, tax_cat, note, source, stripe_id)
+        VALUES (?1, ?2, 'fee', 'Stripe', ?3, 'Merchant fee', 'Bank & merchant fees', 'Exact fees from Stripe, per charge', 'stripe', ?4)
+        ON CONFLICT(stripe_id) WHERE stripe_id IS NOT NULL DO UPDATE SET amount = ?3`)
+        .bind(month + '-01', month, fees, 'stripefees:' + month).run();
+    }
+    // a real Stripe payment satisfies that client's pre-created expected row
+    await env.DB.prepare(`DELETE FROM transactions WHERE month = ?1 AND expected = 1 AND type = 'in'
+      AND vendor IN (SELECT vendor FROM transactions WHERE month = ?1 AND source = 'stripe' AND type = 'in')`).bind(month).run();
+  }
+  return { added, review, skippedClosed, months: [...touched].sort() };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Plaid bank feeds (Novo + Amex)                                     */
+/* ------------------------------------------------------------------ */
+
+async function plaid(env, path, body = {}) {
+  const r = await fetch(`https://${env.PLAID_ENV || 'sandbox'}.plaid.com${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: env.PLAID_CLIENT_ID, secret: env.PLAID_SECRET, ...body }),
+  });
+  const j = await r.json();
+  if (j.error_code) throw new Error(`Plaid: ${j.error_code} — ${j.error_message || ''}`);
+  return j;
+}
+
+const plaidReady = env => !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET);
+const getPlaidItems = async env => safeJson(await getSetting(env, 'plaidItems'), []) || [];
+
+/* Money moving between Cole's OWN accounts — the double-count guard: the Amex
+ * payment out of Novo, Stripe payouts landing, the personal/savings draws.
+ *
+ * This must stay narrow. A transfer is excluded from every report, so calling
+ * something a transfer makes it VANISH — whereas mis-calling a transfer an
+ * expense merely puts a visible row in Review. Fail toward visible.
+ *
+ * The bug this replaces: trusting Plaid's primary category TRANSFER_OUT, which
+ * also covers Zelle/ACH to a person. Every contractor payment — Ahsan, Radhesh,
+ * Hamza, WorldRemit — was filed as a transfer and silently dropped out of the
+ * P&L: about $19K over two months, i.e. profit overstated by the same. Plaid's
+ * DETAILED category is the one that separates "my other account" from
+ * "somebody else". */
+const SELF_TRANSFER_DETAIL = new Set([
+  'TRANSFER_OUT_ACCOUNT_TRANSFER', 'TRANSFER_IN_ACCOUNT_TRANSFER',
+  'TRANSFER_OUT_SAVINGS', 'TRANSFER_IN_SAVINGS',
+  'TRANSFER_OUT_INVESTMENT_AND_RETIREMENT_FUNDS', 'TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS',
+]);
+/* Services whose entire purpose is sending money to ANOTHER PERSON. Plaid
+ * files them under the same TRANSFER_OUT detail as moving cash between your own
+ * accounts, and the difference is the whole ball game: a self-move is invisible
+ * to the P&L, a payment to a contractor is a deduction. Never self. */
+const NEVER_SELF = /(worldremit|western union|remitly|moneygram|xoom|payoneer|wise\b|transferwise)/;
+function looksLikeTransfer(name, pfc, selfAccounts = []) {
+  const n = (name || '').toLowerCase();
+  if (NEVER_SELF.test(n)) return false;
+  if (/(amex|american express)/.test(n) && /(pay|epay|autopay|pmt)/.test(n)) return true;
+  if (/autopay payment/.test(n)) return true;
+  if (/stripe/.test(n)) return true;
+  if (/^(transfer|xfer|online transfer|withdrawal to|deposit from)/.test(n)) return true;
+  /* Accounts Cole has told us are his own — "Joint" is his joint account, not
+   * The Joint Chiropractic, so these match the WHOLE name rather than appearing
+   * anywhere in it. Maintained as a setting, not in code, so naming a new one
+   * is something he can do from the app. */
+  if (selfAccounts.some(a => a && n === String(a).toLowerCase().trim())) return true;
+  const p = pfc?.primary || '', d = pfc?.detailed || '';
+  if (p === 'LOAN_PAYMENTS') return true;          // paying a card balance
+  return SELF_TRANSFER_DETAIL.has(d);
+}
+
+/* Clients who pay by bank instead of Stripe show up under the payer's bank
+ * name, and one payer can cover several clients: Vita Pharm pays for both
+ * VetriPaws and SpeedIn, sometimes split across days. The payerMap setting
+ * ({ "VITAPHARM": ["VetriPaws", "SpeedIn"] }) names who a deposit is for. It
+ * learns itself: renaming a bank deposit to a client remembers the payer. */
+const PAYER_NOISE = new Set(['ACH', 'ID', 'NBR', 'PMT', 'PAYMENT', 'PAYMENTS', 'DEPOSIT', 'CREDIT', 'ONLINE',
+  'TRANSFER', 'FROM', 'ORIG', 'CO', 'NAME', 'LLC', 'INC', 'CORP', 'LTD', 'THE', 'EDI', 'CCD', 'PPD', 'WEB', 'DES', 'INDN']);
+const payerCompact = name => String(name || '').toUpperCase().replace(/[^A-Z]/g, '');
+function payerKey(name) {
+  const words = String(name || '').toUpperCase().split(/ID NBR/)[0]
+    .replace(/[^A-Z ]/g, ' ').split(/\s+/).filter(w => w.length > 1 && !PAYER_NOISE.has(w));
+  return words.slice(0, 2).join('');
+}
+
+/* A payer's deposit pays that payer's expected rows, oldest first. A row paid
+ * in part keeps the unpaid rest as expected, so the $1K still owed stays in
+ * front of Cole until it lands. Money past everything expected goes to Review. */
+async function payerDeposit(env, t, date, month, vendor, amount) {
+  const map = safeJson(await getSetting(env, 'payerMap'), {}) || {};
+  const compact = payerCompact(vendor);
+  const key = Object.keys(map).sort((a, b) => b.length - a.length)
+    .find(k => k.length >= 4 && compact.includes(k));
+  if (!key) return null;
+  const clients = [].concat(map[key]).filter(Boolean);
+  if (!clients.length) return null;
+  const ph = clients.map((_, i) => '?' + (i + 1)).join(',');
+  const { results: exp } = await env.DB.prepare(`SELECT * FROM transactions WHERE expected = 1 AND type = 'in'
+      AND plaid_id IS NULL AND vendor IN (${ph}) AND date <= ?${clients.length + 1} ORDER BY date, id`)
+    .bind(...clients, date).all();
+  let left = amount;
+  const paid = new Map();
+  for (const e of exp) {
+    if (left < 0.005) break;
+    if ((await monthStatus(env, e.month)) === 'closed') continue;
+    const pay = round2(Math.min(left, e.amount));
+    const rest = round2(e.amount - pay);
+    if (rest < 0.005) await env.DB.prepare('DELETE FROM transactions WHERE id = ?1').bind(e.id).run();
+    else await env.DB.prepare(`UPDATE transactions SET amount = ?2, note = ?3 WHERE id = ?1`)
+      .bind(e.id, rest, `Still owed: $${pay.toFixed(2)} of $${e.amount.toFixed(2)} paid by ${vendor} on ${date}`).run();
+    paid.set(e.vendor, round2((paid.get(e.vendor) || 0) + pay));
+    left = round2(left - pay);
+  }
+  const rows = [...paid].map(([client, amt]) => ({ client, amt, status: 'ok', note: `Paid by bank · ${vendor}` }));
+  if (left >= 0.005) rows.push({ client: clients[0], amt: left, status: 'review',
+    note: `${vendor} paid $${left.toFixed(2)} more than was expected${clients.length > 1 ? ' · which client is it for: ' + clients.join(' or ') + '?' : '.'}` });
+  let first = true;
+  for (const r of rows) {
+    await env.DB.prepare(`INSERT INTO transactions (date, month, type, vendor, amount, bucket, tax_cat, note, status, source, plaid_id)
+      VALUES (?1, ?2, 'in', ?3, ?4, 'Revenue', 'Client revenue', ?5, ?6, 'plaid', ?7)`)
+      .bind(date, month, r.client, r.amt, r.note, r.status, first ? t.transaction_id : null).run();
+    first = false;
+  }
+  return rows.some(r => r.status === 'review') ? 'added-review' : 'confirmed-expected';
+}
+
+/**
+ * One Plaid transaction → the ledger, reconcile-first:
+ *   1. an EXPECTED row for the same vendor/amount confirms itself (the engine's
+ *      guess meets the real bank line);
+ *   2. an existing manual/receipt row with the same amount adopts the plaid_id
+ *      instead of duplicating;
+ *   3. otherwise it inserts through the vendor rules (unknown → Review).
+ */
+async function processPlaidTxn(env, item, t, opts = {}) {
+  const result = await processPlaidTxnInner(env, item, t, opts);
+  if (typeof result === 'string' && !['pending', 'before-start', 'duplicate'].includes(result)) {
+    const currency = t.iso_currency_code || t.unofficial_currency_code || null;
+    await env.DB.prepare('UPDATE transactions SET bank_account_id=?2, bank_currency=?3, bank_amount=?4, bank_item_id=?5 WHERE plaid_id=?1')
+      .bind(t.transaction_id, t.account_id || null, currency, round2(t.amount),item.item_id || null).run();
+    await env.DB.prepare(`INSERT OR IGNORE INTO bank_provenance(plaid_id,item_id,account_id,currency,amount,date,origin)
+      VALUES(?1,?2,?3,?4,?5,?6,'ingest')`)
+      .bind(t.transaction_id, item.item_id || null, t.account_id || null, currency, round2(t.amount), t.date).run();
+  }
+  return result;
+}
+async function processPlaidTxnInner(env, item, t, opts = {}) {
+  if (t.pending) return 'pending';
+  /* Idempotency first. Plaid re-delivers a transaction whenever the cursor did
+   * not advance — which is exactly what happens after any mid-page failure. On
+   * that second delivery the reconcile steps below would match some OTHER row
+   * and try to give it a plaid_id another row already holds, which violates the
+   * unique index, aborts the sync, and strands the cursor again: a loop that
+   * never clears itself. Seen one already: it is why nothing synced. */
+  const seen = await env.DB.prepare('SELECT id FROM transactions WHERE plaid_id = ?1')
+    .bind(t.transaction_id).first();
+  if (seen) return 'duplicate';
+  const date = t.date, month = monthOf(date);
+  /* plaidStart exists so a routine sync never reaches back into the months
+   * that were typed from statements. A deliberate whole-year import is the one
+   * caller allowed past it, because reaching back is the entire point. */
+  const start = opts.ignoreStart ? null : await getSetting(env, 'plaidStart');
+  if (start && date < start) return 'before-start';
+  if ((await monthStatus(env, month)) === 'closed')
+    return { skip: 'closed', id: t.transaction_id, month, date,
+             vendor: String(t.merchant_name || t.name || 'Unknown').slice(0, 60),
+             amount: round2(t.amount) };
+
+  const acctType = item.accounts?.[t.account_id]?.type || 'depository';
+  const rawName = t.merchant_name || t.name || 'Unknown';
+  const vendor = String(rawName).replace(/\s+/g, ' ').trim().slice(0, 120);
+  const amt = round2(t.amount); // Plaid: positive = money OUT, negative = money IN
+
+  const selfAccounts = safeJson(await getSetting(env, 'selfAccounts'), []) || [];
+  /* A rule is a human saying what this merchant IS, and it outranks any guess
+   * about what it looks like. Without this, Plaid tagging an ACH to a
+   * contractor as TRANSFER_OUT_ACCOUNT_TRANSFER silently deletes that payment
+   * from the P&L, and a rule saying "Radhesh Gowd is contract labour" cannot
+   * save it, because the transfer branch decides before any rule is read. It
+   * happened once at $19K and again at $46K. */
+  const known = await findRule(env, vendor);
+  /* A Stripe deposit into the bank is a payout of revenue the Stripe sync
+   * already counted. The "Stripe" fee rule matches its name too, and without
+   * this it outranked the transfer check and every payout counted twice. */
+  const stripePayout = amt < 0 && acctType !== 'credit' && /stripe/i.test(rawName);
+  let type, amount, status = 'ok', note = null;
+  if (stripePayout || (!known && looksLikeTransfer(rawName, t.personal_finance_category, selfAccounts))) {
+    type = 'transfer'; amount = Math.abs(amt);
+  } else if (amt > 0) {
+    type = 'out'; amount = amt;
+  } else if (acctType === 'credit') {
+    type = 'out'; amount = amt; note = 'Card refund / return';   // negative out shrinks the category
+  } else {
+    type = 'in'; amount = Math.abs(amt); status = 'review';
+    note = 'Deposit that isn\'t a Stripe payout — what is it? (Revenue outside Stripe, or mark it a transfer.)';
+  }
+
+  const first = vendor.toLowerCase().split(' ')[0];
+  if (type === 'out' && amount > 0) {
+    // 1) confirm the recurring engine's expected row
+    const { results: exp } = await env.DB.prepare(
+      `SELECT * FROM transactions WHERE month = ?1 AND expected = 1 AND type = 'out' AND plaid_id IS NULL`).bind(month).all();
+    /* Name first. The amount-only fallback exists for bank gibberish like
+     * "SQSP* WORKSP" meeting an expected "Google Workspace" — but Cole runs
+     * three different $15 subscriptions, so amount alone is only trusted when
+     * exactly ONE expected row carries it. Ambiguous → insert normally and
+     * let the expected row wait for its real charge. */
+    const amtHits = exp.filter(x => Math.abs(x.amount - amount) < 0.005);
+    const eHit = exp.find(x => x.vendor.toLowerCase().split(' ')[0] === first
+        || x.vendor.toLowerCase().includes(first) || first.includes(x.vendor.toLowerCase().split(' ')[0]))
+      || (amtHits.length === 1 ? amtHits[0] : null);
+    if (eHit) {
+      await env.DB.prepare(`UPDATE transactions SET amount=?2, date=?3, expected=0, status='ok', plaid_id=?4 WHERE id=?1`)
+        .bind(eHit.id, amount, date, t.transaction_id).run();
+      return 'confirmed-expected';
+    }
+    // 2) adopt an existing manual row (same month, amount to the cent)
+    const { results: cand } = await env.DB.prepare(
+      `SELECT * FROM transactions WHERE month = ?1 AND type = 'out' AND expected = 0 AND plaid_id IS NULL
+       AND ABS(amount - ?2) < 0.005`).bind(month, amount).all();
+    /* THE NAME HAS TO AGREE. "There is only one unreceipted row at that amount"
+     * is not evidence that it is the same charge: plenty of subscriptions cost
+     * the same $10 or $18 a month, and Cole runs several of them. The
+     * single-candidate fallback that used to sit here filed an Anthropic $10
+     * onto a row called PDF.co and a Cloudflare $5 onto one called FireFlies.
+     * Money stayed right by luck, because neither vendor had also charged that
+     * month; the day both do, one of the two charges disappears into the other.
+     *
+     * Failing the other way costs a duplicate row, which the nightly check sees
+     * and names. A wrong merge is silent, and silence is the thing to avoid. */
+    const nameAgrees = x => {
+      if (sameCompany(x.vendor, vendor)) return true;
+      const a = String(x.vendor || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+      const b = vendor.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+      if (!a.length || !b.length) return false;
+      return a[0] === b[0] || a.includes(b[0]) || b.includes(a[0]);
+    };
+    let mHit = cand.find(nameAgrees) || null;
+    /* 2b) A PHOTOGRAPHED receipt booked before the card posted. Two things the
+     * exact-cent, first-word rule above misses on exactly these rows: the card
+     * spells the merchant differently (looseNameMatch), and a restaurant charge
+     * settles with the tip added, up to a third above the printed slip and
+     * never below it. The receipt is the proof it is one purchase, so the row
+     * takes the bank's amount rather than a second row being made. Looks back
+     * across a month edge, within a week of the charge. Cole, 2026-09-13:
+     * Dick's and Oaxaca photographed in Slack, both on the Amex. */
+    let tipAdopt = null;
+    if (!mHit) {
+      const { results: photo } = await env.DB.prepare(
+        `SELECT * FROM transactions WHERE type = 'out' AND expected = 0 AND plaid_id IS NULL
+         AND receipt_key IS NOT NULL AND source = 'manual'
+         AND date >= date(?1, '-7 days') AND date <= date(?1, '+2 days')
+         AND amount <= ?2 + 0.005 AND amount * 1.35 >= ?2 - 0.005
+         ORDER BY ABS(amount - ?2), ABS(julianday(date) - julianday(?1)) LIMIT 5`)
+        .bind(date, amount).all();
+      const pHit = photo.find(x => nameAgrees(x) || looseNameMatch(x.vendor, vendor)) || null;
+      if (pHit) {
+        if ((await monthStatus(env, pHit.month)) === 'closed') throw new Error('Receipt period closed; correction requires reopen');
+        /* The receipt's date stays: it is the day of the purchase, and the
+         * charge can post in the next month. */
+        if (Math.abs(pHit.amount - amount) >= 0.005) {
+          tipAdopt = `Card settled $${amount.toFixed(2)}; receipt printed $${pHit.amount.toFixed(2)} (tip added after).`;
+        }
+        await env.DB.prepare(`UPDATE transactions SET plaid_id=?2, amount=?3,
+            note = CASE WHEN ?4 IS NULL THEN note WHEN note IS NULL OR note = '' THEN ?4 ELSE note || ' · ' || ?4 END WHERE id=?1`)
+          .bind(pHit.id, t.transaction_id, amount, tipAdopt).run();
+        return 'matched-existing';
+      }
+    }
+    if (mHit) {
+      /* Take the bank's date too. The row being adopted was typed by hand and
+       * is usually dated the 1st; the statement knows the day it really was,
+       * and a CPA reads dates. Same month either way, so nothing moves out of
+       * a period by doing this. */
+      await env.DB.prepare(`UPDATE transactions SET plaid_id=?2, date=?3 WHERE id=?1`)
+        .bind(mHit.id, t.transaction_id, date).run();
+      return 'matched-existing';
+    }
+  }
+
+  if (type === 'in') {
+    const payer = await payerDeposit(env, t, date, month, vendor, amount);
+    if (payer) return payer;
+  }
+
+  // 3) new row through the rules
+  const row = await applyRule(env, { date, month, type, vendor, amount, bucket: null, tax_cat: null, note, status });
+  const res = await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+    (date, month, type, vendor, amount, bucket, tax_cat, note, status, source, plaid_id, acct)
+    VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'plaid',?10,?11)`)
+    .bind(row.date, row.month, row.type, row.vendor, row.amount, row.bucket, row.tax_cat,
+          row.note, row.status, t.transaction_id, acctType === 'credit' ? 'card' : 'bank').run();
+  return res.meta.changes ? (row.status === 'review' ? 'added-review' : 'added') : 'duplicate';
+}
+
+/* A receipt often arrives before its charge does · the bank feed runs
+ * overnight, so anything bought today is filed against nothing. Rather than
+ * making Cole answer a question the system will be able to answer itself
+ * tomorrow, those receipts are HELD, and this sweeps them after every sync:
+ * any that now match an unreceipted charge attach themselves and say so. */
+async function retryHeldReceipts(env) { return withLedgerLease(env,'receipts',env=>retryHeldReceiptsInner(env)); }
+async function retryHeldReceiptsInner(env) {
+  const { results: held } = await env.DB.prepare(
+    `SELECT key, value FROM settings WHERE key LIKE 'pend:%'`).all();
+  if (!held.length) return { held: 0 };
+  /* Some of these are waiting for something that already happened: the same
+   * file is attached to a charge, usually because it was forwarded twice and
+   * the first copy landed. Waiting forever means nagging forever, so a hold
+   * whose fingerprint is already on a transaction is simply let go. */
+  for (const row of held.slice()) {
+    const fp = safeJson(row.value, {})?.fp;
+    if (!fp) continue;
+    const on = await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash = ?1').bind(fp).first();
+    if (!on) continue;
+    await receiptDelete(env, row.key).catch(() => {});
+    await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(row.key).run();
+    held.splice(held.indexOf(row), 1);
+  }
+  if (!held.length) return { held: 0 };
+  const sr = safeJson(await getSetting(env, 'slackReceipts'), {}) || {};
+  let attached = 0, asked = 0;
+  for (const row of held) {
+    const meta = safeJson(row.value, null);
+    if (!meta || !meta.amount) continue;
+    /* A RESTAURANT RECEIPT NEVER MATCHES TO THE CENT. The slip is printed
+     * before the tip is written on it, so the card settles higher · $47.00 on
+     * the receipt, $56.40 on the statement. Demanding the exact cent meant
+     * every meal waited five days and then asked a question with an obvious
+     * answer.
+     *
+     * So the charge may be up to a third larger than the receipt, never
+     * smaller, and only when the vendor name agrees (checked below). A tip is
+     * the only thing that moves a total UP after the fact; a smaller charge is
+     * a different purchase, so that stays exact. */
+    /* THE TIP CUTS BOTH WAYS, and which way depends on what he photographed.
+     * A slip printed before the tip was written on it says $100 while the card
+     * ends up taking $120. A slip photographed AFTER he wrote the tip on it
+     * says $120 while the card has so far only taken $100, because the
+     * correction lands a day later.
+     *
+     * So the charge may be up to a third either side. Downward is the riskier
+     * direction · a smaller charge is usually a different purchase · so it is
+     * only accepted when exactly ONE charge from that vendor is in range,
+     * which is true of a meal and false of Anthropic's daily API charges. */
+    const lo = Number(meta.amount) / 1.35 - 0.005;
+    const hi = Number(meta.amount) * 1.35 + 0.005;
+    const hit = await env.DB.prepare(
+      `SELECT * FROM transactions WHERE type='out' AND expected=0 AND receipt_key IS NULL
+       AND amount >= ?1 AND amount <= ?2 AND ABS(julianday(date) - julianday(?3)) <= 12
+       ORDER BY ABS(amount - ?4), ABS(julianday(date) - julianday(?3))`)
+      .bind(lo, hi, meta.date, Number(meta.amount)).all();
+    /* THE NAME MUST AGREE. Nobody is watching this sweep, so "there is only
+     * one charge at that amount" is not good enough: an Anthropic receipt for
+     * $90 met an OpenAI charge for $90 and filed itself there. A held receipt
+     * waits for its own vendor, however long that takes. Every candidate in
+     * the window is read (no LIMIT): "exactly one" means nothing if the
+     * others were never looked at. */
+    const decision = heldReceiptMatch(hit.results, meta.vendor, meta.amount, meta.date);
+    const match = decision && !decision.confirm ? decision.row : null;
+    /* Card spelling AND amount both differ · a tipped meal on Amex, usually.
+     * Right often enough to suggest, not safe enough to file unwatched, so it
+     * asks once with a single button and keeps waiting in the meantime. */
+    if (decision?.confirm) {
+      const t = decision.row;
+      const born = Number(String(row.key).split(':')[1]);
+      const age = Number.isFinite(born) ? (Date.now() - born) / 86400e3 : 0;
+      const firstAsk = meta.proposed !== t.id;
+      /* Unanswered, this would expire at 30 days like any held receipt, so
+       * it gets the same last call at 25. */
+      const lastAsk = !firstAsk && age >= 25 && !meta.reminded;
+      if ((firstAsk || lastAsk) && (meta.ch || sr.channelId)) {
+        const diff = round2(t.amount - Number(meta.amount));
+        const ns = await notifyStyle(env, 'decisions');
+        const txt = `${ns.at}⏳ ${lastAsk ? `Last call, the file is deleted in ${Math.max(1, Math.ceil(30 - age))} days. ` : ''}Is this the one? The *${meta.vendor}* receipt ($${Number(meta.amount).toFixed(2)}, ${meta.date}) looks like *${t.vendor}* $${t.amount.toFixed(2)} on ${t.date}.\n` +
+          `The card spells the name differently and the amount is ${diff > 0 ? '$' + diff.toFixed(2) + ' higher (a tip, most likely)' : '$' + Math.abs(diff).toFixed(2) + ' lower'}, so I want a yes before attaching it.`;
+        const delivery = await slack(env, 'chat.postMessage', { channel: meta.ch || sr.channelId,
+          ...(meta.ts ? { thread_ts: meta.ts, ...(ns.broadcast ? { reply_broadcast: true } : {}) } : {}), text: txt, unfurl_links: false,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: txt } },
+            { type: 'actions', elements: [
+              { type: 'button', action_id: 'led_attach', style: 'primary',
+                text: { type: 'plain_text', text: "Yes, that's it" },
+                value: JSON.stringify({ file: row.key, to: t.id }) },
+              { type: 'button', action_id: 'led_drop',
+                text: { type: 'plain_text', text: 'Not mine · discard' },
+                value: JSON.stringify({ drop: row.key }) }] }] }, true);
+        if (!delivery.ok) throw new Error('Receipt question could not be delivered: ' + delivery.error);
+        if (firstAsk) meta.proposed = t.id; else meta.reminded = 1;
+        await putSetting(env, row.key, JSON.stringify(meta));
+        asked++;
+      }
+      continue;
+    }
+    if (!match) {
+      /* Waiting is fine for a few days; waiting forever in silence is not.
+       * The key carries its own creation time, so after a week without the
+       * charge appearing this stops being "the feed is behind" and becomes
+       * something only Cole can answer · asked once, never on repeat. */
+      const bornMs = Number(String(row.key).split(':')[1]);
+      const days = Number.isFinite(bornMs) ? (Date.now() - bornMs) / 86400e3 : 0;
+      /* Asked at 5 days, and once more at 25: the held file expires at 30,
+       * and a receipt should never vanish without a last word. */
+      const first = days >= 5 && !meta.asked;
+      const last = days >= 25 && meta.asked && !meta.reminded;
+      if ((first || last) && (meta.ch || sr.channelId)) {
+        const { at, broadcast } = await notifyStyle(env, 'decisions');
+        const txt = first
+          ? `${at}\u23f3 *${meta.vendor}* $${Number(meta.amount).toFixed(2)} from ${meta.date} has been waiting ${Math.floor(days)} days and still matches no charge on Novo or Amex.\n` +
+            `That usually means it went on a different card, or it is somebody else's charge. I will keep watching in case it shows up, but tell me which:`
+          : `${at}\u23f3 Last call: *${meta.vendor}* $${Number(meta.amount).toFixed(2)} from ${meta.date} has waited ${Math.floor(days)} days with no matching charge. ` +
+            `The file is deleted in ${Math.max(1, Math.ceil(30 - days))} days unless you pick one:`;
+        const delivery = await slack(env, 'chat.postMessage', { channel: meta.ch || sr.channelId,
+          ...(meta.ts ? { thread_ts: meta.ts, ...(broadcast ? { reply_broadcast: true } : {}) } : {}), text: txt, unfurl_links: false,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: txt } },
+            { type: 'actions', elements: [
+              { type: 'button', action_id: 'led_file', style: 'primary',
+                text: { type: 'plain_text', text: 'It is mine · file it' },
+                value: JSON.stringify({ file: row.key }) },
+              { type: 'button', action_id: 'led_drop',
+                text: { type: 'plain_text', text: 'Not mine · discard' },
+                value: JSON.stringify({ drop: row.key }) }] }] }, true);
+        if (!delivery.ok) throw new Error('Receipt decision could not be delivered: '+delivery.error);
+        if (first) meta.asked = 1; else meta.reminded = 1;
+        await putSetting(env, row.key, JSON.stringify(meta));
+        asked++;
+      }
+      continue;
+    }
+    const blob = await receiptGet(env, row.key);
+    if (!blob) {   // the 30-day blob expired · drop the orphaned note
+      await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(row.key).run();
+      continue;
+    }
+    /* When the settled charge is larger than the slip, say why in one line ·
+     * an unexplained gap between a receipt and a charge is exactly what a CPA
+     * queries, and "tip" is the answer nine times in ten. */
+    const gap = round2(match.amount - Number(meta.amount));
+    const k = `rcpt:${match.id}:${Date.now()}`;
+    await receiptPut(env, k, blob);
+    /* The row was unreceipted when it was read, which is not the same as now:
+     * the app or a Slack button may have attached something in between. Only
+     * claim it if it is still empty, and keep holding if it is not. */
+    const took = await env.DB.prepare(`UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5
+      WHERE id=?1 AND receipt_key IS NULL AND expected=0`)
+      .bind(match.id, k, meta.name, meta.type, await sha256bytes(blob)).run();
+    if (!took.meta.changes) { await receiptDelete(env, k).catch(() => {}); continue; }
+    await receiptDelete(env, row.key);
+    await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(row.key).run();
+    attached++;
+    await markReceiptMessage(env, meta.ch || sr.channelId, meta.ts);
+    const landed = await notifyStyle(env, 'landed');
+    if (meta.ch || sr.channelId) await slack(env, 'chat.postMessage',
+      { channel: meta.ch || sr.channelId, unfurl_links: false,
+        ...(meta.ts ? { thread_ts: meta.ts, ...(landed.broadcast ? { reply_broadcast: true } : {}) } : {}),
+      text: `${landed.at}\u2705 The ${meta.vendor} charge landed · that receipt you sent is attached to *${match.vendor}* $${Math.abs(match.amount).toFixed(2)} (${match.date}).`
+        + (gap > 0.005
+            ? ` The receipt says $${Number(meta.amount).toFixed(2)} and the card took $${gap.toFixed(2)} more · a tip, most likely. The charge is what counts.`
+            : gap < -0.005
+            ? ` The receipt says $${Number(meta.amount).toFixed(2)} and the card has only taken $${Math.abs(match.amount).toFixed(2)} so far · the tip usually lands a day later, and the ledger takes the correction on its own.`
+            : '') }, true).catch(() => {});
+  }
+  return { held: held.length, attached, asked };
+}
+
+/* THE SAFETY NET. /transactions/sync is a cursor: it hands over what changed
+ * since last time and then moves on forever. Anything that failed mid-page,
+ * or was refused while a month was closed, is never offered again · the money
+ * is simply gone from the books with nothing to show it was ever there. A
+ * $60 haircut on the Business Gold went missing exactly that way.
+ *
+ * /transactions/get takes a date range instead, so it can always be asked
+ * again. This re-reads a window and inserts anything the ledger does not
+ * already hold (plaid_id is the unique key, so re-running is free), which
+ * makes every month auditable against the bank rather than merely hopeful. */
+/* The bank is re-read every night now, so a charge that belongs to a closed
+ * month would otherwise be re-announced every night until he acts · a nightly
+ * repeat of the same warning is how a warning stops being read. Each one is
+ * named once, and the ids already named are remembered. */
+async function announceDropped(env, dropped) {
+  if (!dropped.length) return 0;
+  const seen = safeJson(await getSetting(env, 'droppedAnnounced'), []);
+  const fresh = dropped.filter(d => d.id && !seen.includes(d.id));
+  if (!fresh.length) return 0;
+  const lines = fresh.slice(0, 8).map(d => `\u2022 *${d.vendor}* $${Math.abs(d.amount).toFixed(2)} \u00b7 ${d.date}`).join('\n');
+  await alertSlack(env, `\u26a0\ufe0f *${fresh.length} charge${fresh.length > 1 ? 's belong' : ' belongs'} to a month that is already closed*, so ${fresh.length > 1 ? 'they were' : 'it was'} not added:\n${lines}` +
+    (fresh.length > 8 ? `\n_\u2026and ${fresh.length - 8} more._` : '') +
+    `\n\nReopen ${moLabel(fresh[0].month)} in the app, press Re-check the bank, then close it again.`).catch(() => {});
+  await putSetting(env, 'droppedAnnounced', JSON.stringify(seen.concat(fresh.map(d => d.id)).slice(-400)));
+  return fresh.length;
+}
+
+/* PROVE a range against the bank without touching it. backfillPlaid inserts
+ * what is missing, which is right for the months the feed owns (August on) and
+ * catastrophic for the months it does not: January to July were typed from
+ * statements before the bank was connected, so those ledger rows carry no
+ * plaid_id and nothing would dedupe against them · a backfill there would file
+ * a second copy of the whole year. plaidStart already refuses them, but the
+ * question "does the bank agree with what I typed?" still deserves an answer.
+ *
+ * So this reads and reports, and writes nothing at all. Matching is per MONTH
+ * and per amount, never per day, because the hand-entered rows were dated the
+ * 1st regardless of when the charge actually posted. Each bank charge consumes
+ * one ledger row, so two identical charges need two rows to match. */
+/* Read a whole range from the bank ONCE and make the books agree with it.
+ *
+ * The nightly sync is deliberately narrow: it never looks before plaidStart and
+ * never writes into a closed month. Both rules are right for a nightly job and
+ * both are wrong for the job of making a tax year true, which is what this is.
+ *
+ * The trap it exists to avoid: Plaid fixes an Item's history window at LINK
+ * time, so widening it means linking again, and a new Item issues brand new
+ * transaction ids for charges the ledger already holds. Left alone, every
+ * August and September row would arrive a second time under a new id and the
+ * year would double. So before anything is inserted, any row whose plaid_id
+ * does NOT appear in the statement now in hand is treated as a row from the
+ * retired Item and MIGRATED onto its new id · same charge, same row, new name.
+ */
+async function importPlaidRange(env, fromYmd, toYmd, opts = {}) { return withLedgerLease(env,'bank',env=>importPlaidRangeInner(env,fromYmd,toYmd,opts)); }
+async function importPlaidRangeInner(env, fromYmd, toYmd, opts = {}) {
+  if (!plaidReady(env)) return { skipped: 'no Plaid keys' };
+  const items = await getPlaidItems(env);
+  if (!items.length) return { skipped: 'no connected accounts' };
+
+  const statement = [];
+  for (const item of items) {
+    let offset = 0, total = 1;
+    while (offset < total) {
+      const page = await plaid(env, '/transactions/get', {
+        access_token: item.access_token, start_date: fromYmd, end_date: plaidEnd(toYmd),
+        options: { count: 500, offset },
+      });
+      total = page.total_transactions || 0;
+      const got = page.transactions || [];
+      for (const t of got) if (!t.pending) statement.push({ item, t });
+      offset += got.length;
+      if (!got.length) break;
+    }
+  }
+  if (!statement.length) return { ok: true, from: fromYmd, to: toYmd, bankCount: 0, note: 'the bank returned nothing for this range' };
+
+  const collapsed = [];
+  const totals = {}, migrated = [], dropped = [];
+  for (const { item, t } of statement) {
+    try {
+      const out = await processPlaidTxn(env, item, t, opts);
+      if (out && out.skip === 'closed') { dropped.push(out); totals.closed = (totals.closed || 0) + 1; continue; }
+      totals[out] = (totals[out] || 0) + 1;
+    } catch (e) {
+      totals.failed = (totals.failed || 0) + 1;
+      totals.lastError = `${t.name || t.transaction_id}: ${String(e.message || e).slice(0, 140)}`;
+    }
+  }
+  await announceDropped(env, dropped);
+
+  /* THE COVERAGE LINE. A bank hands over a fixed window of history, so the
+   * earliest line it returned is the earliest line it HAS. A month that starts
+   * before that date is only partly known, and treating a partial month as the
+   * truth would delete the half the bank cannot see. Whole months only. */
+  const earliest = statement.reduce((a, x) => (!a || x.t.date < a) ? x.t.date : a, null);
+  const latest   = statement.reduce((a, x) => (!a || x.t.date > a) ? x.t.date : a, null);
+  const replaced = [];
+  // Unmatched manual rows are evidence, never delete them based on feed coverage.
+  const { results: leftovers } = await env.DB.prepare(
+    `SELECT id, date, type, vendor, amount, COALESCE(bucket,'') AS bucket
+       FROM transactions WHERE date >= ?1 AND date < ?2 AND plaid_id IS NULL AND expected = 0
+       ORDER BY date, vendor`).bind(fromYmd, toYmd).all();
+
+  return {
+    ok: true, from: fromYmd, to: toYmd, bankCount: statement.length,
+    bankHistoryFrom: earliest,
+    collapsedDuplicates: collapsed.length, collapsedRows: collapsed.slice(0, 50),
+    ...totals, migratedRows: migrated.slice(0, 50),
+    replacedCount: replaced.length, replacedRows: replaced.slice(0, 200),
+    notOnBank: leftovers.length, notOnBankRows: leftovers.slice(0, 200),
+  };
+}
+
+/* THE BOOKS CHECKING THEMSELVES. Every promise made about this ledger · nothing
+ * missing, nothing counted twice, nothing uncategorised · has been verified by
+ * hand, on a day someone thought to look. Each of those checks is a query, so
+ * they run every night instead, and say nothing at all unless something is
+ * actually wrong. A quiet channel then means the books are right, rather than
+ * meaning nobody checked. */
+async function selfCheck(env, fromYmd, toYmd) {
+  const problems = [];
+  const add = (what, detail) => problems.push({ what, detail });
+
+  /* 1. Every charge the bank reported is in the books. */
+  const cmp = await comparePlaid(env, fromYmd, toYmd, false, { repair: true }).catch(e => ({ error: String(e.message || e) }));
+  const line = b => `${b.vendor} ${fmtMoney(b.amount)} · ${b.date}`;
+  if (cmp.error) add('Could not read the bank', cmp.error);
+  /* A check that cannot run is not a check that passed. */
+  else if (cmp.skipped) add('The bank could not be read', cmp.skipped);
+  else {
+    if (cmp.onBankNotInBooks > 0)
+      add(`${cmp.onBankNotInBooks} charge${cmp.onBankNotInBooks > 1 ? 's are' : ' is'} on the bank and not in the books`,
+          (cmp.missing || []).slice(0, 5).map(line).join(', ')
+          + '. Settings → Bank feeds → Re-check (that month) adds them if the month is open; a closed month has to be reopened first.');
+    if (cmp.discrepancyCount > 0)
+      add(`${cmp.discrepancyCount} booked charge${cmp.discrepancyCount > 1 ? 's disagree' : ' disagrees'} with the bank`,
+          (cmp.discrepancies || []).slice(0, 5).map(d => `${line(d.bank)} (${d.reason})`).join(', ')
+          + '. Check each one in Ledger; nothing is changed automatically.');
+    /* The repair above records these whenever the row agrees with the bank,
+     * so any left over mean the repair could not run tonight. */
+    if (cmp.unverifiedCount > 0)
+      add(`${cmp.unverifiedCount} booked charge${cmp.unverifiedCount > 1 ? 's have' : ' has'} no bank record yet`,
+          'The amounts and dates agree, so no money is wrong. The nightly repair fills these in; if this repeats, the repair is not running.');
+  }
+
+  /* 2. Nothing counted twice. Two rows for one day and one amount are usually
+   *    innocent · two clients on the same retainer, two filings · so only a
+   *    pair where one side's bank id has been retired is reported, which is the
+   *    shape a re-linked bank leaves behind. */
+  const { results: dup } = await env.DB.prepare(
+    `SELECT date, type, amount, COUNT(*) n, GROUP_CONCAT(id) ids, GROUP_CONCAT(vendor, ' / ') v
+       FROM transactions WHERE date >= ?1 AND date < ?2 AND plaid_id IS NOT NULL
+      GROUP BY date, type, ROUND(amount, 2) HAVING n > 1`).bind(fromYmd, toYmd).all();
+  if (dup.length && cmp._bank) {
+    const live = new Set(cmp._bank.map(b => b.id));
+    const bad = [];
+    for (const g of dup) {
+      const { results: rows } = await env.DB.prepare(
+        `SELECT id, plaid_id, vendor, amount, date FROM transactions WHERE id IN (${g.ids})`).all();
+      if (rows.some(r => !live.has(r.plaid_id)) && rows.some(r => live.has(r.plaid_id)))
+        bad.push(`${rows[0].vendor} ${fmtMoney(rows[0].amount)} · ${rows[0].date}`);
+    }
+    if (bad.length) add(`${bad.length} charge${bad.length > 1 ? 's appear' : ' appears'} twice`, bad.slice(0, 5).join(', '));
+  }
+
+  /* 3. Nothing waiting to be told apart. */
+  const counts = await env.DB.prepare(
+    `SELECT SUM(CASE WHEN status='review' THEN 1 ELSE 0 END) AS review,
+            SUM(CASE WHEN type='out' AND (tax_cat IS NULL OR tax_cat='') THEN 1 ELSE 0 END) AS uncat
+       FROM transactions WHERE date >= ?1 AND date < ?2`).bind(fromYmd, toYmd).first();
+  if (counts?.uncat) add(`${counts.uncat} expense${counts.uncat > 1 ? 's have' : ' has'} no category`, 'Needs you, in the app');
+
+  /* 3b. An expense the books carry that the bank never reported, in a month the
+   *     bank covers from end to end. Revenue and merchant fees live there
+   *     legitimately · the bank only ever sees a net payout · but an EXPENSE
+   *     with no bank line behind it is either a forecast that never happened or
+   *     a row that should have merged with a real charge and did not. */
+  if (cmp._bank && cmp._bank.length) {
+    const earliest = cmp._bank.reduce((a, b) => (!a || b.date < a) ? b.date : a, null);
+    const latest = cmp._bank.reduce((a, b) => (!a || b.date > a) ? b.date : a, null);
+    const { results: orphan } = await env.DB.prepare(
+      `SELECT id, date, vendor, amount FROM transactions
+        WHERE date >= ?1 AND date <= ?2 AND type = 'out' AND plaid_id IS NULL AND expected = 0
+        ORDER BY date`).bind(earliest, latest).all();
+    /* Only whole months the bank has fully seen, so a charge that simply has
+     * not posted yet is not reported as missing. */
+    const solid = orphan.filter(o => monthOf(o.date) + '-01' >= earliest
+      && addDaysYmd(addMonthsYmd(monthOf(o.date) + '-01', 1), -1) <= latest);
+    if (solid.length)
+      add(`${solid.length} expense${solid.length > 1 ? 's are' : ' is'} in the books with no matching bank charge`,
+          solid.slice(0, 5).map(o => `${o.vendor} ${fmtMoney(o.amount)} \u00b7 ${o.date}`).join(', '));
+  }
+
+  /* 4. A receipt held for longer than a charge could plausibly take. */
+  const { results: held } = await env.DB.prepare(
+    `SELECT key, value FROM settings WHERE key LIKE 'pend:%'`).all();
+  const old = held.filter(r => {
+    const ts = Number(String(r.key).split(':')[1]);
+    return Number.isFinite(ts) && (Date.now() - ts) > 12 * 86400e3;
+  });
+  if (old.length) add(`${old.length} receipt${old.length > 1 ? 's have' : ' has'} waited over 12 days`,
+    old.slice(0, 4).map(r => { const m = safeJson(r.value, {}); return `${m.vendor} ${fmtMoney(m.amount || 0)}`; }).join(', '));
+
+  /* 5. The bank feed itself still answering · but only worth saying when the
+   *    call actually succeeded, otherwise it just repeats check 1. */
+  if (!cmp.error && !cmp.skipped && !cmp.bankCount)
+    add('The bank returned nothing at all', 'Three months with no transactions means the connection needs re-linking');
+
+  return { ok: problems.length === 0, from: fromYmd, to: toYmd, checked: cmp.bankCount || 0, problems };
+}
+
+/* Where a booked charge came from: the row's own columns when the feed wrote
+ * them, otherwise the append-only record. Null means nobody has checked yet. */
+function provenanceOf(r) {
+  if (r.bank_item_id != null || r.bank_account_id != null)
+    return { item_id: r.bank_item_id, account_id: r.bank_account_id, currency: r.bank_currency };
+  if (r.p_item_id != null || r.p_account_id != null)
+    return { item_id: r.p_item_id, account_id: r.p_account_id, currency: r.p_currency };
+  return null;
+}
+
+/* Why a booked row does not agree with its bank line, or null when it does.
+ * Money is compared signed for income and expenses; a transfer is stored as a
+ * positive amount whichever way it went, so only its size can be compared. */
+function bankDisagrees(r, b) {
+  const signed = r.type === 'in' ? -r.amount : r.type === 'out' ? r.amount : null;
+  const amountOk = signed === null
+    ? Math.abs(Math.abs(r.amount) - Math.abs(b.amount)) < 0.005
+    : Math.abs(signed - b.amount) < 0.005;
+  if (!amountOk) return `Amount differs: books ${fmtMoney(r.amount)}, bank ${fmtMoney(b.amount)}`;
+  /* A photographed receipt keeps its purchase date when the charge posts
+   * later (processPlaidTxn step 2b), so that one shape may run up to a week
+   * ahead of the bank. Anything else must be the bank's own day. */
+  const lag = (Date.parse(b.date) - Date.parse(r.date)) / 86400e3;
+  const dateOk = r.date === b.date || (r.source === 'manual' && lag > 0 && lag <= 7);
+  if (!dateOk) return `Date differs: books ${r.date}, bank ${b.date}`;
+  if (r.bank_amount != null && Math.abs(r.bank_amount - b.amount) >= 0.005)
+    return `Recorded bank amount ${fmtMoney(r.bank_amount)} no longer matches the bank's ${fmtMoney(b.amount)}`;
+  const p = provenanceOf(r);
+  if (p && ((p.item_id != null && b.item_id != null && p.item_id !== b.item_id)
+         || (p.account_id != null && p.account_id !== b.account_id)
+         || (p.currency != null && p.currency !== b.currency)))
+    return 'Booked from a different bank account or currency than the bank now reports';
+  return null;
+}
+
+/* ONE-TIME-PER-CHARGE REPAIR for rows booked before provenance existed. The
+ * only key is Plaid's own transaction id, and the row must already agree with
+ * the bank on amount and date. Nothing about the transaction itself is
+ * touched · the record goes in the append-only table, so closed months stay
+ * exactly as they were frozen. A row that disagrees is left alone and shows
+ * up as a discrepancy for Cole instead. */
+async function repairBankProvenance(env, bank, rows) {
+  const byId = new Map(rows.filter(r => r.plaid_id).map(r => [r.plaid_id, r]));
+  const fixed = new Map();
+  for (const b of bank) {
+    const r = byId.get(b.id);
+    if (!r || provenanceOf(r) || bankDisagrees(r, b)) continue;
+    if (!b.item_id || !b.account_id || !b.currency) continue;   // nothing trustworthy to record
+    const res = await env.DB.prepare(`INSERT OR IGNORE INTO bank_provenance(plaid_id,item_id,account_id,currency,amount,date,origin)
+      VALUES(?1,?2,?3,?4,?5,?6,'repair')`).bind(b.id, b.item_id, b.account_id, b.currency, b.amount, b.date).run();
+    if (res.meta.changes) fixed.set(b.id, { item_id: b.item_id, account_id: b.account_id, currency: b.currency });
+  }
+  return fixed;
+}
+
+async function comparePlaid(env, fromYmd, toYmd, full, opts = {}) {
+  if (!plaidReady(env)) return { skipped: 'no Plaid keys' };
+  const items = await getPlaidItems(env);
+  if (!items.length) return { skipped: 'no connected accounts' };
+
+  const bank = [], pendingLines = [];
+  for (const item of items) {
+    let offset = 0, total = 1;
+    while (offset < total) {
+      const page = await plaid(env, '/transactions/get', {
+        access_token: item.access_token, start_date: fromYmd, end_date: plaidEnd(toYmd),
+        options: { count: 500, offset },
+      });
+      total = page.total_transactions || 0;
+      const got = page.transactions || [];
+      for (const t of got) {
+        if (t.pending) { pendingLines.push({ date: t.date, amount: round2(t.amount),
+          vendor: String(t.merchant_name || t.name || '?').slice(0, 60),
+          account: item.accounts?.[t.account_id]?.name || item.name || '' }); continue; }
+        bank.push({ id: t.transaction_id, date: t.date, month: monthOf(t.date),
+                    vendor: String(t.merchant_name || t.name || 'Unknown').slice(0, 60),
+                    amount: round2(t.amount), item_id:item.item_id, account_id: t.account_id, currency: t.iso_currency_code || t.unofficial_currency_code || null,
+                    account: item.accounts?.[t.account_id]?.name || item.name || '' });
+      }
+      offset += got.length;
+      if (!got.length) break;
+    }
+  }
+
+  /* A week of slack on the early side: a photographed receipt keeps the day of
+   * purchase while its card charge posts a few days later, so the row that
+   * answers for a charge can sit just before the window. */
+  const rows = (await env.DB.prepare(
+    `SELECT t.id, t.date, t.month, t.type, t.vendor, t.amount, t.source, t.plaid_id,
+            t.bank_item_id, t.bank_account_id, t.bank_currency, t.bank_amount,
+            p.item_id AS p_item_id, p.account_id AS p_account_id, p.currency AS p_currency
+       FROM transactions t LEFT JOIN bank_provenance p ON p.plaid_id = t.plaid_id
+      WHERE t.date >= date(?1, '-7 days') AND t.date < ?2 AND t.expected=0`).bind(fromYmd, toYmd).all()).results || [];
+
+  if (opts.repair) {
+    const fixed = await withLedgerLease(env, 'bank', env => repairBankProvenance(env, bank, rows));
+    if (!fixed?.skipped) for (const r of rows) {
+      const p = fixed.get(r.plaid_id);
+      if (p) Object.assign(r, { p_item_id: p.item_id, p_account_id: p.account_id, p_currency: p.currency });
+    }
+  }
+
+  /* Three different answers, kept apart because they need different things
+   * from Cole. MISSING: the bank has a charge the books do not. DISCREPANCY:
+   * the books hold that charge but disagree about it. UNVERIFIED: the books
+   * agree, but the row predates the provenance record and has not been
+   * checked against the bank yet · a bookkeeping gap, not a money one. */
+  const used = new Set();
+  const byId = new Map(rows.filter(r => r.plaid_id).map(r => [r.plaid_id, r]));
+  const missing = [], discrepancies = [], unverified = [], byMonth = {};
+  for (const b of bank) {
+    const m = byMonth[b.month] || (byMonth[b.month] = { bank: 0, matched: 0, missing: 0, discrepancies: 0, unverified: 0 });
+    m.bank++;
+    const row = byId.get(b.id);
+    if (!row || used.has(row.id)) { m.missing++; missing.push(b); continue; }
+    /* A ledger row can only answer for one bank charge. */
+    used.add(row.id);
+    const why = bankDisagrees(row, b);
+    if (why) { m.discrepancies++; discrepancies.push({ bank: b, ledger: row, reason: why }); continue; }
+    if (!provenanceOf(row)) { m.unverified++; unverified.push(b); continue; }
+    m.matched++;
+  }
+
+  /* The other direction: rows he typed that the bank never reported. Some are
+   * legitimate (cash, a card that is not linked, a Stripe payout booked by
+   * hand) · this names them rather than judging them. */
+  const unmatchedRows = rows.filter(r => !used.has(r.id) && r.date >= fromYmd)
+    .map(r => ({ id: r.id, date: r.date, vendor: r.vendor, amount: r.amount, type: r.type }));
+
+  /* Months the bank returned nothing for are NOT months that agree · they are
+   * months the bank has no data for, which is a different answer entirely. */
+  const noData = [];
+  for (let ym = monthOf(fromYmd); ym < monthOf(toYmd); ym = monthOf(addMonthsYmd(ym + '-01', 1)))
+    if (!byMonth[ym]) noData.push(ym);
+
+  return {
+    ok: true, readOnly: true, from: fromYmd, to: toYmd,
+    bankCount: bank.length, ledgerCount: rows.length,
+    onBankNotInBooks: missing.length, inBooksNotOnBank: unmatchedRows.length,
+    discrepancyCount: discrepancies.length, unverifiedCount: unverified.length,
+    noBankData: noData, byMonth,
+    discrepancies: discrepancies.slice(0, 100), unverified: unverified.slice(0, 100),
+    missing: missing.slice(0, 100), extra: unmatchedRows.slice(0, 100),
+    /* The statement itself, when the question is "what does the bank actually
+     * say" rather than "where do we disagree". */
+    /* The caller almost never wants 500 bank lines back · selfCheck does,
+     * because it has to tell a retired id from a live one. */
+    bank: full ? bank : undefined, _bank: bank,
+    /* Charges the card is holding but has not settled · the answer to "I can
+     * see it on Amex, why can't you". */
+    pending: pendingLines.length, pendingLines: full ? pendingLines : undefined,
+  };
+}
+
+async function backfillPlaid(env, fromYmd, toYmd) { return withLedgerLease(env,'bank',env=>backfillPlaidInner(env,fromYmd,toYmd)); }
+async function backfillPlaidInner(env, fromYmd, toYmd) {
+  if (!plaidReady(env)) return { skipped: 'no Plaid keys' };
+  const items = await getPlaidItems(env);
+  if (!items.length) return { skipped: 'no connected accounts' };
+  const totals = {}, recovered = [], dropped = [];
+  for (const item of items) {
+    let offset = 0, total = 1;
+    while (offset < total) {
+      const page = await plaid(env, '/transactions/get', {
+        access_token: item.access_token, start_date: fromYmd, end_date: plaidEnd(toYmd),
+        options: { count: 500, offset },
+      });
+      total = page.total_transactions || 0;
+      for (const t of page.transactions || []) {
+        try {
+          const out = await processPlaidTxn(env, item, t);
+          if (out && out.skip === 'closed') { dropped.push(out); totals.closed = (totals.closed || 0) + 1; continue; }
+          totals[out] = (totals[out] || 0) + 1;
+          if (out === 'added' || out === 'added-review')
+            recovered.push({ date: t.date, vendor: String(t.merchant_name || t.name || '?').slice(0, 60), amount: round2(t.amount) });
+        } catch (e) {
+          totals.failed = (totals.failed || 0) + 1;
+          totals.lastError = `${t.name || t.transaction_id}: ${String(e.message || e).slice(0, 120)}`;
+        }
+      }
+      offset += (page.transactions || []).length;
+      if (!(page.transactions || []).length) break;
+    }
+  }
+  if (recovered.length) {
+    const lines = recovered.slice(0, 10).map(r => `\u2022 *${r.vendor}* $${Math.abs(r.amount).toFixed(2)} \u00b7 ${r.date}`).join('\n');
+    await alertSlack(env, `\u2757 *Recovered ${recovered.length} charge${recovered.length > 1 ? 's' : ''} the bank feed had missed* (${fromYmd} to ${toYmd}):\n${lines}` +
+      (recovered.length > 10 ? `\n_\u2026and ${recovered.length - 10} more._` : '') +
+      `\n\nThey are in the ledger now · anything uncategorised is waiting in Needs you.`).catch(() => {});
+  }
+  await announceDropped(env, dropped);
+  return { ok: true, from: fromYmd, to: toYmd, recovered: recovered.length, closedSkipped: dropped.length, ...totals };
+}
+
+async function applyBankJob(env, id, payload) {
+  const {event,item,t}=payload;
+  try {
+    if(event==='added') {
+      const result=await processPlaidTxn(env,item,t);
+      if(result?.skip==='closed') throw new Error('Closed period: reopen then sync to replay');
+    } else {
+      const cur=await env.DB.prepare('SELECT * FROM transactions WHERE plaid_id=?1').bind(t.transaction_id).first();
+      if(cur) {
+        if(await monthStatus(env,cur.month)==='closed' || (t.date && await monthStatus(env,monthOf(t.date))==='closed'))
+          throw new Error('Closed period: reopen then sync to replay');
+        if(event==='removed') await env.DB.prepare('DELETE FROM transactions WHERE id=?1').bind(cur.id).run();
+        else if(!t.pending) {
+          const amount=cur.type==='out'?round2(t.amount):round2(Math.abs(t.amount));
+          await env.DB.prepare('UPDATE transactions SET date=?2,month=?3,amount=?4,bank_amount=?5,bank_account_id=?6,bank_currency=?7 WHERE id=?1')
+            .bind(cur.id,t.date,monthOf(t.date),amount,round2(t.amount),t.account_id || null,t.iso_currency_code || t.unofficial_currency_code || null).run();
+        }
+      }
+    }
+    await finishJob(env,id); return true;
+  } catch(e) {
+    await saveJob(env,id,'bank-event',payload,String(e.message||e)); return false;
+  }
+}
+async function syncPlaid(env) { return withLedgerLease(env, 'bank', env => syncPlaidInner(env)); }
+async function syncPlaidInner(env) {
+  const replay=await env.DB.prepare("SELECT id,payload FROM ledger_jobs WHERE kind='bank-event' AND status='pending'").all();
+  for(const job of replay.results) await applyBankJob(env,job.id,JSON.parse(job.payload));
+  if (!plaidReady(env)) return { skipped: 'no Plaid keys' };
+  const items = await getPlaidItems(env);
+  if (!items.length) return { skipped: 'no connected accounts' };
+  const totals = {};
+  /* Charges the bank reported for a month whose report is already frozen.
+   * Dropping these silently is how a closed month quietly stops being true,
+   * so every one of them is named and he decides. */
+  const dropped = [];
+  for (const item of items) {
+    /* Plaid refuses a page when the account changed underneath it mid-read
+     * (TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION) and says to start again.
+     * It is a normal thing to hit, more so now the feed is pulled every ten
+     * minutes, and it used to abort the entire sync · one busy moment at Amex
+     * and the night's figures were simply not fetched. Every write here is
+     * keyed on plaid_id, so starting again costs nothing but a second read. */
+    const startCursor = item.cursor || undefined;
+    let cursor = startCursor;
+    let attempt = 0;
+    let hasMore = true;
+    while (hasMore) {
+      let page;
+      try {
+        page = await plaid(env, '/transactions/sync',
+          { access_token: item.access_token, cursor: cursor || undefined, count: 250 });
+      } catch (e) {
+        if (/MUTATION_DURING_PAGINATION/.test(String(e.message || e)) && ++attempt <= 3) {
+          /* Twice from where we began, and if the account is still moving,
+           * once from nothing. A cursor can end up permanently unacceptable ·
+           * this one did · and then retrying the same cursor forever is just a
+           * feed that never runs again. Reading the whole history back is slow
+           * and completely safe: plaidStart refuses anything older than the
+           * books, and plaid_id refuses anything already in them. */
+          cursor = attempt <= 2 ? startCursor : undefined;
+          totals.restarted = (totals.restarted || 0) + 1;
+          continue;
+        }
+        throw e;
+      }
+      for(const event of ['added','modified','removed']) for(const t of page[event] || []) {
+        const id='bank:'+item.item_id+':'+t.transaction_id+':'+event;
+        const payload={event,item:{item_id:item.item_id,accounts:item.accounts,name:item.name},t};
+        await saveJob(env,id,'bank-event',payload);
+        if(await applyBankJob(env,id,payload)) totals[event]=(totals[event]||0)+1;
+        else totals.failed=(totals.failed||0)+1;
+      }
+      /* THE CURSOR IS ONLY REAL ONCE THE SEQUENCE FINISHES. Saving each page's
+       * next_cursor as it arrived looked like resilience · a crash mid-way
+       * would resume rather than restart · but it is the thing Plaid tells you
+       * not to do, and it is why every sync was failing: a cursor saved
+       * half-way through a sequence that the account then changed under is a
+       * cursor Plaid will not accept again, and every later attempt restarted
+       * from that same poisoned point. Held in hand until the end instead. */
+      cursor = page.next_cursor;
+      hasMore = page.has_more;
+    }
+    item.cursor = cursor;
+    await putSetting(env, 'plaidItems', JSON.stringify(items));
+  }
+  await announceDropped(env, dropped);
+  return { ok: true, ...totals };
+}
+
+/* ------------------------------------------------------------------ */
+/*  worker                                                             */
+/* ------------------------------------------------------------------ */
+
+const LEDGER = {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async()=>{const jobs=await env.DB.prepare("SELECT payload FROM ledger_jobs WHERE kind='slack-alert' AND status='pending' LIMIT 20").all();for(const job of jobs.results) await alertSlack(env,JSON.parse(job.payload).text);})().catch(e=>console.log('Notification retry failed: '+e.message)));
+    if (event.cron === '17 8 * * *') {
+      // nightly: re-pull the last 10 days — Stripe data settles late sometimes,
+      // and stripe_id dedupe makes the overlap free
+      const to = centralDate(Date.now() / 1000);
+      const from = centralDate(Date.now() / 1000 - 10 * 86400);
+      // ORDER MATTERS on the 1st: the statement must be computed from a ledger
+      // the syncs have already finished writing, so these run in sequence, not
+      // as three concurrent waitUntils racing each other.
+      ctx.waitUntil((async () => {
+        /* A sync that quietly fails is the worst failure this app can have:
+         * the books look finished while money is missing from them. Every
+         * failure is announced in the channel, by name. */
+        const failed = [];
+        if (env.STRIPE_KEY)
+          await syncStripe(env, from, to).catch(e => { failed.push('Stripe: ' + (e.message || e)); });
+        await syncPlaid(env).catch(e => { failed.push('Bank feed: ' + (e.message || e)); });
+        /* The cursor feed can lose a charge permanently (a $60 haircut went
+         * that way). Re-reading the open books by date every night is the only
+         * thing that catches it, and plaid_id dedupe makes the overlap free. */
+        const bfFrom = addMonthsYmd(monthOf(to) + '-01', -1);
+        await backfillPlaid(env, bfFrom, addDaysYmd(to, 1)).catch(e => { failed.push('Bank re-check: ' + (e.message || e)); });
+        await retryHeldReceipts(env).catch(e => { failed.push('Held receipts: ' + (e.message || e)); });
+        if (failed.length) await alertSlack(env,
+          `\u26a0\ufe0f *Tonight's sync did not finish.* Your figures may be missing transactions until this is fixed.\n` +
+          failed.map(f => '\u2022 ' + f).join('\n')).catch(() => {});
+        /* Last, once everything else has finished writing: check the result
+         * and speak only if it is wrong. Silence has to mean checked. */
+        await (async () => {
+          const to = addDaysYmd(centralDate(Date.now() / 1000), 1);
+          const chk = await selfCheck(env, addMonthsYmd(monthOf(to) + '-01', -3), to);
+          if (chk.ok) return;
+          await alertSlack(env, `\u26a0\ufe0f *The nightly check found ${chk.problems.length} thing${chk.problems.length > 1 ? 's' : ''} wrong with the books:*\n` +
+            chk.problems.map(p => `\u2022 *${p.what}*${p.detail ? ` \u00b7 ${p.detail}` : ''}`).join('\n') +
+            `\n\nNothing about the money was changed.`);
+        })().catch(e => console.log('self check failed: ' + e.message));
+        await monthlyReportSlack(env).catch(e => console.log('monthly report failed: ' + e.message));
+        await receiptNudge(env).catch(e => console.log('receipt nudge failed: ' + e.message));
+        /* The Controller looks the books over last, once every sync has
+         * written. Monday it also writes the briefing. */
+        await controllerNightly(env).catch(e => console.log('controller nightly failed: ' + e.message));
+        if (new Date().getUTCDay() === 1) await controllerBriefing(env).catch(e => console.log('controller briefing failed: ' + e.message));
+      })());
+    } else {
+      // every 10 minutes: anything new dropped in Slack #receipts
+      ctx.waitUntil((async () => {
+        await processSlackReceipts(env).catch(e => console.log('slack receipts failed: ' + e.message));
+        /* Receipt hunt: finish any queue a few charges at a time, and once a
+         * day (after the nightly sync has brought in yesterday's charges)
+         * queue whatever is newly missing. Silent unless it finds something. */
+        await (async () => {
+          if (!(await gmailStore(env))) return;
+          const st = safeJson(await getSetting(env, 'receiptHunt'), null) || {};
+          const auto = (Date.now() - (st.autoAt || 0) > 20 * 3600e3) && new Date().getUTCHours() >= 9;
+          if (!st.queue?.length && !auto) return;
+          if (auto) { st.autoAt = Date.now(); await putSetting(env, 'receiptHunt', JSON.stringify(st)); }
+          await huntReceipts(env, auto && !st.queue?.length ? { auto: true } : {});
+        })().catch(e => console.log('receipt hunt failed: ' + e.message));
+        /* A receipt waiting on a charge should not wait until tomorrow morning
+         * to find out it arrived. The bank's own copy of the account only
+         * refreshes a few times a day, so checking every ten minutes does not
+         * make the charge appear sooner · but it does mean the gap between the
+         * charge appearing and the receipt landing on it is ten minutes rather
+         * than up to a day. Only run at all while something is actually
+         * waiting, so an empty queue costs nothing. */
+        /* Hourglasses on receipts that stopped waiting, cleared a few times a
+         * day. Cheap, and it also cleans up everything from before the
+         * reactions were kept current. */
+        const tidiedAt = Number(await getSetting(env, 'hourglassTidyAt').catch(() => 0)) || 0;
+        if (Date.now() - tidiedAt > 6 * 3600e3) {
+          await putSetting(env, 'hourglassTidyAt', String(Date.now())).catch(() => {});
+          await tidyHourglasses(env).catch(e => console.log('hourglass tidy failed: ' + e.message));
+        }
+        const waiting = await env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM settings WHERE key LIKE 'pend:%'`).first().catch(() => null);
+        if (!waiting?.n) return;
+
+        /* THE ONE THING A TEN-MINUTE JOB CAN DO THAT A NIGHTLY ONE CANNOT:
+         * overlap with itself. A slow pull, a retried page, a bank having a bad
+         * minute, and the next tick starts while this one is still going. Two
+         * syncs sharing one cursor is how a cursor gets written out of order,
+         * which is exactly the failure that had this feed dead for a day.
+         *
+         * So the pull takes a lease first. Whoever holds it works; anyone else
+         * waits for the next tick, which is ten minutes away and costs nothing.
+         * The lease expires on its own so a crash mid-run cannot wedge it shut
+         * forever. */
+        const LEASE = 'bankPullLease';
+        const now = Date.now();
+        const held = Number(await getSetting(env, LEASE)) || 0;
+        if (held > now) return;                       // someone else is mid-pull
+        await putSetting(env, LEASE, String(now + 5 * 60e3));
+        try {
+          await syncPlaid(env).catch(e => console.log('10-min bank pull failed: ' + e.message));
+          /* A log line nobody reads is how held receipts sat for a day with
+           * nothing said. Failures go to the channel, at most every 6 hours. */
+          await retryHeldReceipts(env).catch(async e => {
+            console.log('10-min held retry failed: ' + e.message);
+            const last = Number(await getSetting(env, 'heldRetryAlertAt').catch(() => 0)) || 0;
+            if (Date.now() - last < 6 * 3600e3) return;
+            await putSetting(env, 'heldRetryAlertAt', String(Date.now()));
+            await alertSlack(env, `⚠️ *Held receipts could not be checked.* They stay held and nothing was filed. Error: ${String(e.message || e).slice(0, 200)}`);
+          }).catch(e => console.log('held retry alert failed: ' + e.message));
+        } finally {
+          await putSetting(env, LEASE, '0').catch(() => {});
+        }
+      })());
+    }
+  },
+
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+    if (path === '/health') return json({ ok: true });
+    if (!path.startsWith('/api/')) return json({ error: 'not found' }, 404);
+
+    /* Slack Events — the one route with no Bearer token: Slack calls it.
+     * Its signature IS the credential (verifySlackSig), so it is checked
+     * before anything else happens, including the setup handshake. */
+    if (path === '/api/slack-events' && request.method === 'POST') {
+      const raw = await request.text();
+      const ok = await verifySlackSig(env, request.headers.get('x-slack-request-timestamp'),
+        raw, request.headers.get('x-slack-signature'));
+      if (!ok) return json({ error: 'bad signature' }, 401);
+      const body = safeJson(raw, {}) || {};
+      if (body.type === 'url_verification') return json({ challenge: body.challenge });
+      // Slack retries anything it can't get an answer from in 3 seconds, so
+      // acknowledge first and do the reading/filing after the response.
+      const ev = body.event || {};
+      if ((ev.files || []).length || ev.subtype === 'file_share')
+        ctx.waitUntil(processSlackReceipts(env).catch(e => console.log('slack event: ' + e.message)));
+      /* Ask the ledger. A question is a plain text message in one of three
+       * places: an @mention anywhere, a DM, or a reply inside a thread he has
+       * already mentioned the bot in (askGate checks that mark — everything
+       * else in the channel is somebody else's thread). Anything carrying
+       * files is a receipt and belongs to the branch above, edits and joins
+       * carry a subtype, and bot posts (our own answers included) are skipped,
+       * so ordinary channel chatter never reaches the API or costs a cent. */
+      const plain = !ev.bot_id && !(ev.files || []).length && !!ev.user
+        && (!ev.subtype || ev.subtype === 'thread_broadcast');
+      const isAsk = plain && (ev.type === 'app_mention' || (ev.type === 'message'
+        && (ev.channel_type === 'im' || (ev.thread_ts && ev.thread_ts !== ev.ts))));
+      if (isAsk) ctx.waitUntil(askGate(env, body, ev).catch(e => console.log('ask: ' + e.message)));
+      return json({ ok: true });
+    }
+
+    /* Google's OAuth redirect. Unauthenticated by necessity — a browser
+     * redirect carries no Authorization header — so it is the `state` nonce
+     * this worker issued moments earlier that proves the request is ours, and
+     * it is single-use. */
+    if (path === '/api/drive-callback' && request.method === 'GET') {
+      const page = (title, body) => new Response(
+        `<!doctype html><meta charset="utf-8"><title>${title}</title>` +
+        `<body style="font:16px/1.6 system-ui;max-width:34em;margin:16vh auto;padding:0 6vw;color:#12202b">` +
+        `<h2 style="font-weight:600">${title}</h2><p style="color:#4a5b68">${body}</p></body>`,
+        { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      const code = url.searchParams.get('code'), state = url.searchParams.get('state');
+      const stateRaw = await getSetting(env, 'driveOauthState');
+      const want = safeJson(stateRaw, null);
+      if (!want || !state || state !== want.state || Date.now() > want.expires)
+        return page('That link has expired', 'Go back to Mobius Ledger and press Connect Google Drive again.');
+      const consumed = await env.DB.prepare('DELETE FROM settings WHERE key = ?1 AND value = ?2').bind('driveOauthState', stateRaw).run();
+      if (!consumed.meta.changes) return page('That link has expired', 'Connect again from Ledger.');
+      try {
+        const refresh = await driveExchangeCode(env, code, want.redirectUri);
+        /* Gmail rides the same callback (one redirect URI registered with
+         * Google, not two); the nonce says which connection this was. */
+        if (want.kind === 'gmail') {
+          await putSetting(env, 'gmailAuth', JSON.stringify({ refresh }));
+          return page('Gmail connected', 'Ledger can now look for missing receipts in your email. Close this tab and go back to Mobius Ledger.');
+        }
+        await putSetting(env, 'driveAuth', JSON.stringify({ refresh }));
+        return page('Google Drive connected', 'You can close this tab and go back to Mobius Ledger.');
+      } catch (e) {
+        return page('That did not work', String(e.message || e).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';'));
+      }
+    }
+
+    /* Slack interactivity — button taps and menu picks from the receipt
+     * threads. Same signature check as events; the body is form-encoded with
+     * the interaction JSON in `payload`. Must answer inside 3 seconds. */
+    if (path === '/api/slack-interact' && request.method === 'POST') {
+      const raw = await request.text();
+      const ok = await verifySlackSig(env, request.headers.get('x-slack-request-timestamp'),
+        raw, request.headers.get('x-slack-signature'));
+      if (!ok) return json({ error: 'bad signature' }, 401);
+      const payload = safeJson(new URLSearchParams(raw).get('payload'), {}) || {};
+      /* Cashew has its own Slack app (2026-10-14), so everything that lands here
+       * is ours: a block action whose value carries {id, tax}, {skip}, {undo},
+       * {file} or {ask}, or a led_ / ask_ link button. Until then this worker
+       * was the shared app's one interactivity URL and forwarded Locus and
+       * Pulse taps on; anything unrecognised now gets a quiet 200 (Slack paints
+       * a red banner on any other status). */
+      const acts = payload.type === 'block_actions' ? (payload.actions || []) : [];
+      const mine = acts.some(x => {
+        if (/^(led_|ask_)/.test(x.action_id || '')) return true;
+        const v = safeJson(x.selected_option?.value || x.value, null);
+        return v && ((v.id !== undefined && v.tax !== undefined)
+                     || v.skip !== undefined || v.undo !== undefined || v.file !== undefined
+                     || v.ask !== undefined);
+      });
+      if (!mine) return new Response('', { status: 200 });
+      const handleAction = async () => {
+      const who = await slack(env, 'auth.test');
+      const owner = await slack(env, 'users.lookupByEmail', { email: env.OWNER_EMAIL });
+      if (!who.ok || !owner.ok || payload.team?.id !== who.team_id || payload.user?.id !== owner.user?.id)
+        return json({ error: 'Ledger owner authorization required' }, 403);
+      if (payload.type === 'block_actions') {
+        const a = (payload.actions || [])[0] || {};
+        const val = safeJson(a.selected_option?.value || a.value, null);
+        const respond = body => payload.response_url && ctx.waitUntil(fetch(payload.response_url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body) }).catch(() => {}));
+        /* An edit the Slack Q&A proposed. It only ever described the change;
+         * this tap is the first and only thing that writes it. */
+        /* A proposal card from the Controller (any action). The tap is the
+           first and only thing that writes. */
+        if (val?.askp) {
+          const { engine, h } = controller();
+          const res = await engine.applyProposal(env, String(val.askp), h(), { cancel: !!val.cancel, ctx: askCaller(env, 'Bearer ' + (env.ADMIN_TOKEN || ''), ctx) }).catch(e => ({ error: String(e.message || e) }));
+          respond({ replace_original: true, text: res.error ? '⚠️ ' + res.error : res.cancelled ? '✓ Left as it was.' : `✓ ${res.note || res.summary || 'Applied.'}` });
+          return new Response('', { status: 200 });
+        }
+        if (val?.ask) {
+          if (val.ask.cancel) {
+            respond({ replace_original: true, text: '✓ Left as it was.' });
+            return new Response('', { status: 200 });
+          }
+          const res = await applyAskEdit(env, val.ask, askHelpers()).catch(e => ({ error: String(e.message || e) }));
+          respond({ replace_original: true, text: res.error
+            ? '⚠️ ' + res.error
+            : `✓ *${res.vendor}* $${Math.abs(res.amount).toFixed(2)} updated.` });
+          return new Response('', { status: 200 });
+        }
+        // month-end digest: "Check Gmail again" → one more search for that
+        // month's missing receipts. Answer Slack now; the search runs behind it
+        // and the 10-minute cron finishes anything left, then posts the summary
+        // in this message's thread.
+        if (val?.hunt) {
+          const month = validMonth(val.hunt) ? val.hunt : null;
+          const origin = { channel: payload.channel?.id || payload.container?.channel_id, thread: payload.message?.ts || payload.container?.message_ts };
+          respond({ replace_original: false, response_type: 'in_channel',
+            text: `:mag: Searching Gmail again for ${month ? moLabel(month) : 'the'} missing receipts. The result lands in this thread.`,
+            ...(origin.thread ? { thread_ts: origin.thread } : {}) });
+          ctx.waitUntil(huntReceipts(env, { month, all: !month, origin, limit: 2 })
+            .catch(e => console.log('hunt from button failed: ' + e.message)));
+          return new Response('', { status: 200 });
+        }
+        // month-end digest: "No receipt — that's fine" → stop counting/chasing it
+        if (val?.skip) {
+          const cur = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(Number(val.skip)).first();
+          if (cur) {
+            await env.DB.prepare('UPDATE transactions SET receipt_skip = 1 WHERE id = ?1').bind(cur.id).run();
+            respond({ replace_original: false, response_type: 'in_channel',
+              text: `✓ *${cur.vendor}* $${Math.abs(cur.amount).toFixed(2)} — marked "no receipt". It won't be counted or chased again.` });
+          }
+          return new Response('', { status: 200 });
+        }
+        // an emailed receipt we declined to guess at — he says it is his
+        // "not mine" on a receipt that waited a week and never found its charge
+        if (val?.drop) {
+          const dropped = safeJson(await getSetting(env, val.drop), null);
+          await receiptDelete(env, val.drop).catch(() => {});
+          await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(val.drop).run();
+          if (dropped) await markReceiptMessage(env, dropped.ch, dropped.ts, null);
+          respond({ replace_original: true, text: '\u2713 Discarded · that receipt will not be asked about again.' });
+          return new Response('', { status: 200 });
+        }
+        // an emailed receipt we declined to guess at · he says it is his
+        if (val?.file) {
+          const result=await withLedgerLease(env,'slack-file-action:'+val.file,async env=>{
+          const meta = safeJson(await getSetting(env, val.file), null);
+          const blob = await receiptGet(env, val.file);
+          if (!meta || !blob) {
+            respond({ replace_original: false, text: '⚠️ That one has expired — drop the receipt in again.' });
+            return new Response('', { status: 200 });
+          }
+          /* "That one there" — the receipt's total did not match to the cent,
+           * so it was offered against a near charge and he picked it. Attach
+           * to that existing row; never create a second one beside it. */
+          if (val.to) {
+            const row = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(Number(val.to)).first();
+            if (!row) {
+              respond({ replace_original: false, text: '⚠️ That charge is gone — open the app and attach it there.' });
+              return new Response('', { status: 200 });
+            }
+            const k = `rcpt:${row.id}:${Date.now()}`;
+            await receiptPut(env, k, blob);
+            /* Only onto a charge that is still empty: the button can be tapped
+             * hours after it was sent, and a receipt may have landed since. */
+            const took = await env.DB.prepare(`UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5
+              WHERE id=?1 AND receipt_key IS NULL`)
+              .bind(row.id, k, meta.name, meta.type, await sha256bytes(blob)).run();
+            if (!took.meta.changes) {
+              await receiptDelete(env, k).catch(() => {});
+              respond({ replace_original: false, text: `⚠️ *${row.vendor}* $${Math.abs(row.amount).toFixed(2)} already has a receipt now, so this one was not attached. It is still waiting; open the app if it belongs somewhere else.` });
+              return new Response('', { status: 200 });
+            }
+            await receiptDelete(env, val.file);
+            await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(val.file).run();
+            await markReceiptMessage(env, meta.ch, meta.ts);
+            respond({ replace_original: true,
+              text: `✓ Attached to *${row.vendor}* $${row.amount.toFixed(2)} in *${moLabel(row.month)}*.` +
+                    (Math.abs(row.amount - meta.amount) > 0.001
+                      ? ` (Receipt said $${meta.amount.toFixed(2)}; the charge is what counts.)` : '') });
+            return new Response('', { status: 200 });
+          }
+          if ((await monthStatus(env, meta.month)) === 'closed') {
+            respond({ replace_original: false, text: `🔒 ${moLabel(meta.month)} is closed — reopen it in the app first.` });
+            return new Response('', { status: 200 });
+          }
+          const row = await applyRule(env, {
+            date: meta.date, month: meta.month, type: 'out', vendor: meta.vendor,
+            amount: meta.amount, bucket: null, tax_cat: null, note: meta.note, status: 'ok',
+          });
+          if (row.status === 'review' && meta.tax_cat) {
+            row.tax_cat = meta.tax_cat; row.bucket = bucketFor(meta.tax_cat); row.status = 'ok';
+            await learnDefault(env, row.vendor, row.bucket, row.tax_cat);
+          }
+          const fingerprint=await sha256bytes(blob);
+          const known=await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1 OR import_id=?2').bind(fingerprint,'slack:'+val.file).first();
+          if(known) { respond({replace_original:false,text:'Already filed as transaction '+known.id+'.'}); return new Response('',{status:200}); }
+          const possible=await env.DB.prepare("SELECT id FROM transactions WHERE month=?1 AND vendor=?2 COLLATE NOCASE AND ABS(amount-?3)<=0.02 AND expected=0")
+            .bind(row.month,row.vendor,row.amount).all();
+          if(possible.results.length) { respond({replace_original:false,text:'A similar charge already exists. Use Attach this one or review in Ledger.'}); return new Response('',{status:200}); }
+          const key='rcpt:slack:'+await sha256hex(val.file);
+          await receiptPut(env,key,blob);
+          await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+            (date,month,type,vendor,amount,bucket,tax_cat,note,status,source,import_id,receipt_key,receipt_name,receipt_type,receipt_hash)
+            VALUES(?1,?2,'out',?3,?4,?5,?6,?7,?8,'manual',?9,?10,?11,?12,?13)`)
+            .bind(row.date,row.month,row.vendor,row.amount,row.bucket,row.tax_cat,row.note,row.status,'slack:'+val.file,key,meta.name,meta.type,fingerprint).run();
+          await receiptDelete(env, val.file);
+          await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind(val.file).run();
+          await markReceiptMessage(env, meta.ch, meta.ts);
+          respond({ replace_original: true,
+            text: `✓ Filed *${meta.vendor}* $${meta.amount.toFixed(2)} into *${moLabel(meta.month)}*` +
+                  `${row.tax_cat ? ` as *${row.tax_cat}*` : ', it needs a category in the app'}. Receipt attached.` });
+          return new Response('', { status: 200 });
+
+          });
+          return result instanceof Response ? result : new Response('',{status:200});
+        }
+        // matched-receipt reply: "Not a match ↩︎" → detach, receipt discarded
+        if (val?.undo) {
+          const cur = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(Number(val.undo)).first();
+          if (cur) {
+            // Previous receipt versions are retained; commit the new pointer first.
+            await env.DB.prepare('UPDATE transactions SET receipt_key = NULL, receipt_name = NULL, receipt_type = NULL, receipt_hash = NULL WHERE id = ?1')
+              .bind(cur.id).run();
+            respond({ replace_original: true,
+              text: `↩︎ Detached — *${cur.vendor}* $${Math.abs(cur.amount).toFixed(2)} is back to "no receipt". Fix the right row in the app first (amount/date), then drop the photo again and it'll land there.` });
+          }
+          return new Response('', { status: 200 });
+        }
+        if (val?.id && val?.tax) {
+          const cur = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(Number(val.id)).first();
+          if (cur) {
+            if ((await monthStatus(env, cur.month)) === 'closed') {
+              respond({ replace_original: false, text: 'This month is closed. Reopen it in Ledger before categorizing.' });
+              return new Response('', { status: 200 });
+            }
+            const bucket = bucketFor(val.tax);
+            await env.DB.prepare(`UPDATE transactions SET bucket = ?2, tax_cat = ?3, status = 'ok' WHERE id = ?1`)
+              .bind(cur.id, bucket, String(val.tax)).run();
+            if (cur.type === 'out') await learnDefault(env, cur.vendor, bucket, String(val.tax));
+            if (payload.response_url) ctx.waitUntil(fetch(payload.response_url, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ replace_original: true,
+                text: `✓ *${cur.vendor}* $${Math.abs(cur.amount).toFixed(2)} — *${val.tax}*. Remembered as this vendor's usual.` }),
+            }).catch(() => {}));
+          }
+        }
+      }
+      };
+      ctx.waitUntil(handleAction().catch(async e => {
+        await saveJob(env,'slack-action:'+await sha256hex(raw),'slack-action',{action:payload.actions?.[0]?.action_id},String(e.message || e));
+      }));
+      return new Response('', { status: 200 });
+    }
+
+    if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+
+    try {
+      /* ---- boot: everything the dashboard needs in one call ---- */
+      if (path === '/api/boot') {
+        const [money, taxCatsRaw, clients, vendors, months] = await Promise.all([
+          getMoney(env),
+          getSetting(env, 'taxCats'),
+          env.DB.prepare('SELECT * FROM clients ORDER BY retainer DESC').all(),
+          env.DB.prepare('SELECT * FROM vendors ORDER BY bucket, name').all(),
+          env.DB.prepare('SELECT month, status, closed_at FROM months ORDER BY month').all(),
+        ]);
+        const flags = await env.DB.prepare(`
+          SELECT month,
+            SUM(CASE WHEN status = 'review' THEN 1 ELSE 0 END) AS review,
+            SUM(CASE WHEN expected = 1 THEN 1 ELSE 0 END) AS expected,
+            SUM(CASE WHEN type = 'out' AND expected = 0 AND receipt_key IS NULL AND receipt_skip = 0 THEN 1 ELSE 0 END) AS noReceipt
+          FROM transactions GROUP BY month`).all();
+        const avg = await recentRevenueAvg(env);
+        return json({
+          money, taxCats: safeJson(taxCatsRaw, []) || [],
+          clients: clients.results.map(c => ({ ...c, recent_avg: avg[c.name] ?? null })),
+          vendors: vendors.results, months: months.results,
+          revision: await getSetting(env, 'ledgerRevision'),
+          exceptions: (await env.DB.prepare("SELECT id,kind,error FROM ledger_jobs WHERE status='pending' AND error IS NOT NULL ORDER BY updated_at DESC LIMIT 20").all()).results,
+          flags: Object.fromEntries(flags.results.map(f => [f.month, f])),
+          extractAvailable: !!env.ANTHROPIC_API_KEY,
+          stripeConfigured: !!env.STRIPE_KEY,
+          slackConfigured: !!env.SLACK_BOT_TOKEN,
+          notify: await getNotify(env),
+          slackInstant: !!env.SLACK_SIGNING_SECRET,
+          plaidConfigured: plaidReady(env),
+          plaidEnv: env.PLAID_ENV || 'sandbox',
+          plaidItems: (await getPlaidItems(env)).map(i => ({
+            item_id: i.item_id, name: i.name,
+            accounts: Object.values(i.accounts || {}).map(a => `${a.name} (${a.type})`),
+          })),
+          buckets: BUCKETS_OUT,
+          edition: (await getSetting(env, 'edition')) || 'service',
+          /* The owner's other sets of books (the picker at the top of the rail). Links only; nothing is shared. */
+          books: safeJson(await getSetting(env, 'books'), null),
+        });
+      }
+
+      if (path === '/api/exceptions' && request.method === 'GET') {
+        const rows=await env.DB.prepare("SELECT id,kind,error,updated_at FROM ledger_jobs WHERE status='pending' ORDER BY updated_at DESC LIMIT 200").all();
+        return json({ exceptions: rows.results });
+      }
+      /* ---- transactions ---- */
+      if (path === '/api/transactions' && request.method === 'GET') {
+        const month = url.searchParams.get('month');
+        const year = url.searchParams.get('year');
+        let q, bind;
+        if (validMonth(month)) { q = 'month = ?1'; bind = [month]; }
+        else if (/^\d{4}$/.test(year || '')) { q = "month LIKE ?1"; bind = [year + '-%']; }
+        else if (url.searchParams.get('review') === '1') { q = "status = 'review'"; bind = []; }
+        else return json({ error: 'pass month=YYYY-MM, year=YYYY or review=1' }, 400);
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM transactions WHERE ${q} ORDER BY date DESC, id DESC`).bind(...bind).all();
+        return json({ transactions: results });
+      }
+
+      if (path === '/api/transactions' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const rows = Array.isArray(body.rows) ? body.rows : [body];
+        if (!rows.length || rows.length > 500) return json({ error: '1–500 rows' }, 400);
+        const inserted = [];
+        for (const r of rows) {
+          const date = /^\d{4}-\d{2}-\d{2}$/.test(r.date || '') ? r.date : null;
+          const amount = Number(r.amount);
+          const type = ['in', 'out', 'fee', 'transfer'].includes(r.type) ? r.type : null;
+          const vendor = String(r.vendor || '').trim().slice(0, 120);
+          if (!date || !vendor || !type || !Number.isFinite(amount) || amount === 0) continue;
+          if(r.source==='import' && !/^[a-f0-9]{64}:\d+$/.test(r.import_id || '')) return json({error:'Import identity required; use CSV preview'},400);
+          const month = monthOf(date);
+          if ((await monthStatus(env, month)) === 'closed') continue; // closed months are frozen
+          const row = await applyRule(env, {
+            date, month, type, vendor, amount: round2(amount),
+            // the picker sends only a category; the dashboard group follows
+            bucket: r.bucket || (r.tax_cat ? bucketFor(r.tax_cat) : null),
+            tax_cat: r.tax_cat || null,
+            note: r.note ? String(r.note).slice(0, 300) : null,
+            one_time: r.one_time ? 1 : 0, expected: 0,
+            status: r.status === 'review' ? 'review' : 'ok',
+            source: ['manual', 'import'].includes(r.source) ? r.source : 'manual',
+          });
+          // every categorized purchase teaches the vendor's default — automatic,
+          // so the same place never has to be categorized twice
+          if (type === 'out' && row.bucket && row.tax_cat && row.status !== 'review')
+            await learnDefault(env, row.vendor, row.bucket, row.tax_cat);
+          const res = await env.DB.prepare(`INSERT OR IGNORE INTO transactions
+            (date, month, type, vendor, amount, bucket, tax_cat, note, one_time, expected, status, source, import_id)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)`)
+            .bind(row.date, row.month, row.type, row.vendor, row.amount, row.bucket, row.tax_cat,
+                  row.note, row.one_time, row.expected, row.status, row.source, row.source === 'import' ? String(r.import_id || '') : null).run();
+          if (res.meta.changes) inserted.push({ id: res.meta.last_row_id, ...row });
+        }
+        return json({ ok: true, inserted });
+      }
+
+      if (path === '/api/transaction' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        const id = Number(b.id);
+        const cur = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(id).first();
+        if (!cur) return json({ error: 'unknown transaction' }, 404);
+        const closed = (await monthStatus(env, cur.month)) === 'closed';
+        if (closed && Object.keys(b).some(k => !['id', 'receipt_skip'].includes(k)))
+          return json({ error: cur.month + ' is closed — reopen it to edit financial details.' }, 409);
+        // On a closed month only receipt attach + categorization survive —
+        // amounts/dates are frozen with the report the month produced.
+        const next = { ...cur };
+        for (const k of ['bucket', 'tax_cat', 'note', 'status', 'vendor']) {
+          if (b[k] !== undefined) next[k] = b[k] === null ? null : String(b[k]).slice(0, 300);
+        }
+        if (b.one_time !== undefined) next.one_time = b.one_time ? 1 : 0;
+        if (b.receipt_skip !== undefined) next.receipt_skip = b.receipt_skip ? 1 : 0;
+        /* "This was between my own accounts" — reclassify it, and remember the
+         * name so the next one is caught by the sync instead of by Cole. */
+        if (b.markSelfTransfer) {
+          next.type = 'transfer'; next.bucket = 'Transfer';
+          next.tax_cat = 'Transfer — not P&L'; next.status = 'ok';
+          next.amount = Math.abs(next.amount);
+          const self = safeJson(await getSetting(env, 'selfAccounts'), []) || [];
+          if (!self.some(a => String(a).toLowerCase() === next.vendor.toLowerCase())) {
+            self.push(next.vendor);
+            await putSetting(env, 'selfAccounts', JSON.stringify(self.slice(0, 100)));
+          }
+        }
+        /* A bank deposit renamed to a client teaches the payer, so the next
+         * deposit from the same bank name files itself (see payerDeposit). */
+        if (cur.type === 'in' && cur.plaid_id && next.vendor !== cur.vendor) {
+          const client = await env.DB.prepare('SELECT name FROM clients WHERE name = ?1 COLLATE NOCASE').bind(next.vendor).first();
+          const key = payerKey(cur.vendor);
+          if (client && key.length >= 4) {
+            const map = safeJson(await getSetting(env, 'payerMap'), {}) || {};
+            const list = [].concat(map[key] || []);
+            if (!list.includes(client.name)) list.push(client.name);
+            map[key] = list;
+            await putSetting(env, 'payerMap', JSON.stringify(map));
+          }
+        }
+        // The row-level and Slack pickers send only a tax category — the bucket
+        // that drives the dashboard is derived, so there is one thing to choose
+        // rather than two that can disagree.
+        if (b.tax_cat !== undefined && b.bucket === undefined && next.type === 'out')
+          next.bucket = bucketFor(b.tax_cat);
+        if (b.tax_cat && next.status === 'review') next.status = 'ok';
+        if (b.confirm) { next.expected = 0; next.status = 'ok'; }
+        if (!closed) {
+          if (b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date)) {
+            const nm = monthOf(b.date);
+            // a date edit must not smuggle a row INTO a month whose report is frozen
+            if (nm !== cur.month && (await monthStatus(env, nm)) === 'closed')
+              return json({ error: `${nm} is closed — a transaction can't be moved into a frozen month. Reopen it first.` }, 400);
+            next.date = b.date; next.month = nm;
+          }
+          if (b.amount !== undefined && Number.isFinite(Number(b.amount))) next.amount = round2(Number(b.amount));
+        } else if (b.date !== undefined || b.amount !== undefined) {
+          return json({ error: `${cur.month} is closed — reopen it to change amounts or dates.` }, 400);
+        }
+        // learning: naming a Stripe customer's client once teaches the sync forever
+        if (b.mapStripe && cur.stripe_cus && next.vendor && next.vendor !== cur.vendor) {
+          const map = safeJson(await getSetting(env, 'stripeMap'), {}) || {};
+          map[cur.stripe_cus] = next.vendor;
+          await putSetting(env, 'stripeMap', JSON.stringify(map));
+          next.status = 'ok'; next.note = null;
+        }
+        if (cur.type === 'out' && next.status !== 'review' && next.bucket && next.tax_cat)
+          await learnDefault(env, next.vendor, next.bucket, next.tax_cat);
+        /* The app asks first and then calls the bulk route, so spreading a
+         * category across a vendor's other rows is always something Cole said
+         * yes to — never something that happened while he was looking away. */
+        await env.DB.prepare(`UPDATE transactions SET date=?2, month=?3, vendor=?4, amount=?5, bucket=?6,
+          tax_cat=?7, note=?8, one_time=?9, expected=?10, status=?11, receipt_skip=?12, type=?13 WHERE id=?1`)
+          .bind(id, next.date, next.month, next.vendor, next.amount, next.bucket,
+                next.tax_cat, next.note, next.one_time, next.expected, next.status,
+                next.receipt_skip || 0, next.type).run();
+        return json({ ok: true, transaction: next });
+      }
+
+      /* Bulk categorize. Thirty Anthropic charges in a row is one decision, not
+       * thirty — and each one still teaches the vendor default, so the next
+       * import of that vendor never reaches Review at all. */
+      if (path === '/api/transactions/bulk' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter(Number.isFinite).slice(0, 500);
+        if (!ids.length) return json({ error: 'no transactions selected' }, 400);
+        const marks = new Array(ids.length).fill(0).map((_, i) => '?' + (i + 1)).join(',');
+        const { results: rows } = await env.DB.prepare(
+          `SELECT * FROM transactions WHERE id IN (${marks})`).bind(...ids).all();
+        let updated = 0, skippedClosed = 0;
+        const learned = new Set();
+        for (const cur of rows) {
+          if ((await monthStatus(env, cur.month)) === 'closed') { skippedClosed++; continue; }
+          const sets = [], binds = [];
+          if (b.tax_cat !== undefined || b.bucket !== undefined) {
+            const tax = b.tax_cat === undefined ? cur.tax_cat
+              : b.tax_cat === null ? null : String(b.tax_cat).slice(0, 300);
+            // an explicit bucket wins; otherwise derive it from the tax category
+            const bucket = b.bucket !== undefined ? String(b.bucket).slice(0, 300)
+              : cur.type === 'out' ? bucketFor(tax) : cur.bucket;
+            // push() returns the new length, which IS the 1-based placeholder
+            sets.push(`tax_cat = ?${binds.push(tax)}`);
+            sets.push(`bucket = ?${binds.push(bucket)}`);
+            if (tax) sets.push(`status = 'ok'`);
+            if (tax && cur.type === 'out' && !learned.has(cur.vendor)) {
+              await learnDefault(env, cur.vendor, bucket, tax);
+              learned.add(cur.vendor);
+            }
+          }
+          if (b.receipt_skip !== undefined) sets.push(`receipt_skip = ${b.receipt_skip ? 1 : 0}`);
+          if (b.one_time !== undefined) sets.push(`one_time = ${b.one_time ? 1 : 0}`);
+          if (!sets.length) continue;
+          await env.DB.prepare(`UPDATE transactions SET ${sets.join(', ')} WHERE id = ?${binds.length + 1}`)
+            .bind(...binds, cur.id).run();
+          updated++;
+        }
+        return json({ ok: true, updated, skippedClosed, learned: [...learned] });
+      }
+
+      if (path === '/api/transaction' && request.method === 'DELETE') {
+        const id = Number(url.searchParams.get('id'));
+        const cur = await env.DB.prepare('SELECT * FROM transactions WHERE id = ?1').bind(id).first();
+        if (!cur) return json({ error: 'unknown transaction' }, 404);
+        if ((await monthStatus(env, cur.month)) === 'closed')
+          return json({ error: `${cur.month} is closed — reopen it first.` }, 400);
+        // Retain receipt objects for recovery.
+        await env.DB.prepare('DELETE FROM transactions WHERE id = ?1').bind(id).run();
+        return json({ ok: true });
+      }
+
+      /* ---- Stripe ---- */
+      if (path === '/api/stripe-check') {
+        if (!env.STRIPE_KEY) return json({ configured: false });
+        const bal = await stripeGet(env, 'balance_transactions', { limit: 3 });
+        return json({ configured: true, ok: true,
+          sample: bal.data.map(b => ({ type: b.type, amount: b.amount / 100, fee: b.fee / 100, when: centralDate(b.created) })) });
+      }
+
+      if (path === '/api/stripe-sync' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        let from = b.from, to = b.to;
+        if (validMonth(b.month)) { from = b.month + '-01'; to = b.month + '-31'; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || ''))
+          return json({ error: 'pass month=YYYY-MM or from/to=YYYY-MM-DD' }, 400);
+        return json({ ok: true, ...(await syncStripe(env, from, to)) });
+      }
+
+      /* ---- Plaid ---- */
+      if (path === '/api/plaid-link-token' && request.method === 'POST') {
+        if (!plaidReady(env)) return json({ error: 'Plaid keys are not set on the worker yet' }, 400);
+        /* Plaid gives an Item 90 days of history unless asked otherwise, AT LINK
+         * TIME and never afterwards · which is why the books could not be
+         * checked before June 9th however many times the bank was re-read. The
+         * window is a property of the Item, so the only way to widen it is to
+         * link again. 730 is Plaid's maximum and covers any tax year. */
+        const r = await plaid(env, '/link/token/create', {
+          user: { client_user_id: 'cole' }, client_name: 'Mobius Ledger',
+          products: ['transactions'], country_codes: ['US'], language: 'en',
+          transactions: { days_requested: 730 },
+        });
+        return json({ link_token: r.link_token });
+      }
+
+      if (path === '/api/plaid-exchange' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        if (!b.public_token) return json({ error: 'public_token required' }, 400);
+        const ex = await plaid(env, '/item/public_token/exchange', { public_token: b.public_token });
+        const acc = await plaid(env, '/accounts/get', { access_token: ex.access_token });
+        const items = await getPlaidItems(env);
+        /* Linking the same bank again REPLACES it rather than joining it.
+         * Two live Items for one bank means every charge arrives twice under
+         * two different transaction ids, and the unique index cannot see that
+         * they are the same charge · the books would simply double. Re-linking
+         * is the only way to widen the history window, so it has to be safe. */
+        const inst = acc.item?.institution_name || b.institution || 'Bank';
+        /* RELEASE THE OLD CONNECTION, don't just forget it. Dropping an item
+         * from our own list leaves it alive at Plaid, still counted and still
+         * billed at $0.30 a month, for a connection nothing will ever read
+         * again. The disconnect button has always done this; replacing a bank
+         * by re-linking it did not, which is the more common way to end up with
+         * one. Told first, so a failure here is visible before the token goes. */
+        const old = items.filter(i => i.name === inst);
+        if(old.length) {
+          await plaid(env,'/item/remove',{access_token:ex.access_token});
+          return json({error:'Existing bank connection retained. Re-link requires a verified account replacement mapping; automatic migration is disabled.'},409);
+        }
+        for (const o of old)
+          await plaid(env, '/item/remove', { access_token: o.access_token }).catch(() => {});
+        const replaced = old.map(i => i.item_id);
+        const kept = items.filter(i => i.name !== inst);
+        kept.push({
+          item_id: ex.item_id, access_token: ex.access_token, cursor: null,
+          name: inst,
+          accounts: Object.fromEntries(acc.accounts.map(a => [a.account_id, { name: a.name, type: a.type }])),
+        });
+        await putSetting(env, 'plaidItems', JSON.stringify(kept));
+        if (!(await getSetting(env, 'plaidStart'))) {
+          // never import history older than the earliest OPEN month — the sheet
+          // backfill and closed report cards already own everything before it
+          const open = await env.DB.prepare(`SELECT MIN(month) AS m FROM months WHERE status = 'open'`).first();
+          await putSetting(env, 'plaidStart', (open?.m || new Date().toISOString().slice(0, 7)) + '-01');
+        }
+        /* RE-LINKING IS ONLY SAFE IF THIS RUNS FIRST. The replacement Item
+         * issues new transaction ids for charges the ledger already holds, and
+         * the next sync would happily insert every one of them again — the
+         * unique index cannot tell two ids for one charge apart. So the moment
+         * the new Item exists, before anything else is allowed to touch it,
+         * every row it recognises is migrated onto its new id. It is a matter
+         * of minutes between linking and the nightly job, so this cannot wait
+         * to be asked for. */
+        let migration = null;
+        if (replaced.length) {
+          const from = (await getSetting(env, 'plaidStart')) || (new Date().toISOString().slice(0, 7) + '-01');
+          migration = await importPlaidRange(env, from, addDaysYmd(centralDate(Date.now() / 1000), 1), {})
+            .catch(e => ({ error: String(e.message || e) }));
+        }
+        return json({ ok: true, name: inst, accounts: acc.accounts.length, replaced, migration });
+      }
+
+      /* Make a whole range agree with the bank. Reaches past plaidStart and
+       * into closed months ON PURPOSE, so it says so out loud: reopen must be
+       * asked for, and the months it touches are LEFT OPEN for review rather
+       * than silently re-frozen around numbers nobody has looked at. */
+      if (path === '/api/plaid-import' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        let from = b.from, to = b.to;
+        if (validMonth(b.month)) { from = b.month + '-01'; to = monthOf(addMonthsYmd(b.month + '-01', 1)) + '-01'; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || ''))
+          return json({ error: 'pass month=YYYY-MM or from/to=YYYY-MM-DD' }, 400);
+
+        /* Unfreezing a month is the destructive half of this, so nothing is
+         * unfrozen until the bank has actually answered the door. */
+        if (!plaidReady(env)) return json({ error: 'Plaid keys are not set on the worker' }, 400);
+        if (!(await getPlaidItems(env)).length) return json({ error: 'no connected accounts' }, 400);
+        const reopened = [];
+        const res = await importPlaidRange(env, from, to, { ignoreStart: true });
+        return json({ ...res, reopened });
+      }
+
+      /* Receipts attached before receipt_hash existed carry no fingerprint, so
+       * nothing can recognise them. Re-reading the same email then looks like a
+       * brand new receipt for a charge that is already covered, which is how 26
+       * settled receipts turned back into 26 open questions. Hashing what is
+       * already stored closes that hole once. */
+      if (path === '/api/receipt-hashes' && request.method === 'POST') {
+        const { results: rows } = await env.DB.prepare(
+          `SELECT id, receipt_key FROM transactions
+            WHERE receipt_key IS NOT NULL AND receipt_hash IS NULL LIMIT 400`).all();
+        let done = 0, missing = 0;
+        for (const r of rows) {
+          const buf = await receiptGet(env, r.receipt_key).catch(() => null);
+          if (!buf) { missing++; continue; }
+          await env.DB.prepare('UPDATE transactions SET receipt_hash = ?2 WHERE id = ?1')
+            .bind(r.id, await sha256bytes(buf)).run();
+          done++;
+        }
+        return json({ ok: true, hashed: done, unreadable: missing, remaining: rows.length === 400 });
+      }
+
+      /* Everything this app promises, checked in one call. Read-only. */
+      if (path === '/api/selfcheck') {
+        const to = addDaysYmd(centralDate(Date.now() / 1000), 1);
+        const from = url.searchParams.get('from') || addMonthsYmd(monthOf(to) + '-01', -3);
+        return json(await selfCheck(env, from, to));
+      }
+
+      /* Read-only: does the bank agree with the books? Writes NOTHING, so it
+       * is safe on the hand-entered months a backfill must never touch. */
+      if (path === '/api/plaid-compare' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        let from = b.from, to = b.to;
+        if (validMonth(b.month)) { from = b.month + '-01'; to = monthOf(addMonthsYmd(b.month + '-01', 1)) + '-01'; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || ''))
+          return json({ error: 'pass month=YYYY-MM or from/to=YYYY-MM-DD' }, 400);
+        const cmp = await comparePlaid(env, from, to, !!b.full);
+        delete cmp._bank;                       // internal, and 500 lines long
+        return json(cmp);
+      }
+
+      /* Re-read a date range straight from the bank, independent of the sync
+       * cursor · the one way to prove a month against the statement. */
+      if (path === '/api/plaid-backfill' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        let from = b.from, to = b.to;
+        if (validMonth(b.month)) { from = b.month + '-01'; to = monthOf(addMonthsYmd(b.month + '-01', 1)) + '-01'; }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || ''))
+          return json({ error: 'pass month=YYYY-MM or from/to=YYYY-MM-DD' }, 400);
+        return json(await backfillPlaid(env, from, to));
+      }
+
+      if (path === '/api/plaid-sync' && request.method === 'POST') {
+        const out = await syncPlaid(env);
+        const retried = await retryHeldReceipts(env).catch(() => ({ attached: 0 }));
+        return json({ ...out, heldAttached: retried.attached || 0 });
+      }
+
+      if (path === '/api/plaid-item' && request.method === 'DELETE') {
+        const itemId = url.searchParams.get('item_id');
+        const items = await getPlaidItems(env);
+        const it = items.find(x => x.item_id === itemId);
+        if (it) await plaid(env, '/item/remove', { access_token: it.access_token }).catch(() => {});
+        await putSetting(env, 'plaidItems', JSON.stringify(items.filter(x => x.item_id !== itemId)));
+        return json({ ok: true });
+      }
+
+      /* ---- recurring engine: pre-create this month's expected rows ---- */
+      if (path === '/api/recurring' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const month = validMonth(b.month) ? b.month : null;
+        if (!month) return json({ error: 'month=YYYY-MM' }, 400);
+        if ((await monthStatus(env, month)) === 'closed') return json({ error: 'month is closed' }, 400);
+        await env.DB.prepare('INSERT OR IGNORE INTO months (month, status) VALUES (?1, \'open\')').bind(month).run();
+        /* EXPECTED IS FOR REVENUE ONLY (Cole's call, 2026-09-09, and he is
+         * right). Expenses arrive on their own from the bank feed, so a
+         * pre-created expense row is a prediction of something automatic:
+         * pure noise, plus a confirm-or-drop decision at every close. What a
+         * missing charge deserves is a NOTE, not a phantom row - the close
+         * checklist lists recurring vendors that didn't bill. A client who
+         * doesn't pay, though, is exactly what he wants shoved in his face:
+         * client rows stay. Vendor rules themselves also stay - they still
+         * categorize the bank lines and feed the forecast and yearly-renewal
+         * reminders (the Amex membership fee just arrives as a bank line and
+         * files itself under its rule). */
+        const [clients, existing] = await Promise.all([
+          env.DB.prepare(`SELECT * FROM clients WHERE active = 1 AND (retainer > 0 OR billing = 'percent')`).all(),
+          env.DB.prepare('SELECT vendor FROM transactions WHERE month = ?1').bind(month).all(),
+        ]);
+        const have = new Set(existing.results.map(r => r.vendor.toLowerCase()));
+        let created = 0;
+        const avg = await recentRevenueAvg(env);
+        for (const c of clients.results) {
+          if (have.has(c.name.toLowerCase())) continue;
+          // retainer + % of ad spend clients vary month to month: prefill with
+          // their recent average and say so — the actual is typed at confirm.
+          const variable = c.billing === 'percent' || (c.pct || 0) > 0;
+          const amount = variable ? (avg[c.name] ?? c.retainer ?? 0) : (c.retainer || 0);
+          const note = variable
+            ? `Variable — retainer${c.pct ? ' + ' + c.pct + '% of ad spend' : ' + % of ad spend'}. Prefilled with the recent average: enter the invoice total, then confirm.` : null;
+          await env.DB.prepare(`INSERT INTO transactions (date, month, type, vendor, amount, bucket, tax_cat, note, expected, source)
+            VALUES (?1, ?2, 'in', ?3, ?4, 'Revenue', 'Client revenue', ?5, 1, 'recurring')`)
+            .bind(month + '-01', month, c.name, amount, note).run();
+          created++;
+        }
+        return json({ ok: true, created });
+      }
+
+      /* ---- month close / reopen / report ---- */
+      if (path === '/api/close' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const month = validMonth(b.month) ? b.month : null;
+        if (!month) return json({ error: 'month=YYYY-MM' }, 400);
+        if ((await monthStatus(env, month)) === 'closed') return json({ error: 'already closed' }, 400);
+        const open = await env.DB.prepare(`SELECT
+            SUM(CASE WHEN expected = 1 THEN 1 ELSE 0 END) AS expected,
+            SUM(CASE WHEN status = 'review' AND expected = 0 THEN 1 ELSE 0 END) AS review
+          FROM transactions WHERE month = ?1`).bind(month).first();
+        if (open.review > 0 && !b.force)
+          return json({ error: `${open.review} transaction(s) still in Review — categorize them first.`, review: open.review }, 400);
+        if (open.expected > 0) {
+          if (!b.dropExpected)
+            return json({ error: `${open.expected} expected row(s) never confirmed.`, expected: open.expected }, 400);
+          await env.DB.prepare('DELETE FROM transactions WHERE month = ?1 AND expected = 1').bind(month).run();
+        }
+        const revision = await getSetting(env, 'ledgerRevision');
+        const report = await computeReport(env, month);
+        const closedResult = await env.DB.prepare(`INSERT INTO months (month,status,closed_at,report_json)
+          SELECT ?1,'closed',?2,?3 WHERE (SELECT value FROM settings WHERE key='ledgerRevision') = ?4
+          AND NOT EXISTS(SELECT 1 FROM transactions WHERE month=?1 AND expected=1)
+          AND (?5=1 OR NOT EXISTS(SELECT 1 FROM transactions WHERE month=?1 AND status='review' AND expected=0))
+          ON CONFLICT(month) DO UPDATE SET status=excluded.status,closed_at=excluded.closed_at,report_json=excluded.report_json
+          WHERE months.status != 'closed'`).bind(month,new Date().toISOString(),JSON.stringify(report),revision,b.force?1:0).run();
+        if (!closedResult.meta.changes) return json({ error: 'Books changed during close. Review and retry.' }, 409);
+        return json({ ok: true, report });
+      }
+
+      if (path === '/api/reopen' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        if (!validMonth(b.month)) return json({ error: 'month=YYYY-MM' }, 400);
+        // the frozen report stays in report_json until the next close overwrites it
+        await env.DB.prepare(`UPDATE months SET status = 'open' WHERE month = ?1`).bind(b.month).run();
+        return json({ ok: true });
+      }
+
+      if (path === '/api/report') {
+        const month = url.searchParams.get('month');
+        if (!validMonth(month)) return json({ error: 'month=YYYY-MM' }, 400);
+        const row = await env.DB.prepare('SELECT status, closed_at, report_json FROM months WHERE month = ?1').bind(month).first();
+        /* Frozen means CLOSED and frozen. A reopened month keeps its old
+         * report_json around (until the next close overwrites it), and serving
+         * that would show numbers the ledger no longer contains. */
+        if (row?.status === 'closed' && row.report_json)
+          return json({ frozen: true, closedAt: row.closed_at, report: safeJson(row.report_json, null) });
+        return json({ frozen: false, status: row?.status || 'open', report: await resolveReport(env, month) });
+      }
+
+      /* ---- multi-month series for Dashboards and the P&L ----
+       * Each month is exactly what its report says (frozen when closed), minus
+       * the transaction detail, so a chart can never disagree with a statement.
+       * Top vendors come from the live rows: closed months cannot change them. */
+      /* The drill: every booked row behind a number over a range of months, so a tile can
+         open the charges it is made of. kind = in | out | fee; line = the tax category. */
+      if (path === '/api/drill') {
+        const from = url.searchParams.get('from'), to = url.searchParams.get('to');
+        if (!validMonth(from) || !validMonth(to) || from > to) return json({ error: 'from/to=YYYY-MM' }, 400);
+        const { results } = await env.DB.prepare(
+          `SELECT id, date, month, type, vendor, amount, tax_cat, bucket, note, receipt_key, receipt_skip, acct
+           FROM transactions WHERE expected = 0 AND type != 'transfer' AND month >= ?1 AND month <= ?2 ORDER BY date, id`).bind(from, to).all();
+        const rows = results.map(r => ({ id: r.id, date: r.date, month: r.month, vendor: r.vendor, amount: r.amount, type: r.type,
+          kind: r.type, line: r.type === 'in' ? 'Revenue' : (r.tax_cat || r.bucket || 'Uncategorized'),
+          note: r.note || '', receipt: !!r.receipt_key, noReceiptNeeded: !!r.receipt_skip, acct: r.acct || null }));
+        return json({ from, to, rows });
+      }
+      if (path === '/api/series') {
+        const from = url.searchParams.get('from'), to = url.searchParams.get('to');
+        if (!validMonth(from) || !validMonth(to) || from > to) return json({ error: 'from/to = YYYY-MM' }, 400);
+        return json(await seriesSummary(env, from, to));
+      }
+
+      /* ---- the Controller, in the app ---- */
+      if (path === '/api/ask' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const { engine, h } = controller();
+        const findings = await engine.openFindings(env, h()).catch(() => []);
+        const r = await engine.answerWeb(env, b.question, b.history, h(), { findings: findings.slice(0, 6), screen: b.screen || null });
+        return json({ ...r, isOwner: await isOwner(request, env) });
+      }
+      if (path === '/api/ask/reports') { const { engine, h } = controller(); return json({ reports: await engine.reportsList(env, h()) }); }
+      if (path === '/api/ask/findings') {
+        const { engine, h } = controller();
+        return json({ findings: await engine.openFindings(env, h()), briefing: safeJson(await getSetting(env, engine.keys.lastBriefing), null),
+          memory: await engine.memory(env, h()), brief: await engine.getBrief(env, h()),
+          playbook: await engine.getPlaybook(env, h()), pending: await engine.pendingList(env, h()) });
+      }
+      if (path === '/api/ask/finding' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        if (!b.key) return json({ error: 'key required' }, 400);
+        return json(await controller().engine.setFindingState(env, String(b.key), String(b.state || 'done')));
+      }
+      if (path === '/api/ask/history') {
+        const { engine } = controller();
+        await engine.ensureFindings(env);
+        const { results } = await env.DB.prepare(`SELECT key, kind, severity, title, amount, state, state_at, first_seen FROM findings
+          WHERE state IN ('done','wrong','snoozed') ORDER BY COALESCE(state_at, last_seen) DESC LIMIT 60`).all();
+        return json({ findings: results || [] });
+      }
+      if (path === '/api/ask/forget' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const { engine } = controller();
+        const key = b.kind === 'watch' ? engine.keys.watches : engine.keys.notes;
+        const list = safeJson(await getSetting(env, key), []) || [];
+        const kept = b.kind === 'watch' ? list.map(w => w.id === b.id ? { ...w, active: false } : w) : list.filter((n, i) => i !== Number(b.index));
+        await putSetting(env, key, JSON.stringify(kept));
+        return json({ ok: true });
+      }
+      if (path === '/api/ask/apply' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const { engine, h } = controller();
+        return json(await engine.applyProposal(env, String(b.id || ''), h(), { cancel: !!b.cancel, ctx: askCaller(env, request.headers.get('Authorization') || '', ctx) }));
+      }
+      if (path === '/api/ask/playbook' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        await putSetting(env, controller().engine.keys.playbook, String(b.text || '').slice(0, 8000));
+        return json({ ok: true });
+      }
+      if (path === '/api/ask/brief' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        await putSetting(env, controller().engine.keys.brief, String(b.text || '').slice(0, 4000));
+        return json({ ok: true });
+      }
+      if (path === '/api/ask/run' && request.method === 'POST') return json(await controllerNightly(env));
+      if (path === '/api/ask/briefing' && request.method === 'POST') return json({ text: await controllerBriefing(env, true) });
+
+      /* ---- bank balances for the Overview ---- */
+      if (path === '/api/balances') return json(await bankBalances(env, url.searchParams.get('fresh') === '1'));
+
+      /* ---- dashboard summary ---- */
+      if (path === '/api/summary') {
+        const month = validMonth(url.searchParams.get('month')) ? url.searchParams.get('month') : new Date().toISOString().slice(0, 7);
+        return json(await dashSummary(env, month));
+      }
+
+      /* ---- CPA pack ---- */
+      if (path === '/api/pack') {
+        const from = url.searchParams.get('from'), to = url.searchParams.get('to');
+        if (!validMonth(from) || !validMonth(to) || from > to) return json({ error: 'from/to = YYYY-MM' }, 400);
+        const { results: liveTxns } = await env.DB.prepare(
+          `SELECT * FROM transactions WHERE month >= ?1 AND month <= ?2 AND expected = 0 ORDER BY date, id`)
+          .bind(from, to).all();
+        const money = await getMoney(env);
+        const months = [];
+        for (let m=from; m<=to; m=monthOf(addMonthsYmd(m+'-01',1))) months.push(m);
+        const reports = [];
+        for (const m of months) reports.push(await resolveReport(env, m));
+        const txns = reports.flatMap(r => {
+          if (r.transactions) return r.transactions;
+          // Legacy snapshots lack detail. Refuse a misleading CPA pack until reviewed and reclosed.
+          throw new Error('Legacy report has no frozen detail for ' + r.month + '. Review, reopen and close before exporting.');
+        });
+        const contractors = {};
+        for (const t of txns) if (t.tax_cat === 'Contract labor (1099)')
+          contractors[t.vendor] = round2((contractors[t.vendor] || 0) + t.amount);
+        const openQuestions = txns.filter(t =>
+          /Ask CPA|^Personal/.test(t.tax_cat || '') || t.status === 'review' || !t.tax_cat);
+        return json({ from, to, money, transactions: txns, monthReports: reports,
+          contractors, openQuestions });
+      }
+
+      /* ---- Google Drive import ---- */
+      if (path === '/api/gmail-status') {
+        const st = safeJson(await getSetting(env, 'receiptHunt'), null);
+        return json({ configured: driveReady(env), connected: !!(await gmailStore(env)),
+          queued: st?.queue?.length || 0, lastRun: st?.lastRun || null });
+      }
+      if (path === '/api/gmail-connect' && request.method === 'POST') {
+        if (!driveReady(env)) return json({ error: 'Google client ID/secret are not set on the worker yet' }, 400);
+        const state = crypto.randomUUID();
+        const redirectUri = `${url.origin}/api/drive-callback`;
+        await putSetting(env, 'driveOauthState',
+          JSON.stringify({ state, redirectUri, kind: 'gmail', expires: Date.now() + 15 * 60e3 }));
+        return json({ url: gmailAuthUrl(env, redirectUri, state) });
+      }
+      if (path === '/api/gmail-disconnect' && request.method === 'POST') {
+        await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind('gmailAuth').run();
+        return json({ ok: true });
+      }
+      /* Find missing receipts in Gmail. Body: { month } | { ids } | { all: true }.
+       * Does a few now and leaves the rest to the 10-minute cron. */
+      if (path === '/api/receipt-hunt' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const r = await huntReceipts(env, { month: validMonth(b.month) ? b.month : null,
+          ids: Array.isArray(b.ids) ? b.ids.slice(0, 150) : null, all: !b.month && !b.ids, limit: 3 });
+        return json(r, r.error && !r.did ? 400 : 200);
+      }
+
+      if (path === '/api/drive-status') {
+        const auth = safeJson(await getSetting(env, 'driveAuth'), null);
+        const job = safeJson(await getSetting(env, 'driveJob'), null);
+        return json({ configured: driveReady(env), connected: !!auth?.refresh,
+          job: job ? { total: job.files.length, at: job.at, folder: job.folder,
+                       attached: job.attached, noMatch: job.noMatch, unreadable: job.unreadable } : null });
+      }
+
+      if (path === '/api/drive-connect' && request.method === 'POST') {
+        if (!driveReady(env)) return json({ error: 'Google client ID/secret are not set on the worker yet' }, 400);
+        const state = crypto.randomUUID();
+        const redirectUri = `${url.origin}/api/drive-callback`;
+        await putSetting(env, 'driveOauthState',
+          JSON.stringify({ state, redirectUri, expires: Date.now() + 15 * 60e3 }));
+        return json({ url: driveAuthUrl(env, redirectUri, state) });
+      }
+
+      /* Scanning is separated from importing so the slow part happens once: a
+       * few hundred files are listed, stored as a job, and then chewed through
+       * in small batches that each finish well inside a request. */
+      if (path === '/api/drive-scan' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const store = safeJson(await getSetting(env, 'driveAuth'), null);
+        if (!store?.refresh) return json({ error: 'Google Drive is not connected yet' }, 400);
+        const root = driveFolderId(b.folder);
+        if (!root) return json({ error: 'That does not look like a Drive folder link' }, 400);
+        const files = await driveListReceipts(env, store, root);
+        await putSetting(env, 'driveAuth', JSON.stringify(store));   // keep the fresh access token
+        if (!files.length) return json({ error: 'No PDFs or images found in that folder' }, 404);
+        const months = [...new Set(files.map(f => f.month).filter(Boolean))].sort();
+        await putSetting(env, 'driveJob', JSON.stringify({
+          folder: b.folder, files, at: 0, attached: 0, noMatch: 0, unreadable: 0, log: [],
+        }));
+        return json({ ok: true, total: files.length, months,
+          undated: files.filter(f => !f.month).length });
+      }
+
+      if (path === '/api/drive-import' && request.method === 'POST') {
+        const job = safeJson(await getSetting(env, 'driveJob'), null);
+        if (!job) return json({ error: 'Nothing scanned yet' }, 400);
+        const store = safeJson(await getSetting(env, 'driveAuth'), null);
+        if (!store?.refresh) return json({ error: 'Google Drive is not connected' }, 400);
+
+        // Small batches: each file is a Drive download plus a Claude read, and
+        // a request that tries to do two hundred of those will not finish.
+        const BATCH = 6;
+        const end = Math.min(job.at + BATCH, job.files.length);
+        for (; job.at < end; job.at++) {
+          const f = job.files[job.at];
+          try {
+            if (f.size > 8 * 1024 * 1024) { job.unreadable++; job.log.push(`${f.name}: over 8MB`); continue; }
+            const buf = await driveDownload(env, store, f.id);
+            if(await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1').bind(await sha256bytes(buf)).first()){job.log.push(f.name+': already attached');continue;}
+            const bytes = new Uint8Array(buf);
+            let b64 = '';
+            for (let i = 0; i < bytes.length; i += 0x8000)
+              b64 += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+            b64 = btoa(b64);
+            const ext = bytes.length < 4.5 * 1024 * 1024
+              ? await claudeExtract(env, b64, f.mimeType) : null;
+            if (!ext?.amount) { job.unreadable++; job.log.push(`${f.name}: no amount found`); continue; }
+
+            /* Attach only — never create. The transactions for these months
+             * already came from the 2026 sheet, and those months are closed;
+             * inventing rows from receipts is exactly how August got counted
+             * twice. A receipt that matches nothing is reported, not filed. */
+            const amt = round2(Number(ext.amount));
+            const win = f.month
+              ? [monthOf(addMonthsYmd(f.month + '-01', -1)), monthOf(addMonthsYmd(f.month + '-01', 1))]
+              : ['2000-01', '2999-12'];
+            const { results } = await env.DB.prepare(
+              `SELECT * FROM transactions
+               WHERE type = 'out' AND expected = 0 AND receipt_key IS NULL
+                 AND month >= ?1 AND month <= ?2 AND ABS(amount - ?3) < 0.005
+               ORDER BY (month = ?4) DESC, id`).bind(win[0], win[1], amt, f.month || '').all();
+            const first = String(ext.vendor || '').toLowerCase().split(' ')[0];
+            // dated files may fall back to the closest amount; an UNDATED file
+            // searched the whole ledger, so for those the vendor name must agree
+            const hit = receiptMatch(results,ext.vendor,amt,null);
+            if (!hit) {
+              job.noMatch++;
+              job.log.push(`${f.name}: $${amt.toFixed(2)}${f.month ? ' in ' + f.month : ''} — no unreceipted match`);
+              continue;
+            }
+            const key = `rcpt:${hit.id}:${Date.now()}`;
+            await receiptPut(env, key, buf);
+            await env.DB.prepare('UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5 WHERE id=?1')
+              .bind(hit.id, key, f.name.slice(0, 120), f.mimeType, await sha256bytes(buf)).run();
+            job.attached++;
+            job.log.push(`${f.name} → ${hit.vendor} $${amt.toFixed(2)} (${hit.date})`);
+          } catch (e) {
+            job.unreadable++;
+            job.log.push(`${f.name}: ${String(e.message || e).slice(0, 90)}`);
+          }
+        }
+        if (job.log.length > 400) job.log = job.log.slice(-400);
+        await putSetting(env, 'driveJob', JSON.stringify(job));
+        await putSetting(env, 'driveAuth', JSON.stringify(store));
+        return json({ done: job.at >= job.files.length, at: job.at, total: job.files.length,
+          attached: job.attached, noMatch: job.noMatch, unreadable: job.unreadable,
+          recent: job.log.slice(-BATCH) });
+      }
+
+      if (path === '/api/drive-job' && request.method === 'DELETE') {
+        await env.DB.prepare('DELETE FROM settings WHERE key = ?1').bind('driveJob').run();
+        return json({ ok: true });
+      }
+
+      if (path === '/api/drive-log') {
+        const job = safeJson(await getSetting(env, 'driveJob'), null);
+        return json({ log: job?.log || [] });
+      }
+
+      /* Every receipt for a period, foldered by month and category — the
+       * once-a-year copy that lives somewhere other than Cloudflare. Streamed
+       * rather than assembled: a year of photos is far more than a Worker can
+       * hold in memory at once. */
+      if (path === '/api/receipts.zip') {
+        const from = url.searchParams.get('from'), to = url.searchParams.get('to');
+        if (!validMonth(from) || !validMonth(to) || from > to)
+          return json({ error: 'from/to = YYYY-MM' }, 400);
+        const { results } = await env.DB.prepare(
+          `SELECT id, date, month, vendor, amount, tax_cat, receipt_key, receipt_name, receipt_type
+           FROM transactions WHERE month >= ?1 AND month <= ?2 AND receipt_key IS NOT NULL
+           ORDER BY month, date, id`).bind(from, to).all();
+        if (!results.length) return json({ error: `No receipts stored between ${from} and ${to}.` }, 404);
+        const seen = new Set();
+        const manifest = { from, to, expected: results.length, included: 0, missing: [], files: [] };
+        async function* files() {
+          for (const t of results) {
+            const buf = await receiptGet(env, t.receipt_key);
+            if (!buf) { manifest.missing.push({ id: t.id, key: t.receipt_key }); continue; }
+            const ext = (t.receipt_name || '').match(/\.([a-z0-9]{1,5})$/i)?.[1]
+              || (t.receipt_type === 'application/pdf' ? 'pdf' : 'jpg');
+            let name = `${t.month}/${zipSafe(t.tax_cat || 'Uncategorized')}/` +
+              `${t.date} ${zipSafe(t.vendor)} ${Math.abs(t.amount).toFixed(2)}.${ext.toLowerCase()}`;
+            // two identical charges on one day would otherwise collide
+            if (seen.has(name)) name = name.replace(/\.([a-z0-9]+)$/i, ` (${t.id}).$1`);
+            seen.add(name);
+            manifest.included++;
+            manifest.files.push({ id: t.id, key: t.receipt_key, name, sha256: await sha256bytes(buf) });
+            yield { name, bytes: new Uint8Array(buf), date: new Date(t.date + 'T12:00:00Z') };
+          }
+        }
+        const originalFiles = files;
+        async function* archiveFiles() {
+          yield* originalFiles();
+          yield { name: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(manifest, null, 2)), date: new Date() };
+        }
+        const label = from === to ? from : `${from} to ${to}`;
+        return new Response(zipStream(archiveFiles()), { headers: { ...CORS,
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="Mobius Digital receipts ${label}.zip"` } });
+      }
+
+      if(path==='/api/receipt-match' && request.method==='POST') {
+        const b=await request.json();
+        const existing=await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1').bind(String(b.fingerprint||'')).first();
+        if(existing)return json({duplicate:existing.id});
+        const rows=await env.DB.prepare("SELECT * FROM transactions WHERE type='out' AND expected=0 AND receipt_key IS NULL AND ABS(julianday(date)-julianday(?1))<=12").bind(String(b.date||'')).all();
+        return json({match:receiptMatch(rows.results,b.vendor,b.amount,b.date,true)?.id || null});
+      }
+      /* ---- receipts (KV) ---- */
+      if (path === '/api/receipt' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const id = Number(b.id);
+        const cur = await env.DB.prepare('SELECT id, receipt_key FROM transactions WHERE id = ?1').bind(id).first();
+        if (!cur) return json({ error: 'unknown transaction' }, 404);
+        const data = String(b.data || '');                       // base64, no data: prefix
+        const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+        if (!bytes.length) return json({ error: 'empty file' }, 400);
+        if (bytes.length > RECEIPT_MAX) return json({ error: 'file too large (4MB max after downscale)' }, 400);
+        const fingerprint=await sha256bytes(bytes.buffer);
+        const duplicate=await env.DB.prepare('SELECT id FROM transactions WHERE receipt_hash=?1 AND id != ?2').bind(fingerprint,id).first();
+        if(duplicate) return json({ error: 'Receipt already attached to transaction '+duplicate.id },409);
+        const key = `rcpt:${id}:${crypto.randomUUID()}`;
+        await receiptPut(env, key, bytes.buffer);
+        // Retain receipt objects for recovery.
+        const name = String(b.name || 'receipt').slice(0, 120);
+        const type = String(b.type || 'application/octet-stream').slice(0, 80);
+        await env.DB.prepare('UPDATE transactions SET receipt_key=?2, receipt_name=?3, receipt_type=?4, receipt_hash=?5 WHERE id=?1')
+          .bind(id, key, name, type, await sha256bytes(bytes.buffer)).run();
+        return json({ ok: true, key });
+      }
+
+      if (path === '/api/receipt' && request.method === 'GET') {
+        const id = Number(url.searchParams.get('id'));
+        const cur = await env.DB.prepare('SELECT receipt_key, receipt_name, receipt_type FROM transactions WHERE id = ?1').bind(id).first();
+        if (!cur?.receipt_key) return json({ error: 'no receipt' }, 404);
+        const body = await receiptGet(env, cur.receipt_key);
+        if (!body) return json({ error: 'file missing from store' }, 404);
+        return new Response(body, { headers: { 'Content-Type': /^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(cur.receipt_type || '') ? cur.receipt_type : 'text/plain; charset=utf-8',
+          'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'",
+          'Content-Disposition': `inline; filename="${(cur.receipt_name || 'receipt').replace(/[^\w.\- ]/g, '')}"`, ...CORS } });
+      }
+
+      if (path === '/api/receipt' && request.method === 'DELETE') {
+        const id = Number(url.searchParams.get('id'));
+        const cur = await env.DB.prepare('SELECT receipt_key FROM transactions WHERE id = ?1').bind(id).first();
+        // Retain the previous object for recovery.
+        await env.DB.prepare('UPDATE transactions SET receipt_key=NULL, receipt_name=NULL, receipt_type=NULL, receipt_hash=NULL WHERE id=?1').bind(id).run();
+        return json({ ok: true });
+      }
+
+      /* ---- receipt reading (Claude) — degrades to manual entry without a key ---- */
+      if (path === '/api/extract' && request.method === 'POST') {
+        if (!env.ANTHROPIC_API_KEY) return json({ available: false });
+        const b = await request.json().catch(() => ({}));
+        return json({ available: true, extracted: await claudeExtract(env, b.data, String(b.media_type || 'image/jpeg')) });
+      }
+
+      /* ---- Slack receipts ---- */
+      if (path === '/api/slack-check') {
+        if (!env.SLACK_BOT_TOKEN) return json({ configured: false });
+        const auth = await slack(env, 'auth.test', {});
+        if (!auth.ok) return json({ configured: true, ok: false, error: auth.error });
+        const ch = await findReceiptsChannel(env);
+        return json({ configured: true, ok: !ch.error, bot: auth.user, team: auth.team,
+          channel: ch.id || null, isMember: ch.is_member ?? null, error: ch.error || null,
+          instant: !!env.SLACK_SIGNING_SECRET });
+      }
+
+      if (path === '/api/report-slack' && request.method === 'POST') {
+        const period = url.searchParams.get('period') || 'month';
+        return json(await monthlyReportSlack(env, url.searchParams.get('force') === '1',
+          url.searchParams.get('month'), period));
+      }
+
+      /* The same statement as a download, straight from the app. */
+      /* The P&L as a document: a month, quarter or year (period+month), or any
+       * range (from+to). layout=month|quarter prints periods across a landscape
+       * page; cmpFrom+cmpTo adds a comparison column. pack.pdf is the CPA pack:
+       * the wide P&L plus contractor totals and open questions. */
+      if (path === '/api/statement.pdf' || path === '/api/pack.pdf') {
+        const qp = k => url.searchParams.get(k);
+        const pack = path === '/api/pack.pdf';
+        let r, label, months = null, frozen = false, file;
+        if (validMonth(qp('from')) && validMonth(qp('to')) && qp('from') <= qp('to')) {
+          r = await computeRange(env, qp('from'), qp('to'));
+          label = rangeLabelW(qp('from'), qp('to')); months = r.monthRows;
+          frozen = (await env.DB.prepare(
+            "SELECT COUNT(*) n FROM months WHERE month >= ?1 AND month <= ?2 AND status = 'closed'").bind(qp('from'), qp('to')).first()).n === r.monthParts.length;
+        } else {
+          const anchor = qp('month');
+          if (!validMonth(anchor)) return json({ error: 'month=YYYY-MM or from/to required' }, 400);
+          const pr = await periodReport(env, qp('period') || 'month', anchor);
+          ({ r, label, months, frozen } = pr);
+          if (!r.monthParts) r = { ...r, monthParts: [r] };
+        }
+        let layout = pack ? 'month' : qp('layout');
+        let bytes, kind = '';
+        if (layout === 'month' || layout === 'quarter') {
+          let parts = r.monthParts.map(p => ({ ...p, label: moLabel(p.month).replace(/^(\w{3})\w*/, '$1') }));
+          if (layout === 'quarter' || parts.length > 13) {
+            const g = {};
+            for (const p of parts) {
+              const k = `Q${Math.floor((+p.month.slice(5, 7) - 1) / 3) + 1} ${p.month.slice(0, 4)}`;
+              const t = g[k] ||= { label: k, revenue: 0, expenses: 0, fees: 0, net: 0, byClient: {}, byTax: {} };
+              for (const f of ['revenue', 'expenses', 'fees', 'net']) t[f] = round2(t[f] + (p[f] || 0));
+              for (const f of ['byClient', 'byTax']) for (const [c, v] of Object.entries(p[f] || {})) t[f][c] = round2((t[f][c] || 0) + v);
+            }
+            parts = Object.values(g); layout = 'quarter';
+          }
+          const extra = {};
+          if (pack) {
+            const from = r.monthParts[0].month, to = r.monthParts[r.monthParts.length - 1].month;
+            const { results: con } = await env.DB.prepare(`SELECT vendor, SUM(amount) AS amount FROM transactions
+              WHERE month >= ?1 AND month <= ?2 AND expected = 0 AND type = 'out' AND tax_cat LIKE 'Contract labor%'
+              GROUP BY vendor ORDER BY amount DESC`).bind(from, to).all();
+            const { results: qs } = await env.DB.prepare(`SELECT date, vendor, amount, tax_cat FROM transactions
+              WHERE month >= ?1 AND month <= ?2 AND expected = 0 AND type != 'transfer'
+                AND (status = 'review' OR tax_cat IS NULL OR tax_cat LIKE 'Personal%' OR tax_cat LIKE '%Ask CPA%')
+              ORDER BY date`).bind(from, to).all();
+            extra.contractors = con.map(c => [c.vendor, round2(c.amount)]);
+            extra.questions = qs;
+          }
+          bytes = buildPnlColumnsPdf(r, { title: pack ? 'CPA Pack' : 'Profit & Loss', period: label,
+            sub: pack ? 'Profit and loss by month, contractor totals and open questions' : `Profit and loss by ${layout}`,
+            cols: parts, note: frozen ? 'every month closed, figures frozen' : 'includes open months, figures still live', ...extra });
+          kind = pack ? '' : ` by ${layout}`;
+        } else {
+          let compare = null;
+          if (validMonth(qp('cmpFrom')) && validMonth(qp('cmpTo')) && qp('cmpFrom') <= qp('cmpTo')) {
+            compare = { r: await computeRange(env, qp('cmpFrom'), qp('cmpTo')), label: rangeLabelW(qp('cmpFrom'), qp('cmpTo')) };
+            kind = ` vs ${compare.label}`;
+          }
+          const single = r.monthParts.length === 1;
+          bytes = buildPnlPdf(r, { title: 'Profit & Loss', period: label, months: single ? null : months, frozen, compare,
+            sub: single ? 'Monthly statement' : 'Statement for the period' });
+        }
+        file = `Mobius Digital ${pack ? 'CPA Pack' : 'P&L'} ${label}${kind}.pdf`.replace(/[\/:*?"<>|]/g, '');
+        return new Response(bytes, { headers: { ...CORS, 'Content-Type': 'application/pdf',
+          'Content-Disposition': `attachment; filename="${file}"` } });
+      }
+
+      if (path === '/api/receipt-nudge' && request.method === 'POST') {
+        return json(await receiptNudge(env, url.searchParams.get('force') === '1', url.searchParams.get('month')));
+      }
+
+      if (path === '/api/slack-poll' && request.method === 'POST') {
+        return json(await processSlackReceipts(env));
+      }
+
+      /* ---- vendors / clients / settings ---- */
+      if (path === '/api/vendor' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const name = String(b.name || '').trim().slice(0, 120);
+        if (!name || !b.tax_cat) return json({ error: 'name and tax_cat required' }, 400);
+        b.bucket = b.bucket || bucketFor(b.tax_cat);   // one choice; the group follows
+        const cadence = b.cadence === 'yearly' ? 'yearly' : 'monthly';
+        const rmn = Number(b.renew_month);
+        /* Where to go and fetch an invoice by hand. Some vendors simply never
+         * email one — the answer is not to nag for a receipt that will never
+         * arrive, but to keep the deep link to their billing page next to the
+         * charge, so month-end is a click instead of a hunt. */
+        const billingUrl = /^https?:\/\//i.test(String(b.billing_url || '').trim())
+          ? String(b.billing_url).trim().slice(0, 500) : null;
+        await env.DB.prepare(`INSERT OR REPLACE INTO vendors (name, bucket, tax_cat, recurring, expected_amount, active, cadence, renew_month, billing_url)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`)
+          .bind(name, String(b.bucket), String(b.tax_cat), b.recurring ? 1 : 0,
+                Number.isFinite(Number(b.expected_amount)) ? Number(b.expected_amount) : null,
+                b.active === false ? 0 : 1, cadence,
+                cadence === 'yearly' && rmn >= 1 && rmn <= 12 ? rmn : null,
+                billingUrl).run();
+        if (b.applyToExisting) {
+          await env.DB.prepare(`UPDATE transactions SET bucket = ?2, tax_cat = ?3
+            WHERE vendor = ?1 COLLATE NOCASE AND type = 'out' AND month NOT IN (SELECT month FROM months WHERE status='closed')`).bind(name, String(b.bucket), String(b.tax_cat)).run();
+        }
+        return json({ ok: true });
+      }
+
+      if (path === '/api/vendor' && request.method === 'DELETE') {
+        await env.DB.prepare('DELETE FROM vendors WHERE name = ?1').bind(url.searchParams.get('name') || '').run();
+        return json({ ok: true });
+      }
+
+      if (path === '/api/client' && request.method === 'POST') {
+        const b = await request.json().catch(() => ({}));
+        const name = String(b.name || '').trim().slice(0, 120);
+        if (!name) return json({ error: 'name required' }, 400);
+        await env.DB.prepare('INSERT OR REPLACE INTO clients (name, retainer, active, billing, pct) VALUES (?1, ?2, ?3, ?4, ?5)')
+          .bind(name, Number(b.retainer) || 0, b.active === false ? 0 : 1,
+                b.billing === 'percent' ? 'percent' : 'retainer',
+                Number.isFinite(Number(b.pct)) && Number(b.pct) > 0 ? Number(b.pct) : null).run();
+        return json({ ok: true });
+      }
+
+      if (path === '/api/client' && request.method === 'DELETE') {
+        await env.DB.prepare('DELETE FROM clients WHERE name = ?1').bind(url.searchParams.get('name') || '').run();
+        return json({ ok: true });
+      }
+
+      if (path === '/api/settings' && request.method === 'PUT') {
+        const b = await request.json().catch(() => ({}));
+        if (b.money) {
+          const cur = await getMoney(env);
+          const num = (v, fb, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fb; };
+          const split = {};
+          for (const k of ['personal', 'tax', 'ads', 'savings', 'other'])
+            split[k] = num(b.money.split?.[k], cur.split[k], 0, 100);
+          await putSetting(env, 'money', JSON.stringify({
+            taxPct: num(b.money.taxPct, cur.taxPct, 0, 60),
+            distPct: num(b.money.distPct, cur.distPct, 0, 100),
+            feePct: num(b.money.feePct, cur.feePct, 0, 15),
+            split,
+          }));
+        }
+        if (b.notify && typeof b.notify === 'object') {
+          const cur = await getNotify(env);
+          for (const k of NOTIFY_KINDS) if (NOTIFY_MODES.includes(b.notify[k])) cur[k] = b.notify[k];
+          await putSetting(env, 'notify', JSON.stringify(cur));
+        }
+        if (Array.isArray(b.taxCats)) {
+          const cats = [...new Set(b.taxCats.map(c => String(c).trim().slice(0, 60)).filter(Boolean))].slice(0, 40);
+          if (cats.length) await putSetting(env, 'taxCats', JSON.stringify(cats));
+        }
+        /* The edition: which business the books are for. It picks the rail,
+           the Settings sections and the words; it never hides data. */
+        if (EDITIONS.includes(b.edition)) await putSetting(env, 'edition', b.edition);
+        /* The books list: the separate sets of books this owner keeps, as links
+           for the picker. Name, https address and edition only; at most twelve. */
+        if (Array.isArray(b.books)) {
+          const books = b.books.map(x => ({
+            id: String(x?.id || x?.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24),
+            name: String(x?.name || '').trim().slice(0, 40),
+            edition: EDITIONS.includes(x?.edition) ? x.edition : 'service',
+            url: String(x?.url || '').trim().slice(0, 200),
+          })).filter(x => x.name && /^https:\/\/[^\s]+$/.test(x.url)).slice(0, 12);
+          await putSetting(env, 'books', JSON.stringify(books));
+        }
+        return json({ money: await getMoney(env), taxCats: safeJson(await getSetting(env, 'taxCats'), []), notify: await getNotify(env),
+          edition: (await getSetting(env, 'edition')) || 'service', books: safeJson(await getSetting(env, 'books'), null) });
+      }
+
+      if (path === '/api/password' && request.method === 'POST') {
+        return json({error:'Password recovery is disabled. Use Mobius sign-in or the administrator token.'},410);
+
+      }
+
+      return json({ error: 'not found' }, 404);
+    } catch (err) {
+      return json({ error: String(err && err.message || err) }, 500);
+    }
+  },
+};
+export default LEDGER;

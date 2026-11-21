@@ -1,0 +1,445 @@
+/* ==========================================================================
+   2026-10-15: THE PHONE PASS (Cole: "the entire Locus doesn't seem optimized for iPad and iPhone").
+   Loaded after v2.css on every page. Measured at 375 and 768 on every page (the audit in
+   docs/handoffs/phone-pass.md). Shell first: the top bar is two rows (the helper badge beside the
+   ask bar, then the period and attribution pills, then a page's own actions as a full-width row),
+   the page head stacks (title first, the quiet actions under it), and every small control gets a
+   thumb-sized hit area on touch. Then the pages that broke. Tokens only, no em dashes.
+   ========================================================================== */
+@media (max-width:720px){
+  /* row 1: badge + ask bar; row 2: pills; row 3: the page's own buttons (Plan, P&L, Season, Reports) */
+  [data-ui="v2"] .hd-right{display:contents}
+  [data-ui="v2"] .lx-nudge-host{order:-1}
+  /* the ask bar shares row 1 with the badge: the 44px phone rule in index.html had pushed its input and
+     Chats button out of the 38px box, so the bar itself is the 44px target and its parts stay inside */
+  [data-ui="v2"] .v2ask{order:0;flex:1 1 calc(100% - 60px);min-width:0;height:44px}
+  [data-ui="v2"] .v2ask input{min-height:0}
+  [data-ui="v2"] .v2chats{min-height:0;height:30px}
+  [data-ui="v2"] #hdToday,[data-ui="v2"] #hdPeriod,[data-ui="v2"] #hdModel{order:1}
+  [data-ui="v2"] #hdActions{order:2;display:none}
+  [data-ui="v2"] #hdActions:not(:empty){display:flex;width:100%;gap:8px}
+  [data-ui="v2"] #hdActions .btn{flex:1 1 auto;justify-content:center;min-height:40px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  [data-ui="v2"] #hdActions .pill{flex:none}
+  [data-ui="v2"] .topbar{padding-bottom:6px}
+  /* index.html gives every button a 44px minimum on a phone. Right for a button, wrong for a thing drawn at its own
+     size: the round task tick became a 16x44 ellipse, the board's format pill a 44px circle, the avatar and the switch
+     a tall pill with the knob at the top. These keep their drawn size; the touch block below widens their hit area. */
+  [data-ui="v2"] .v2sw,[data-ui="v2"] .toggle,[data-ui="v2"] .pd-fmt,[data-ui="v2"] .pd-avb,[data-ui="v2"] .pd-due,[data-ui="v2"] .tk-tick,[data-ui="v2"] .tk-av,[data-ui="v2"] .tk-due,[data-ui="v2"] .cal-btn.cal-mini,[data-ui="v2"] .ds-logo,[data-ui="v2"] .v2ex,[data-ui="v2"] .v2rm,[data-ui="v2"] .v2cell{min-height:0}
+  /* Platform status: the letters inside a tiny logo box had shrunk to 5px */
+  [data-ui="v2"] .dk .ds-logo b{font-size:max(9px,calc(var(--lg,32px) * .36))}
+  /* page head (2026-10-20, the kit): ONE row, the title and the "..." button; the page's own actions, when it has
+     any, are a full-width row under it. The purpose line, Tour, Metrics and Help are in the menu. */
+  [data-ui="v2"] main .ph{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px 8px;margin:4px 0 12px;padding-bottom:10px}
+  [data-ui="v2"] main .ph-r > .lx-exp-page{grid-column:2;grid-row:1}
+  [data-ui="v2"] main .ph-r > .lx-exp-page .btn,[data-ui="v2"] main .ph-r > .lx-exp-page button{min-height:0;width:40px;height:40px}
+  [data-ui="v2"] main .ph > div:first-child{grid-column:1;grid-row:1;min-width:0}
+  [data-ui="v2"] main .ph-t,[data-ui="v2"] main h2.ph-t{font-size:20px}
+  [data-ui="v2"] main .ph .ph-crumb{display:none}
+  [data-ui="v2"] main .ph-r{display:contents}
+  [data-ui="v2"] main .ph-r .ph-menu-w{grid-column:3;grid-row:1}
+  [data-ui="v2"] main .ph-r .ph-acts{grid-column:1 / -1;grid-row:2;display:flex;gap:8px;flex-wrap:wrap}
+  [data-ui="v2"] main .ph-r .ph-acts:empty{display:none}
+  [data-ui="v2"] main .ph-r .ph-acts .btn,[data-ui="v2"] main .ph-r .ph-acts .v2btn{flex:1 1 auto;justify-content:center;min-height:40px}
+  [data-ui="v2"] main .ph-r > .ph-ico{display:none}
+  [data-ui="v2"] .ph-more{width:40px;height:40px;min-height:0}
+  /* the "..." menu opens in the shared bottom sheet (lx.js hands it to LxPhone.open); inside the sheet it is a plain list */
+  #lxSheet .ph-menu{display:block;position:static;max-width:none;min-width:0;border:0;box-shadow:none;padding:0 2px;animation:none;background:transparent}
+  #lxSheet .ph-menu .ph-why{font-size:14px;line-height:1.45;padding:4px 8px 12px}
+  #lxSheet .ph-menu .ph-ico{min-height:48px;font-size:15px;width:100%}
+  /* the strip on a phone: the lead on one line, the rest under it */
+  .lx-strip{padding:10px 12px}
+  .lx-strip .d{flex:1 1 100%;white-space:normal}
+  .lx-strip .go,.lx-strip .lx-fold{margin-left:0;min-height:0}
+  /* today's calls: a grid item never widens the row, an ad name with no spaces wraps, the kind label reads,
+     the row's buttons are thumb-sized */
+  [data-ui="v2"] .dk .dk-row > *{min-width:0}
+  [data-ui="v2"] .dk .dk-row .why,[data-ui="v2"] .dk .dk-row .nm,[data-ui="v2"] .dk .dk-row .meta{overflow-wrap:anywhere}
+  [data-ui="v2"] .dk .dk-k{font-size:11px;justify-self:start}
+  [data-ui="v2"] .dk .dk-acts{justify-content:flex-start}
+  [data-ui="v2"] .dk .dk-acts .v2btn{height:38px;padding:0 13px}
+  /* Day check > Right now: the card's action slot sat beside the title with a 200px minimum (v2 .find), so its two
+     buttons stacked; on its own full-width row under the title they fit side by side (and still wrap when not) */
+  [data-ui="v2"] #dkNow .v2h > .find{flex:1 1 100%;min-width:0}
+  [data-ui="v2"] #dkNow .v2h.lx-hx > .find{margin-right:-38px}   /* the row may run under the Export icon, which sits on the title row */
+  /* Day check: the 30-day strip scrolls sideways with 34px squares instead of 18px slivers */
+  [data-ui="v2"] .dk .dk-days{grid-template-columns:repeat(30,34px);padding-bottom:4px}
+  [data-ui="v2"] .dk .dk-day i{font-size:11px}
+  /* the composer on Dashboards: wrap instead of pushing out */
+  [data-ui="v2"] .ds-composer-row{flex-wrap:wrap;row-gap:8px}
+  [data-ui="v2"] .ds-composer-row .ds-btn.primary{margin-left:auto}
+  /* Google > Changes: a one-column row still grew to a long campaign name (1fr = minmax(auto,1fr)) */
+  [data-ui="v2"] .gch-row{grid-template-columns:minmax(0,1fr);overflow-wrap:anywhere}
+  [data-ui="v2"] .gad .url{white-space:normal;overflow-wrap:anywhere}
+  /* source chips on tiles were 10px */
+  [data-ui="v2"] .v2src{font-size:11px}
+  /* a chart's end label never pushes the page sideways */
+  [data-ui="v2"] .v2chart svg{overflow:hidden;max-width:100%}
+  /* Calendar: the month arrows are thumb-sized */
+  .cal .cal-btn{min-width:40px;min-height:40px;justify-content:center}
+}
+/* How to use Locus > How we work: the two tables are 1,800 and 2,300px wide and were cut off inside their card at
+   every width, the desktop included. They scroll inside the card; under 980 the first column may wrap. */
+.sop .set-card{overflow-x:auto}
+@media (max-width:979px){.sop .sop-tbl td:first-child{white-space:normal}}
+/* iPad (721 to 979px, the rail is a drawer): the top bar wraps when the badge, the ask bar and the pills do not
+   fit on one line. P&L and Plan carry their own buttons and ran 36px past the screen at 768. The pills and the
+   page's buttons move to a second row only when they have to. */
+@media (min-width:721px) and (max-width:979px){
+  [data-ui="v2"] .topbar{flex-wrap:wrap;row-gap:8px}
+  [data-ui="v2"] .hd-right{flex:0 1 auto;min-width:0;justify-content:flex-end}
+  [data-ui="v2"] .v2ask{min-width:240px}
+}
+/* Tasks on a phone: the words take the whole row, who and when sit under them (the fixed Who and Due columns
+   had left the task text a third of the screen) */
+@media (max-width:600px){
+  /* 2026-10-20: the row is tick · title · avatar · date (tasks.js draws it that way at every width); only the
+     44px rule needs undoing on its small controls, below */
+  [data-ui="v2"] .tk .tk-av,[data-ui="v2"] .tk .tk-due,[data-ui="v2"] .tk .tk-more{min-height:0}
+  [data-ui="v2"] .tk .tk-bar #tkArea{display:none}
+}
+/* ==========================================================================
+   FROM THE BOTTOM (2026-10-15, Cole: "should everything come from the bottom of the screen, like a native app?").
+   Under 720 nothing slides in from the side: More and the client picker are a bottom sheet (phone.js, #lxSheet),
+   every top-bar menu is drawn at the bottom, the side panel and the card sheet slide up, modals already did.
+   ========================================================================== */
+@keyframes lxs-up{from{transform:translateY(24px);opacity:0}to{transform:none;opacity:1}}
+#lxSheet{position:fixed;inset:0;z-index:90}
+#lxSheet[hidden]{display:none}
+#lxSheet .lxs-scrim{position:absolute;inset:0;background:rgba(0,0,0,.42);opacity:0;transition:opacity 220ms var(--ease,ease)}
+#lxSheet.on .lxs-scrim{opacity:1}
+#lxSheet .lxs-box{position:absolute;left:0;right:0;bottom:0;max-height:min(86dvh,720px);display:flex;flex-direction:column;background:var(--surface);color:var(--ink);border-radius:18px 18px 0 0;box-shadow:var(--sh-sheet,0 -12px 40px rgba(0,0,0,.25));transform:translateY(100%);transition:transform 240ms var(--ease,ease);padding-bottom:env(safe-area-inset-bottom,0px)}
+#lxSheet.on .lxs-box{transform:none}
+#lxSheet .lxs-grab{display:flex;justify-content:center;padding:10px 0 2px;touch-action:none;cursor:grab}
+#lxSheet .lxs-grab i{width:40px;height:5px;border-radius:999px;background:var(--line-strong)}
+#lxSheet .lxs-h{display:flex;align-items:center;justify-content:space-between;padding:4px 10px 6px 18px;touch-action:none}
+#lxSheet .lxs-h b{font-size:16px;font-weight:650;letter-spacing:-.01em}
+#lxSheet .lxs-h.bare b{display:none}
+#lxSheet .lxs-x{margin-left:auto;font:inherit;font-size:22px;line-height:1;width:40px;height:40px;border:0;border-radius:50%;background:var(--surface-2);color:var(--muted);cursor:pointer;min-height:0}
+#lxSheet .lxs-b{overflow-y:auto;padding:0 10px 12px;-webkit-overflow-scrolling:touch}
+#lxSheet .lxs-sec{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:12px 10px 4px}
+#lxSheet .lxs-row{display:flex;align-items:center;gap:12px;width:100%;min-height:48px;padding:6px 10px;border:0;border-radius:var(--r-md,10px);background:transparent;color:var(--ink);font:inherit;font-size:15px;text-align:left;cursor:pointer}
+#lxSheet .lxs-row:active{background:var(--surface-2)}
+#lxSheet .lxs-row[aria-current="page"]{background:var(--brand-soft);font-weight:600}
+#lxSheet .lxs-ic{width:28px;height:28px;display:inline-grid;place-items:center;color:var(--muted);flex:none}
+#lxSheet .lxs-ic svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6}
+#lxSheet .lxs-row[aria-current="page"] .lxs-ic{color:var(--brand)}
+#lxSheet .lxs-t{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+#lxSheet .lxs-t small{font-size:12.5px;color:var(--muted);font-weight:400}
+#lxSheet .lxs-chev{width:8px;height:13px;color:var(--faint);flex:none}
+#lxSheet .lxs-chips{display:flex;flex-wrap:wrap;gap:8px;padding:2px 10px 6px}
+#lxSheet .lxs-chip{min-height:40px;padding:0 14px;border-radius:999px;border:1px solid var(--line-strong);background:transparent;color:var(--ink-2);font:inherit;font-size:14px;cursor:pointer}
+#lxSheet .lxs-chip.on{background:var(--cc,var(--ink));border-color:transparent;color:var(--surface);font-weight:600}
+#lxSheet .lxs-seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;margin:0 10px;border-radius:var(--r-md,10px);background:var(--surface-2)}
+#lxSheet .lxs-seg button{min-height:40px;border:0;border-radius:8px;background:transparent;color:var(--muted);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+#lxSheet .lxs-seg button.on{background:var(--surface);color:var(--ink);box-shadow:var(--sh-card,0 1px 2px rgba(0,0,0,.12))}
+/* the real client menu, hosted in the sheet */
+#lxSheet .hd-per-menu{display:block;position:static;box-shadow:none;border:0;border-radius:0;animation:none;max-height:none;min-width:0;width:auto;padding:0;background:transparent}
+#lxSheet .lc-pick-menu input{width:100%;box-sizing:border-box;min-height:44px;margin:4px 0 8px;border-radius:var(--r-md,10px)}
+#lxSheet .lc-pick-menu [data-act],#lxSheet .lc-pick-add{display:flex;align-items:center;width:100%;min-height:48px;padding:6px 12px;border:0;border-radius:var(--r-md,10px);background:transparent;color:var(--ink);font:inherit;font-size:15px;text-align:left;cursor:pointer}
+#lxSheet .lc-pick-menu [data-act].on{background:var(--brand-soft);font-weight:600}
+#lxSheet .lc-pick-add{color:var(--brand);font-weight:600}
+@media (min-width:721px){.rv-strip .lxs-notes-btn{display:none}}   /* a phone turned sideways: the pill waits for the next repaint (two classes: review-ui's own .rv-btn{display:inline-flex} is injected later and beat a one-class rule) */
+/* the review viewer's Notes panel, hosted in the sheet: above the viewer, full width, tabs pinned at the top and the
+   note box pinned at the bottom like a messages app, the list scrolling between them */
+#lxSheet.lxs-notes{z-index:9700}
+#lxSheet.lxs-notes .lxs-b{padding:0}
+#lxSheet .rv-side{display:flex;flex-direction:column;border:0;background:transparent}
+#lxSheet .rv-tabs{position:sticky;top:0;z-index:1;background:var(--surface);padding:0 14px}
+#lxSheet .rv-list{flex:none;overflow:visible;padding:10px 14px 16px}
+#lxSheet .rv-box{position:sticky;bottom:0;background:var(--surface);padding:12px 14px 14px;box-shadow:0 -8px 16px -12px rgba(0,0,0,.25)}
+body.lxs-open{overflow:hidden}
+/* top-bar menus at the bottom */
+#lxMenuScrim{position:fixed;inset:0;z-index:79;background:rgba(0,0,0,.42)}
+#lxMenuScrim[hidden]{display:none}
+@media (max-width:720px){
+  body.lxm-open{overflow:hidden}
+  [data-ui="v2"] .hd-period.open .hd-per-menu{position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;min-width:0;max-width:none;max-height:min(80dvh,640px);overflow-y:auto;z-index:80;border-radius:18px 18px 0 0;border:0;box-shadow:var(--sh-sheet,0 -12px 40px rgba(0,0,0,.25));padding:14px 10px calc(12px + env(safe-area-inset-bottom,0px));animation:lxs-up 220ms var(--ease,ease) both;transform-origin:bottom center}
+  [data-ui="v2"] .hd-period.open .hd-per-menu::before{content:"";display:block;width:40px;height:5px;border-radius:999px;background:var(--line-strong);margin:-4px auto 10px}
+  [data-ui="v2"] .hd-period.open .hd-per-menu button{min-height:46px;font-size:15px}
+  /* the side panel and the card sheet rise from the bottom */
+  [data-ui="v2"] #v2panel{top:0;right:0;bottom:0;left:0;width:100vw;border:0;border-radius:0;transform:translateY(100%);transition:transform 260ms var(--ease,ease),opacity 260ms var(--ease,ease)}
+  [data-ui="v2"] #v2panel.on{transform:none}
+  [data-ui="v2"] #v2panel.sheet{top:0;bottom:0;left:0;right:0;width:100vw;transform:translateY(100%);opacity:1}
+  [data-ui="v2"] #v2panel.sheet.on{transform:none;opacity:1}
+  /* the card sheet on a phone: tighter inset, the meta as a compact two-column grid, the brief toolbar one row
+     that scrolls sideways (it wrapped into two ragged rows), thumb-sized tools */
+  [data-ui="v2"] #v2panel.sheet .pb{padding:14px 14px 48px}
+  [data-ui="v2"] #v2panel.sheet .ps-meta{gap:10px 12px}
+  [data-ui="v2"] .ps-tb{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;gap:4px}
+  [data-ui="v2"] .ps-tb::-webkit-scrollbar{display:none}
+  [data-ui="v2"] .ps-tb button[data-tool]{height:36px;min-height:0;flex:none;font-size:13px}
+  [data-ui="v2"] .ps-tb .sep{flex:none}
+  [data-ui="v2"] .ps-doc{padding:14px}
+  /* the Launch to Meta window is a .modal-wrap, so it already sits at the bottom; its own width rule had kept
+     a 16px gap each side and a desktop height */
+  [data-ui="v2"] .ln-modal .modal{width:100%;max-width:none;max-height:92dvh}
+  /* Tasks: View stays on the page; Group by, Only mine and Area move into the Filters sheet (phone.js) */
+  [data-ui="v2"] .tk .tk-bar .tk-segw:nth-of-type(2),[data-ui="v2"] .tk .tk-bar #tkMine,[data-ui="v2"] .tk .tk-areas{display:none}
+  [data-ui="v2"] .tk .tk-bar{gap:10px}
+  [data-ui="v2"] .tk .tk-bar .lxs-filters{margin-left:auto;height:40px;min-height:0;padding:0 14px;font-size:13px}
+  [data-ui="v2"] .tk .tk-qa{display:flex;gap:8px}
+  [data-ui="v2"] .tk .tk-qa input{flex:1;min-width:0}
+  /* the page tabs: a fade at the edge of a row that scrolls (phone.js marks it) */
+  [data-ui="v2"] #v2seg .lxs-fade{position:relative;scroll-padding:0 24px}
+  [data-ui="v2"] #v2seg .lxs-fade::after{content:"";position:sticky;right:0;flex:none;align-self:stretch;width:32px;margin-left:-32px;background:linear-gradient(90deg,transparent,var(--bg));pointer-events:none}
+  /* the top: one character (the badge), a plain search bar, no faded face */
+  [data-ui="v2"] .topbar .lx-face{opacity:1}
+  [data-ui="v2"] .v2ask .lx-ask-face{display:none}
+  /* Launch to Meta on a phone: the ad is a 200px picture beside the test line, not a whole screen; a batch row
+     puts the tick, the thumb and the ad's name on one line and the fields full width under them */
+  [data-ui="v2"] .ln-modal .ln-grid{grid-template-columns:minmax(0,1fr);gap:12px}
+  [data-ui="v2"] .ln-modal .ln-pic,[data-ui="v2"] .ln-modal .ln-vid{width:auto;max-width:200px;height:200px;aspect-ratio:auto;margin:0 auto;display:block}
+  [data-ui="v2"] .ln-modal .ln-foot .btn{flex:1 1 auto}
+  [data-ui="v2"] .ln-modal .ln-foot .btn:first-child{flex:0 0 auto}
+}
+@media (max-width:600px){
+  [data-ui="v2"] .ln-modal .lnb-row{grid-template-columns:22px 56px minmax(0,1fr);gap:8px 10px;align-items:center}
+  [data-ui="v2"] .ln-modal .lnb-row > div:last-child{display:contents}
+  [data-ui="v2"] .ln-modal .lnb-row .lnb-top{margin:0}
+  [data-ui="v2"] .ln-modal .lnb-row .lnb-g{grid-column:1 / -1}
+  [data-ui="v2"] .ln-modal .lnb-pic,[data-ui="v2"] .ln-modal .lnb-vid{width:56px}
+  [data-ui="v2"] .ln-modal .lnb-tick{min-height:0}
+}
+/* The review viewer on a phone (review-ui.js has its own 900px rules; these are the phone-only parts):
+   the 44px rule had stretched the colour swatches to 20x44 ovals and the icon buttons to 32x44; the header
+   closes with Back, so the trailing x is hidden; the two call buttons share one full row; the stage is capped
+   so the notes panel starts inside the first screen; the strip is 92px. */
+@media (max-width:720px){
+  [data-ui="v2"] .rv-scrim{z-index:9600}
+  [data-ui="v2"] .rv-h{padding:8px 10px;gap:6px 8px}
+  [data-ui="v2"] .rv-h .rv-btn{height:40px;min-height:0;padding:0 12px}
+  [data-ui="v2"] .rv-h .rv-btn.ic{width:40px;padding:0}
+  [data-ui="v2"] .rv-h > .rv-btn.ic[data-close]:last-child{display:none}
+  [data-ui="v2"] .rv-h .rv-who b{font-size:15px}
+  [data-ui="v2"] .rv-h .rv-seg{margin-left:0!important}
+  [data-ui="v2"] .rv-h .rv-seg button{min-height:0;height:32px}
+  [data-ui="v2"] .rv-h [data-ask],[data-ui="v2"] .rv-h [data-approve]{flex:1 1 40%}
+  [data-ui="v2"] .rv-h [data-ask]{margin-left:0}
+  [data-ui="v2"] .rv-stage{min-height:0;padding:12px 12px 72px}
+  /* Notes are a bottom sheet (fourth pass; phone.js hosts the real .rv-side node in #lxSheet). The panel leaves
+     the layout, the main column fills the screen so the strip sits at the bottom, the ad takes what is left, and
+     a "Notes · N" pill sits at the right end of the strip, sticky, so it is always under the thumb. */
+  [data-ui="v2"] .rv-scrim .rv-side{display:none}
+  [data-ui="v2"] .rv-scrim .rv-main{flex:1 1 auto;min-height:0}
+  [data-ui="v2"] .rv-media img{max-height:calc(100dvh - 300px)}
+  [data-ui="v2"] .rv-media video{max-height:calc(100dvh - 340px)}
+  [data-ui="v2"] .rv-strip .lxs-notes-btn{position:sticky;right:12px;margin-left:auto;flex:none;height:40px;min-height:0;padding:0 14px;border-radius:999px;font-weight:600;box-shadow:0 0 0 6px var(--surface)}
+  [data-ui="v2"] .rv-bar{bottom:12px;padding:4px}
+  [data-ui="v2"] .rv-tool{width:40px;height:40px;min-height:0}
+  [data-ui="v2"] .rv-sw{width:22px;height:22px;min-height:0;padding:0}
+  [data-ui="v2"] .rv-strip{flex:0 0 92px;padding:0 12px}
+  [data-ui="v2"] .rv-thumb{width:56px;height:70px;flex:0 0 56px;min-height:0}
+  [data-ui="v2"] .rv-tabs{padding:0 14px}
+  [data-ui="v2"] .rv-tab,[data-ui="v2"] .rv-chip,[data-ui="v2"] .rv-link,[data-ui="v2"] .rv-at{min-height:0}
+  [data-ui="v2"] .rv-chip{height:30px}
+  [data-ui="v2"] .rv-chips,[data-ui="v2"] .rv-list{padding-left:14px;padding-right:14px}
+  [data-ui="v2"] .rv-list{padding-bottom:calc(16px + env(safe-area-inset-bottom))}
+  [data-ui="v2"] .rv-box{padding:12px 14px calc(14px + env(safe-area-inset-bottom))}
+  [data-ui="v2"] .rv-ver{min-height:0}
+  /* the "Arrow attached · Remove" pill and the Keep it / Delete pair live in the hosted Notes panel: the 44px rule had
+     stretched their buttons, so the pill read as a huge blob on Cole's phone (fifth pass). The pill is one 32px row
+     and the buttons keep their drawn size. */
+  [data-ui="v2"] .rv-pend{min-height:32px;padding:0 12px;font-size:12px;white-space:nowrap}
+  [data-ui="v2"] .rv-pend button,[data-ui="v2"] .rv-del .rv-btn{min-height:0}
+
+}
+/* touch: hit areas (the look stays; a pseudo element takes the tap) */
+@media (pointer:coarse){
+  .tk .tk-tick,.tk .tk-av,.v2ex,.v2rm,.v2cell,.pd-avb,.pd-fmt,.pd-due,.se-link.se-mini,.lx-nudge-x,.v2sw,.toggle,.rv-sw{position:relative}
+  .tk .tk-tick::after,.tk .tk-av::after,.v2ex::after,.v2rm::after,.v2cell::after,.pd-avb::after,.pd-fmt::after,.pd-due::after,.se-link.se-mini::after,.lx-nudge-x::after,.v2sw::after,.toggle::after,.rv-sw::after{content:"";position:absolute;inset:-11px;border-radius:inherit}
+  .v2rm{opacity:1}
+  .dk .pu-sm input,.lx input[type=checkbox],.set-card input[type=checkbox]{width:20px;height:20px}
+  .v2gal .th .v2pick{width:30px;height:30px}
+  .v2foot a,.ts-foot a{display:inline-block;padding:8px 0}
+  /* the page head's quiet actions and the Change Log's row buttons were 28px on an iPad */
+  [data-ui="v2"] .ph-ico,[data-ui="v2"] .cl2-btn,[data-ui="v2"] .cl2-link,[data-ui="v2"] .pd-chip,[data-ui="v2"] .tk-seg button,[data-ui="v2"] .tk-chip,[data-ui="v2"] .cl-link,[data-ui="v2"] .btn.quiet{min-height:36px}
+  [data-ui="v2"] .set-back .link{display:inline-block;padding:8px 0}
+}
+
+/* ---------- Seventh pass (2026-10-15, Cole on his iPhone): the grey band came back after a popup and stayed; the ask
+   bar looked covered and slightly blurry at the very top. ----------
+   1. #v2scrim (the dark layer behind the side panel and the card sheet) is made on the first popup and then stays in
+      the page for good, at opacity 0 but still a full-screen fixed layer with a grey background. Safari tints the
+      status-bar band from what sits fixed at the top edge, so after one popup the band stayed grey. A closed scrim is
+      now hidden outright (the visibility flip waits for the fade, so it still fades out). */
+#v2scrim:not(.on){visibility:hidden;transition:opacity var(--t,.15s) var(--ease,ease),visibility 0s linear var(--t,.15s)}
+#v2scrim.on{visibility:visible}
+/* 2. The page uses viewport-fit=cover, so the top of the page runs under the status bar and the Dynamic Island, where
+      iOS blurs whatever is behind it. index.html pads the top bar with env(safe-area-inset-top), but v2.css's
+      [data-ui="v2"] .topbar{padding:10px 16px 2px} is more specific and threw that away, so the badge and the ask bar
+      sat in the blurred strip. The same goes for the screens that cover the whole phone (the side panel and card
+      sheet, the review viewer): their first row now starts below the status bar too. */
+@media (max-width:979px){
+  [data-ui="v2"] .topbar{padding-top:calc(10px + env(safe-area-inset-top,0px))}
+}
+@media (max-width:720px){
+  [data-ui="v2"] #v2panel{padding-top:env(safe-area-inset-top,0px)}
+  [data-ui="v2"] .rv-scrim{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+}
+/* 3. Locus installed on the home screen (Cole's screenshots, iOS): the status bar sits outside the page, and iOS
+      softens the top edge of the page under it with a short blur that content scrolls into. The top bar started
+      10px below that edge, so the helper badge and the ask bar sat inside the blur and looked covered. In the
+      installed app the first row starts 24px below the edge; a browser tab keeps the tighter 10px. */
+@media (display-mode:standalone) and (max-width:979px){
+  [data-ui="v2"] .topbar{padding-top:calc(24px + env(safe-area-inset-top,0px))}
+}
+
+/* ---------- Ask on a phone (2026-10-15, second go; Cole: the round button looked clunky and "the chat itself looks
+   bad on mobile"). The pattern is the assistant tab of a native app (Triple Whale's Moby, the ChatGPT and Claude apps):
+   - Ask is a TAB in the middle of the phone bar (#tbAsk, the helper's face as its icon, the word Ask under it), drawn
+     like the other tabs, lit while the chat is open. The top-bar ask bar is hidden under 720; desktop and iPad keep it.
+   - The chat is a large sheet from the bottom (#ask): rounded top, a grab handle, swipe the header down to close,
+     a sliver of the page left above it. Its height follows the visual viewport (phone.js sets --vvh / --vvt), so the
+     box stays above the keyboard.
+   - Header: the helper, "Ask Locus" and who it is about, then three icon buttons (new chat, the More menu with Past
+     chats and Reports, close). The empty chat is a greeting and four questions for the page you are on, sitting near
+     the thumb. Answers read as text, your questions as bubbles. The box is a 16px pill (iOS zooms anything smaller)
+     with a round send arrow inside it.
+   ask-ui.js is shared with Ledger and Supply, so none of its markup changed: phone.js adds the pieces inside #ask
+   and these rules hide the originals under 720. */
+.lxa-grab,.lxa-hd,.lxa-ib,.lxa-empty,.lxa-send-i{display:none}
+@media (max-width:720px){
+  [data-ui="v2"] .topbar .v2ask{display:none}
+  /* the tab */
+  [data-ui="v2"] .tabbar #tbAsk[hidden]{display:none}
+  [data-ui="v2"] .tabbar #tbAsk .lx-face{width:24px;height:22px;opacity:1;background:transparent;display:inline-grid;place-items:center;transition:transform 200ms var(--ease,ease)}
+  [data-ui="v2"] .tabbar #tbAsk .lx-face[data-face="dot"]{background:var(--brand);width:12px;height:12px;margin:6px}
+  [data-ui="v2"] .tabbar #tbAsk .lx-face img{width:100%;height:100%;object-fit:contain}
+  [data-ui="v2"] .tabbar #tbAsk.on{color:var(--brand)}
+  [data-ui="v2"] .tabbar #tbAsk.on .lx-face{transform:scale(1.12)}
+
+  /* the sheet */
+  #askScrim{background:rgba(0,0,0,.4)}
+  #ask{left:0;right:0;width:100vw;top:calc(var(--vvt,0px) + env(safe-area-inset-top,0px) + 10px);bottom:auto;
+    height:calc(var(--vvh,100dvh) - env(safe-area-inset-top,0px) - 10px);border-radius:18px 18px 0 0;overflow:hidden;
+    background:var(--surface,var(--ask-bg));box-shadow:0 -12px 40px rgba(0,0,0,.28);
+    transform:translateY(105%);visibility:hidden;transition:transform 340ms cubic-bezier(.32,.72,0,1),visibility 0s linear 340ms}
+  #ask.on{transform:none;visibility:visible;transition:transform 340ms cubic-bezier(.32,.72,0,1)}
+  #ask.lxa-drag{transition:none}
+  #ask .lxa-grab{display:flex;justify-content:center;padding:8px 0 0;flex:none;touch-action:none}
+  #ask .lxa-grab i{width:38px;height:5px;border-radius:999px;background:var(--line-strong,var(--ask-line))}
+
+  /* header */
+  #ask .ch2{display:flex;align-items:center;gap:2px;padding:4px 6px 8px 16px;border-bottom:1px solid var(--line,var(--ask-line));flex:none;touch-action:none}
+  #ask .ch2 > b,#ask .ch2 > .ctl,#ask .ch2 > .x{display:none}
+  #ask .lxa-hd{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+  #ask .lxa-hd .lx-face{width:32px;height:32px;flex:none;opacity:1;background:transparent}
+  #ask .lxa-hd .lx-face img{width:100%;height:100%;object-fit:contain}
+  #ask .lxa-hd .lx-face[data-face="dot"]{width:14px;height:14px;margin:9px;background:var(--brand)}
+  #ask .lxa-tt{display:flex;flex-direction:column;min-width:0}
+  #ask .lxa-tt b{font-size:16px;font-weight:650;letter-spacing:-.01em;color:var(--ink,var(--ask-ink));white-space:nowrap}
+  #ask .lxa-tt small{font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #ask .lxa-ib{display:inline-grid;place-items:center;width:40px;height:40px;min-height:0;padding:0;border:0;border-radius:50%;background:transparent;color:var(--ink-2,var(--ask-ink));cursor:pointer;flex:none}
+  #ask .lxa-ib:active{background:var(--surface-2)}
+  #ask .lxa-ib svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  #ask .lxa-ib[data-lxa="close"]{background:var(--surface-2);width:34px;height:34px;margin-left:4px}
+  #ask .lxa-ib[data-lxa="close"] svg{width:18px;height:18px;stroke-width:2.2}
+
+  /* past chats, inside the sheet */
+  #askList{max-height:50%;border-bottom:1px solid var(--line,var(--ask-line))}
+  #askList .chatrow{padding:12px 16px;font-size:15px;gap:3px}
+  #askList .chatrow small{font-size:12.5px}
+
+  /* the empty chat: hello in the middle, questions near the thumb */
+  #ask .lxa-empty{flex:1;min-height:0;flex-direction:column;padding:16px 16px 12px;overflow-y:auto;overscroll-behavior:contain}
+  #ask.lxa-isempty .lxa-empty{display:flex}
+  #ask.lxa-isempty #askLog{display:none}
+  #ask .lxa-hello{margin:auto 0;display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px;padding:12px 8px}
+  #ask .lxa-hello .lx-face{width:64px;height:64px;opacity:1;background:transparent}
+  #ask .lxa-hello .lx-face img{width:100%;height:100%;object-fit:contain}
+  #ask .lxa-hello .lx-face[data-face="dot"]{width:20px;height:20px;margin:22px;background:var(--brand)}
+  #ask .lxa-hello h2{margin:4px 0 0;font-size:21px;font-weight:650;letter-spacing:-.02em;color:var(--ink)}
+  #ask .lxa-hello p{margin:0;font-size:14.5px;line-height:1.45;color:var(--muted);max-width:290px}
+  #ask .lxa-sugs{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+  #ask .lxa-sugs > span{font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 4px 2px}
+  #ask .lxa-sug{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;padding:11px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2);color:var(--ink);font:inherit;font-size:15px;line-height:1.35;text-align:left;cursor:pointer}
+  #ask .lxa-sug:active{background:var(--brand-soft);border-color:transparent}
+  #ask .lxa-sug svg{width:16px;height:16px;flex:none;margin-left:auto;color:var(--muted);fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+  /* the conversation */
+  #askLog{padding:16px 16px 20px;gap:14px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  #askLog .m{font-size:15.5px;line-height:1.55}
+  #askLog .m.me{background:var(--brand);color:var(--on-brand,#fff);border-radius:20px 20px 6px 20px;max-width:84%;padding:10px 14px}
+  #askLog .m.ai:not(.prop):not(.file):not(.hand):not(.rep):not(.think){background:transparent;border:0;max-width:100%;padding:0 2px;border-radius:0}
+  #askLog .m.intro{display:none}
+  #askLog .m.think{background:var(--surface-2);border:0;border-radius:16px;font-style:normal;opacity:1;max-width:100%}
+  #askLog .m.prop,#askLog .m.file,#askLog .m.hand,#askLog .m.rep{max-width:100%;border-radius:16px}
+  #askLog .m .btn{min-height:40px}
+  #askLog .m-cost{font-size:12px;color:var(--muted);margin-top:6px}
+
+  /* the box */
+  #askForm{display:flex;align-items:flex-end;gap:0;padding:8px 12px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line,var(--ask-line));background:var(--surface,var(--ask-bg));flex:none}
+  #ask.lxa-kb #askForm{padding-bottom:8px}
+  #askForm textarea{font-size:16px;min-height:46px;max-height:140px;border-radius:23px;padding:12px 54px 12px 16px;background:var(--surface-2);border:1px solid var(--line);line-height:1.35}
+  #askForm textarea{scrollbar-width:none}
+  #askForm textarea::-webkit-scrollbar{display:none}
+  #askForm textarea:focus{outline:0;border-color:var(--brand)}
+  #askForm .lxa-send{width:36px;height:36px;min-height:0;padding:0;margin:0 10px 5px -46px;border-radius:50%;border:0;background:var(--line-strong);color:var(--muted);display:inline-grid;place-items:center;position:relative;z-index:1;flex:none;transition:background 150ms,color 150ms}
+  #askForm.lxa-has .lxa-send{background:var(--brand);color:var(--on-brand,#fff)}
+  #askForm .lxa-send .lxa-send-t{display:none}
+  #askForm .lxa-send .lxa-send-i{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+}
+
+/* ==========================================================================
+   PHASE 6 (2026-10-20, the iPhone-shell mock): under 600px a tile is a ROW, not a card. Label left, the number and
+   its change right, one line each; the sentence under the number and the sparkline wait for the panel. The hero
+   tile keeps its card shape so the page still opens on one big number.
+   ========================================================================== */
+@media (max-width:600px){
+  [data-ui="v2"] .v2tiles,[data-ui="v2"] .v2tiles.home8{grid-template-columns:minmax(0,1fr);gap:0;border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero){display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:12px;padding:11px 14px;border:0;border-radius:0;box-shadow:none;background:transparent;min-height:48px}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero)+.v2tile{border-top:1px solid var(--line)}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero) .l{font-size:14px;color:var(--ink);font-weight:500;line-height:1.3;display:block}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero) .l em,[data-ui="v2"] .v2tiles>.v2tile:not(.hero) .l .v2src{display:none}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero) .v{font-size:16px;font-weight:650;letter-spacing:-.01em;justify-content:flex-end;flex-wrap:nowrap;white-space:nowrap;gap:6px}
+  [data-ui="v2"] .v2tiles>.v2tile:not(.hero) .sub,[data-ui="v2"] .v2tiles>.v2tile:not(.hero) .v2spark,[data-ui="v2"] .v2tiles>.v2tile:not(.hero) .v2bul{display:none}
+  [data-ui="v2"] .v2tiles>.v2tile.hero{grid-column:1/-1;border:0;border-radius:0;box-shadow:none;background:transparent;padding:14px}
+  [data-ui="v2"] .v2tiles>.v2tile.hero+.v2tile{border-top:1px solid var(--line)}
+  [data-ui="v2"] .v2tiles.v2sk>.v2tile{display:block;padding:11px 14px}
+  [data-ui="v2"] .v2tiles.v2sk>.v2tile .c{display:none}
+}
+
+/* ==========================================================================
+   PHASE 7 (2026-10-20): on a phone a table is a list of cards. polish.js writes each cell's column name into
+   data-l, so a cell reads "label  value"; the first cell is the card's title, a row's "..." stays at its top right.
+   ========================================================================== */
+@media (max-width:600px){
+  [data-ui="v2"] .v2tbl{overflow:visible}
+  [data-ui="v2"] .v2tbl table,[data-ui="v2"] .v2tbl tbody{display:block;width:100%}
+  [data-ui="v2"] .v2tbl thead{display:none}
+  [data-ui="v2"] .v2tbl tbody tr{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:2px;padding:10px 0;border-bottom:1px solid var(--line)}
+  [data-ui="v2"] .v2tbl tbody tr:last-child{border-bottom:0}
+  [data-ui="v2"] .v2tbl tbody tr.tot{border-top:1px solid var(--line-strong)}
+  [data-ui="v2"] .v2tbl td{display:flex;justify-content:space-between;align-items:baseline;gap:12px;grid-column:1 / -1;height:auto;min-height:0;padding:2px 0;border:0;text-align:right;white-space:normal;font-size:13px}
+  [data-ui="v2"] .v2tbl td[data-l]::before{content:attr(data-l);color:var(--muted);font-weight:500;font-size:12px;text-align:left;flex:none}
+  [data-ui="v2"] .v2tbl td:first-child{grid-column:1;display:block;text-align:left;font-size:14px;font-weight:600;padding:0 0 4px;min-width:0}
+  [data-ui="v2"] .v2tbl td:first-child::before{display:none}
+  [data-ui="v2"] .v2tbl td:first-child .sub{font-weight:400}
+  [data-ui="v2"] .v2tbl td.lx-rm{grid-column:2;grid-row:1;display:block;width:auto;padding:0;text-align:right}
+  [data-ui="v2"] .v2tbl td:empty{display:none}
+  [data-ui="v2"] .v2tbl tr.lvl1 td:first-child,[data-ui="v2"] .v2tbl tr.lvl2 td:first-child{padding-left:0}
+  [data-ui="v2"] .v2tbl tr.lvl1{margin-left:12px}[data-ui="v2"] .v2tbl tr.lvl2{margin-left:24px}
+  [data-ui="v2"] .v2tbl .v2ib{grid-template-columns:48px auto}
+  /* a card's title row on a phone: the title and the "..." on row 1, the caption under, the controls or meta under that */
+  [data-ui="v2"] .v2h,[data-ui="v2"] .v2h:has(> .v2h-m){grid-template-columns:minmax(0,1fr) auto}
+  [data-ui="v2"] .v2h > .find{grid-column:1 / -1;grid-row:2}
+  [data-ui="v2"] .v2h > .cap{grid-column:1 / -1;grid-row:3;justify-self:start;justify-content:flex-start;white-space:normal}
+  [data-ui="v2"] .v2h > .cap:empty{display:none}
+  [data-ui="v2"] .v2h > .v2h-m{grid-column:2;grid-row:1}
+  /* the ad card's one metric row at two across */
+  [data-ui="v2"] .v2gal .kv{font-size:11px;gap:4px}
+  [data-ui="v2"] .v2gal .kv > span > b{font-size:12.5px}
+  /* bar lists: the label gets a third of the width */
+  .lx-bar{grid-template-columns:minmax(72px,34%) minmax(0,1fr) auto;gap:8px}
+  /* a scatter or any svg chart never pushes the page sideways */
+  [data-ui="v2"] .v2chart{max-width:100%;overflow:hidden}
+  /* the two-column card rows stack (they already do under 1150); the gallery is two across */
+  [data-ui="v2"] .v2gal{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+}
+/* PHASE 7 (2026-10-20), the Ads page's "counts as one" rows: a text cell's names wrap, and a card-row table never
+   pushes the page sideways */
+@media (max-width:600px){
+  [data-ui="v2"] .v2tbl{overflow-x:clip}
+  [data-ui="v2"] .v2tbl td.txt,[data-ui="v2"] .v2tbl td.txt *{white-space:normal;overflow-wrap:anywhere;max-width:100%}
+  [data-ui="v2"] .v2tbl td b{white-space:normal;overflow-wrap:anywhere}
+}

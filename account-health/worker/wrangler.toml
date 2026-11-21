@@ -1,0 +1,126 @@
+# Mobius Account Health — Cloudflare Worker config
+# Deploy:  npx wrangler deploy   (from this folder)
+name = "mobius-account-health"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# 03:30 UTC nightly: re-pull the last 3 days of daily insights for every active
+# account (Meta conversions settle late) + activity-log events + TW daily metrics.
+# Hourly: the Daily Brief trigger fires every hour and the worker sends only when
+# the CENTRAL hour matches the `briefHour` setting (default 9 = 9am Central, editable
+# in Profit -> Settings). Cron expressions are fixed at deploy time and always UTC, so
+# an hourly gate is the only way to make the time editable and keep it at the same
+# wall-clock hour across daylight saving. Still two triggers, not three.
+# Every 5 minutes (2026-10-19): Locus Social posts whose time has come go out (socialpost.js socialPostTick);
+# nothing else runs on that tick.
+[triggers]
+crons = ["30 3 * * *", "0 * * * *", "*/5 * * * *"]
+
+# D1 database. Create once with:
+#   npx wrangler d1 create mobius-account-health
+# then paste the returned database_id below and apply the schema:
+#   npx wrangler d1 execute mobius-account-health --remote --file=schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "mobius-account-health"
+database_id = "93e7cdeb-19a9-4950-8146-e24b189f410f"
+
+# The ideas bot (src/ideas.js, 2026-09-29): a tag in a brand's -internal channel is acked
+# in the Slack event and the slow work (watch the video, write the draft) runs on this queue,
+# because waitUntil after a response only lives ~30 seconds. One message per job, no retries
+# (a failure is said in the thread once, never posted twice). Create once:
+#   npx wrangler queues create mobius-ideas
+# Stock (2026-10-08): the Strategist's stock view and actions read and write the Supply worker.
+# Auth is the Supply engine's own admin token, secret SUPPLY_TOKEN (not this worker's ADMIN_TOKEN).
+# The calendar (2026-10-09): Lineup's database, the same rows the old Lineup app reads and writes (calendar.js).
+[[d1_databases]]
+binding = "CAL"
+database_name = "marketing-hub"
+database_id = "e8bd83a8-100e-44ed-a639-2c3415f90e41"
+
+[[services]]
+binding = "SUPPLY"
+service = "mobius-supply"
+
+# The Strategist's locus_api tool calls Locus's own routes on the profit worker as the person
+# (or as Cole from Slack). Worker-to-worker calls over workers.dev are refused; a binding is not.
+[[services]]
+binding = "PROFIT"
+service = "mobius-profit"
+
+# The Strategist's ask_ledger tool (alerts.js, 2026-10-09): DMs to the app now go to the Strategist, and a money
+# question about Mobius's own books is passed to the Ledger's /api/ask with a minted Cole session. A binding,
+# because a worker cannot fetch another worker's workers.dev URL on the same account.
+[[services]]
+binding = "LEDGER"
+service = "mobius-ledger"
+
+[[queues.producers]]
+binding = "IDEA_Q"
+queue = "mobius-ideas"
+
+[[queues.consumers]]
+queue = "mobius-ideas"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 0
+
+# The ideas bot keeps each reference clip it watches (Atria mp4, Slack upload, TikTok / Instagram
+# download; never YouTube) in the SAME bucket Locus's Ambassadors tab uploads to, so the Creator
+# link button can attach it as a clip that plays on the public creator link. Keys amb/<act>/idea-*.
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "mobius-amb-media"
+
+# Ad covers are shrunk to 600px WebP before they go into R2 (creative.js). Free up to 5,000
+# unique transformations a month; each ad is transformed once. Without it the original is stored.
+[images]
+binding = "IMAGES"
+
+# Public config (Google OAuth client id is public by design; used to verify sign-ins).
+[vars]
+GOOGLE_ADS_MCC = "5566468199"   # the Mobius Google Ads manager account (Ads API calls go through it)
+GOOGLE_CLIENT_ID = "1095210859237-eqn8nsr9p3mcui7cuq17l3jas4dgpl8a.apps.googleusercontent.com"
+# SUBREQUEST BUDGET. Cloudflare counts every fetch AND every D1 query against a
+# single invocation: 50 on the free plan, 10,000 on Workers Paid. The scheduled
+# jobs measure what they spend and stop while they can still record what they
+# did, so nothing is ever killed mid-brand — they just do fewer brands per tick
+# and pick the rest up on the next one.
+#
+# Workers Paid since 2026-09-01, so the real ceiling is 10,000. Every job now
+# finishes in one tick instead of spreading over several.
+#
+# THIS IS A CEILING, NOT PERMISSION TO STOP COUNTING. The jobs still measure
+# what they spend and still stop before the wall — that is what keeps a brand
+# from being killed mid-brief, and it is what will make the next problem show up
+# as "deferred" in Settings instead of as silence. Measured cost of one brief on
+# 2026-09-01: 51 subrequests. Six brands plus reports plus syncs is comfortably
+# inside 10,000, but "comfortably inside" is a thing you know by counting.
+SUBREQUEST_LIMIT = "10000"
+# The ideas bot's kill switch: "off" = every tag goes to the Strategist as before, idea buttons
+# and queued jobs do nothing. "on" = live.
+IDEAS_BOT = "on"
+
+# Secrets (set once, never committed):
+#   npx wrangler secret put META_TOKEN        system-user token, ads_read on every client ad account
+#   npx wrangler secret put ADMIN_TOKEN       long random string; master key for the dashboard
+#   npx wrangler secret put SESSION_SECRET    long random string; signs Google sessions (share the SAME
+#                                             value across all tool workers so one sign-in works everywhere)
+#   npx wrangler secret put SLACK_BOT_TOKEN   (Chat 2) same Slack app as Pulse / Restock
+#   npx wrangler secret put SLACK_SIGNING_SECRET  Basic Information -> Signing Secret, for the
+#                                             app whose Interactivity Request URL points at
+#                                             https://mobius-account-health.mobius-digital.workers.dev/slack/actions
+#                                             This is the ONLY credential on that endpoint: every
+#                                             button press is verified against it, and with the
+#                                             secret unset the endpoint refuses everything.
+#   npx wrangler secret put GEMINI_API_KEY    ideas bot: Google AI Studio key, watches reference videos (optional)
+#   npx wrangler secret put DOWNLOADER_KEY    ideas bot: ScrapeCreators key, pulls TikTok + Instagram MP4s (optional)
+#   npx wrangler secret put YT_API_KEY        Social: YouTube Data API v3 key (Cloud console > Credentials > API key, YouTube Data API enabled); without it YouTube reads fall back to ScrapeCreators
+# Optional var: IDEA_APPROVERS = "U06C37MDWD7,U06K732S4BD" (who may press the ideas bot's send buttons)
+#
+# Lucky creator app (ideas bot, 2026-09-30): the "Lucky creator app" button files the draft into
+# LuckyGolfCo/lucky-golf-creators' Supabase (angle_sections / angles / angle_examples + the `creative`
+# storage bucket) with the project's service-role key. Until both are set the button says so and does nothing.
+#   npx wrangler secret put LUCKY_SUPABASE_URL          https://<project-ref>.supabase.co (a var is fine too)
+#   npx wrangler secret put LUCKY_SUPABASE_SERVICE_KEY  Supabase -> Project Settings -> API -> service_role
+# Optional var: LUCKY_CREATORS_URL = "https://creators.luckygolf.com" (the app's public origin, for the links it posts)

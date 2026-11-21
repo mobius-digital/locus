@@ -1,0 +1,175 @@
+# Handoff: one Ledger for three businesses (2026-10-10)
+
+Written for the cloud session that continues this work. Cole's machine holds the memory notes and the
+deploy logins; the cloud has this repo and GitHub. Everything the cloud needs is in this file.
+
+## What Cole asked (his words, condensed)
+
+1. "Why is the Caddie its own sub tab? Doesn't make sense to me. What's run checks?"
+2. "Would it be beneficial to move to one full app? I have basically 3 ledgers right now, one for Mobius, one
+   for Lucky, and another for my personal. Each do their own thing and have different uses. But might be
+   easier to combine into one... same idea as Locus, where there's an agency view and a brand view... what
+   business are you in: agency / service-based, e-commerce brand, personal... customizable depending on what
+   you're going to be using it for... if I were to sell this to other people, they log in to preset stuff but
+   can they also customize? It should just be preset for the most part. Do that whole entire thought process."
+3. Do everything needed; he does not want to be asked before deploys (memory rule "Just do it": act, then
+   report; stop only for money, client-facing or destructive calls).
+
+## Answers already settled in this session
+
+- **The Caddie tab**: my call, and Cole is right that it reads as odd. Fold it: open findings and the Monday
+  briefing already sit on Home › Overview; the chats and reports it built belong under Reports (Caddie reports
+  exists). Remove the tab. "Run the checks now" re-runs the nightly audit on demand (duplicate payments, a bill
+  that did not arrive, price creep, ads as a share of sales, cash below zero, uncategorized rows, receipts,
+  missing product costs, stale bank feed). It is a maintenance button; keep it in Settings › Slack and the
+  Caddie only, not on a page.
+- **Readers**: Cole alone today for all three ledgers; Skylar on Tally; the CPA by export. No logins for others.
+
+## The three ledgers as they stand
+
+| | Mobius Ledger (agency) | Lucky Ledger (e-commerce) | Tally (personal) |
+| --- | --- | --- | --- |
+| Where | this repo, `ledger/` (index.html 3470 lines, ledger.css, worker/); tools.go-mobius-digital.com/ledger/; worker `mobius-ledger` on the Mobius CF account | separate repo github.com/LuckyGolfCo/lucky-golf-ledger (the mobius-digital GitHub login is a collaborator); ledger.luckygolf.com (Pages) + lucky-ledger.lucky-golf-showroom.workers.dev; Lucky Golf CF account | `C:/Users/wetzl/OneDrive/Apps/Desktop/Tally` on Cole's laptop, NOT in any repo (the cloud cannot see it); tally.scwetzler.workers.dev; personal CF account |
+| Engine | the original: Plaid, Stripe, Slack receipts, recurring rules, two-layer categories (bucket + tax category), month close, report card, CPA pack, Ask (Controller) | fork of the Mobius engine (worker.js 4982 lines) + lucky.js (Shopify orders/payouts/products, COGS, cash forecast, debts, Kickfurther, Capital) + caddie.js; v6 front end shipped today (see below) | ~70% of the Mobius engine rewritten small: one shared checking, buckets, bills, goals, who-spent-it, Ask Tally; everyday words, 4 tabs |
+| Look | 2026-09-16 "Ledger Pro" (older Mobius look, rail) | Locus design system as of today | its own (Geist, indigo), redesign proposed, not built |
+| Users | Cole | Cole (admin@luckygolf.com, cole@) | Cole + Skylar |
+| Money shape | retainer clients, Stripe fees, contractors, 50/30/10/5/5 split, 30% tax set-aside | Shopify sales by order date, COGS as units sell, inventory on the balance sheet, Capital/Kickfurther/Griff debts, 13-week cash forecast, products and margin | one checking, limits per bucket, bills, savings goals, safe to spend |
+
+## Lucky Ledger v6 (shipped today, commit 8e2e8a7 in the Lucky repo)
+
+Rail: Home (Overview, The Caddie) / Money (Profit and loss, Balance sheet, Costs, Taxes) / Cash (Forecast,
+Plan, Debts) / Books (Transactions, Receipts, Close) / Store (Products, Inventory, Orders) / Reports (Statements,
+CPA pack, Caddie reports); foot: Settings (Business, Accounting, Categories, Vendors, Banks and cards, Shopify,
+Slack and the Caddie, Access, Data), theme, sign out. Top bar: crumb, ask bar (Ctrl+K), period + compare
+menus on Money and Store, month stepper on Books. Files in `app/`: `ledger.css` (tokens light/dark, Lucky green
+accent, every component), `icons.js` (Lucide sprite copied from profit/icons.js), `lg-core.js` (NAV, show(),
+period control, tile/delta/spark/lineChart/barChart, the drill panel), `lg-home.js`, `lg-money.js`, `lg-cash.js`,
+`lg-books.js`, `lg-settings.js`. The engine (index.html's inline script) is untouched and overridden by name
+(`show`, `renderGate`, `boot`, `renderSettings`, `renderClose`, `monthNav`, `needsCount`, `editTxn`,
+`renderTxns`). Chart.js and Geist are gone. Full audit and the reasoning: `docs/redesign-2026-10-10.md` in that
+repo. Trap: never declare a top-level `const` the engine already declares (check with
+`grep -oE "^(const|let|function) +\w+" app/index.html`).
+
+## The job for the cloud session
+
+**Step 1, the thought process (a document Cole can read, then a page he can share):**
+- Should the three become one product? My starting view: yes for the SHELL, the engine and the money model
+  (transactions, categories, receipts, close, reports, ask), no for the data: each business stays its own
+  tenant with its own bank links, its own Cloudflare account today (privacy was explicit for Tally) and its own
+  Slack. One codebase, deployed three times, is the honest first step; one deployment with tenants is step two
+  and only matters if it is sold.
+- Editions by "what business are you in", like Locus's agency vs brand editions (memory: never hide a brand's
+  own pages; the agency edition only ADDS). Proposed presets: **Service business** (clients and retainers,
+  Stripe, contractors and 1099s, the owner split, tax set-aside), **Product brand** (store sales, cost of goods
+  and inventory, products and margin, debts and cash forecast, suppliers), **Household** (one or two accounts,
+  spending limits by bucket, bills, savings goals, people, everyday words, no CPA pack). A preset decides which
+  rail items, which settings sections, which categories and which words ("Clients" vs "Store" vs "Spending").
+- Customization: presets are the default; a short list of switches per edition (show the balance sheet,
+  accrual vs cash, Slack on or off, who-spent-it on or off, categories editable always). Nothing that needs a
+  manual to understand. Write down what a new sign-up sees in the first five minutes.
+- Name: Cole is open; "Ledger" is the placeholder. Offer three with the reason, do not block on it.
+- The Caddie: one assistant per edition with its own name and playbook (Controller, Caddie, Tally); same engine.
+- Shared code today: the Lucky worker is a fork of the Mobius worker (drifted); Tally is a rewrite. Say what
+  it would cost to bring them back under one engine, and in which order (Lucky's engine is the most complete;
+  Mobius's is the original; Tally is the smallest and the most different).
+- Risks: three live apps with real money in them; migrations must be additive; Lucky deploys need the laptop.
+
+**Step 2, build what Cole approves.** Likely first moves: the v6 shell and CSS into `ledger/` for the Mobius
+books (same files, agency preset, blue accent per `/mobius.css` data-app rules), the Caddie tab folded, an
+`edition` setting read by the rail and Settings.
+
+## Done by the cloud session (2026-10-10, later the same day)
+
+- **The Caddie tab is gone** (Lucky repo, commit 0d6a1da on main, NOT yet deployed: deploy from the laptop with
+  the Lucky Golf wrangler login, `cd worker && npx wrangler deploy`, then hard refresh). Findings (all of them)
+  and the Monday briefing sit in one card on Home > Overview; "Needs you" scrolls to it. Earlier chats sit
+  beside the reports on Reports > Caddie reports. "Run the checks now" lives only in Settings > Slack and the
+  Caddie. The old `caddie` id routes to Overview. Files: app/lg-core.js (NAV, LEGACY), app/lg-home.js,
+  app/lg-books.js, app/lg-settings.js (SCREEN_NAMES), docs/redesign-2026-10-10.md.
+- **The thought process is written**: `docs/one-ledger.md` in this repo, and the shareable page
+  https://claude.ai/artifact/UvsU4xNMyb7KT7qvkhpTuk (private until Cole shares it). Evidence measured from the
+  code: Lucky's worker.js is 66% verbatim the Mobius worker.js, its front-end engine 69%, its engine.js 92% the
+  shared `ask/engine.js` (which the Mobius Controller already imports). Shared tables: transactions, vendors,
+  months, settings, clients. Recommendation: one codebase, three editions (Service business, Product brand,
+  Household), three separate sets of books, deployed three times; build order A (v6 shell into `ledger/` with
+  an `edition` setting), B (one worker on Lucky's base plus Mobius's seven audit migrations), C (Household),
+  D (multi-tenant, only if sold).
+- **Waiting on Cole**: the four decisions in section 9 of `docs/one-ledger.md`. Step A starts on his word.
+- **Lucky deploys now run from GitHub, not the laptop** (2026-10-11). `.github/workflows/deploy.yml` in the
+  Lucky repo runs on every push to main: `wrangler deploy` for the worker (which serves the app on workers.dev)
+  and `wrangler pages deploy app --project-name=lucky-ledger` for the Pages site behind ledger.luckygolf.com,
+  then checks both hosts serve the repo's `lg-core.js`. The token is the GitHub Actions secret
+  `CLOUDFLARE_API_TOKEN` (Lucky Golf account). Run 4 was green; the Caddie fold is live on both hosts.
+- **Cloud environments and Cloudflare**: the "Default" environment (this one) injects a Mobius Cloudflare token
+  for api.cloudflare.com; the "Lucky Golf" environment injects a Lucky Golf one. Wrangler works through the
+  proxy with `CLOUDFLARE_API_TOKEN=x NODE_USE_ENV_PROXY=1 NODE_EXTRA_CA_CERTS=/root/.ccr/ca-bundle.crt`.
+  Limit: the proxy overwrites the Authorization header on every api.cloudflare.com request, so any deploy that
+  uploads assets (Workers assets, Pages) fails with 401 from the cloud; D1 queries and worker-only deploys work.
+  That is why Lucky ships through GitHub Actions. The Mobius worker has no assets block, so it can deploy from
+  this environment directly.
+
+## The second ask (2026-10-11): two products, one voice
+
+Cole sent the "Tally" concept video and asked for the positioning of both apps, a name, the helper with a face,
+the commercials and a build plan. Answered in `docs/two-products.md` and the page
+https://claude.ai/artifact/9Gij7iF7xHnKb1ewyCJafF. Build sessions started from this session, each on its own branch:
+
+| Session | Branch | Id |
+| --- | --- | --- |
+| A. The money shell (v6 shell on the Mobius books, `edition` setting, `ledger/lg-edition.js`) | `ledger-shell-a` | session_01Nv82cCZu84TftWTK3m5kGb |
+| B. The brand kit (Locus dot, Kept coin, three directions each, `logo/locus`, `logo/kept`, `logo/kit.css`, `docs/brand/`) | `brand-kit` | session_01F85DqNFa3HSiDL3eCYZbRQ |
+| D. Locus personality (hero number, nudge card, morning line, accent word) | `locus-personality` | session_01DPDfo7cay2HMD3pjJFKH91 |
+
+Later the same day, the decisions and what followed:
+
+- **The name is Cashew** (Cole picked it over Kept for the personality it can carry). Line: "Know what you
+  kept." Lucky keeps "the Caddie" as its helper's nickname. Locus's mark is the bead (direction 2).
+- **The logo is the hand-lettered wordmark** (`logo/cashew/wordmark.svg`) with the C as the icon
+  (`mark.svg`, `icons/`). Cole rejected every drawn character ("looks drawn, not a logo").
+- **The characters are rendered images**, made with the Canva image model in this session: a glossy green
+  cashew (`logo/cashew/character/{rest,thinking,found,asleep,clear}.png`) and, so the pair matches, a glossy
+  blue bead with an orbit ring for Locus (`logo/locus/character/`). 200px transparent cut-outs; the full-size
+  originals live in Canva (media ids in this session's transcript); exporting them at 1024px under the same
+  names is the next step and needs a blank Canva design, which the generator refused to make.
+- **Sessions C (commercials, `motion/`, branch `motion-spots`, page
+  https://claude.ai/artifact/EfkzcHEK8FGuYmFmQ2MzZq), E (Lucky repo, branch `cashew`, restarted once after a
+  permission prompt stalled it) and G (both gates redone with the character as the hero, branch `gates`,
+  session_0134iNp938vjGrbRjKkyH5t8)** were started after A, B and D finished.
+- **Integration**: brand-kit, ledger-shell-a and locus-personality are merged into `main-nv6pvz` (pushed).
+  motion-spots and gates merge when they land. Nothing merged to main yet: the repo root is GitHub Pages
+  served from main, so that merge deploys Locus and the Mobius ledger front end; Cole decides after seeing
+  the screenshots. The ledger worker needs a deploy for the `edition` setting (`ledger/worker`, Mobius
+  Cloudflare login, or from the Default cloud environment where the Mobius token works).
+- Lucky deploys on push to main through GitHub Actions; the `cashew` branch there must be reviewed, then merged.
+
+## End of day (2026-10-11, 14:35 UTC): everything built, nothing live
+
+- **Mobius repo, branch `main-nv6pvz`** holds all of it merged: the brand kit, the Cashew shell with editions on
+  the Mobius books, Locus personality (hero number, nudge card, morning line, the bead, the gate), both gates
+  redone (session G: the character as the hero with idle motion, the field with depth, drifting cost shapes), and
+  the rebuilt commercials (`motion/`, branch `motion-v2`: inside the app, real cards and charts, voice by Kokoro,
+  synthesized sound, one app per spot; MP4s under `motion/out/`; page
+  https://claude.ai/artifact/EfkzcHEK8FGuYmFmQ2MzZq). Cole's verdict on the first spots was "plain, no voice,
+  no real UI"; the rebuild answers each point; his notes on the rebuild are pending.
+- **Lucky repo, branch `cashew`**: the hero number, one-tap findings, the morning line, the character, the new
+  gate (ported, then two fixes: full-width Google pill, drift layer behind the card). Tests green. Not merged.
+- **Go live, in order, on Cole's word**: (1) merge `cashew` to main in the Lucky repo (GitHub Actions deploys
+  ledger.luckygolf.com and the worker, about a minute); (2) merge `main-nv6pvz` to main in the Mobius repo
+  (GitHub Pages deploys Locus and the Mobius ledger front end); (3) deploy the Mobius ledger worker for the
+  `edition` setting and the Locus worker (account-health) for the nudge and morning routes, from the Default cloud
+  environment (the Mobius Cloudflare token works there for worker-only deploys) or the laptop; (4) hard refresh.
+- **Open notes from the parent session's own review**: the characters sit small in the corners for most of the
+  spots and could react bigger at the key beats; the white sections are quieter than the colour fields; the
+  music bed level has not been heard through a speaker; the 1024px character exports are still to do; the
+  Locus gate's drifting "tab" shapes read as odd glyphs.
+
+## Constraints the cloud must respect
+
+- Deploys: the Lucky worker and Pages deploy need the Lucky Golf wrangler login on Cole's laptop
+  (`XDG_CONFIG_HOME="C:/Users/wetzl/Lucky Golf/.cf"`); the Mobius worker needs the Mobius wrangler login; Tally
+  needs its `deploy.sh` token. From the cloud: commit and push, then say what to deploy and from where. If a
+  Cloudflare API token is in the cloud environment, say so before using it.
+- Cole's rules: short bullet replies (what changed, what he must do); no em dashes anywhere; in-app modals,
+  never alert/prompt; plain words, explain every number; "Simplicity over features": his ideas are questions,
+  push back with evidence; "Answer the part asked": change only the piece he questioned.
+- Memory notes live only on the laptop. Keep this file current; it is the record the next session reads.

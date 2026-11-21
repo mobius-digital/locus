@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moved — Locus</title>
+<meta name="robots" content="noindex">
+<!-- Account Health was merged into Mobius on 2026-08-27: its screens are now the
+     Meta tab. This page stays only so old bookmarks, and the links inside Slack
+     alerts sent before the merge, still land somewhere sensible. The WORKER of
+     the same name is very much alive - it still owns the Meta sync, both crons
+     and every secret; only the UI moved. -->
+<link rel="icon" href="../favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=Instrument+Serif&display=swap" rel="stylesheet">
+<script>
+  /* Carry a share token through if one is present, otherwise open the Meta tab. */
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var to = '../profit/' + (q.get('share') ? '?share=' + encodeURIComponent(q.get('share')) : '?open=meta');
+    location.replace(to);
+  })();
+</script>
+<style>
+  body{font-family:'Instrument Sans',system-ui,sans-serif;background:#F4F8FA;color:#13202B;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
+  .box{background:#fff;border:1px solid #DFE7EC;border-radius:12px;padding:34px;max-width:460px;text-align:center}
+  h1{font-family:'Instrument Serif',Georgia,serif;font-weight:400;font-size:26px;margin:0 0 8px}
+  p{color:#647684;font-size:14px;line-height:1.6;margin:0 0 18px}
+  a{display:inline-block;background:#0C161D;color:#fff;text-decoration:none;border-radius:9px;
+    padding:11px 18px;font-weight:700;font-size:14px}
+</style>
+<body>
+  <div class="box">
+    <h1>Account Health moved</h1>
+    <p>It is now the <b>Meta</b> tab inside <b>Locus</b> — same pages, same numbers, one place. Taking you there…</p>
+    <a href="../profit/?open=meta">Open Locus → Meta</a>
+  </div>
+</body>
+</html>

@@ -1,0 +1,361 @@
+/**
+ * FRAME.IO V4 (2026-10-02). Cole reviews assets in Frame, and his workspace is on the new
+ * Frame (next.frame.io), where the old developer tokens see nothing. V4 sits behind Adobe:
+ * an OAuth Web App made once in the Adobe Developer Console (Client ID + Client Secret),
+ * then Cole signs in with his Frame/Adobe login. Same shape as Connect Atria:
+ *
+ *   1. Locus > Settings > New client > Connect Frame: Cole pastes the Client ID and Secret
+ *      (POST /api/frame/start, admin; stored in p_studio_cfg, never sent back to a browser)
+ *      and is sent to Adobe's sign-in. Redirect URL to put in the Adobe console:
+ *      https://mobius-account-health.mobius-digital.workers.dev/frame/callback
+ *   2. GET /frame/callback (public; the state is the proof) swaps the code for tokens.
+ *   3. frameToken() refreshes before expiry. Disconnect forgets everything.
+ *
+ * API: https://api.frame.io/v4. accounts -> workspaces -> projects. The New client step
+ * makes one project per client in the chosen workspace (settings `frameWorkspace`, else the
+ * first) with two folders, Ad Concepts and Clips/B-Roll, and the picked team put on it (full access).
+ * frameTree(env, depth) lists everything; /api/frame/access says who sees what; the tidy routes move,
+ * rename and create, and delete only what is empty.
+ *
+ * NEVER DELETE A FRAME PROJECT THAT HAD WORK IN IT, EVEN EMPTY (2026-10-03). Review links (shares) belong
+ * to the PROJECT, not to the files: deleting the emptied pods killed ~110 review links that creators and
+ * clients were using, and Frame has no API to restore a project (only Frame support can). Empty it and
+ * leave it, or rename it "zz old ...". Ahsan and Noma are project members, not workspace members, so a
+ * project they are not put on is invisible to them.
+ *
+ * LAYOUT (Cole, 2026-10-03): NO PODS. One project per current client, named like the brand; every
+ * former client is a folder in "Past Clients"; "MD - Internal" and "# Cole Organic" are Mobius's own.
+ */
+import { clip, safeJson } from './research.js';
+
+let F = (...a) => fetch(...a);
+export function useFetch(f) { F = f; }
+
+const IMS = 'https://ims-na1.adobelogin.com/ims';
+const API = 'https://api.frame.io/v4';
+/* openid + profile + email identify the user; offline_access gives a refresh token;
+   additional_info.roles is what Frame's own docs list for its V4 API. */
+const SCOPE = 'openid,email,profile,offline_access,additional_info.roles';
+const K = { client: 'frame_client', tokens: 'frame_tokens', state: 'frame_state' };
+
+async function cfgGet(env, k) { return (await env.DB.prepare(`SELECT value FROM p_studio_cfg WHERE key = ?1`).bind(k).first().catch(() => null))?.value || null; }
+async function cfgSet(env, k, v) {
+  if (v == null) return env.DB.prepare(`DELETE FROM p_studio_cfg WHERE key = ?1`).bind(k).run();
+  return env.DB.prepare(`INSERT INTO p_studio_cfg (key, value, updated_at) VALUES (?1, ?2, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).bind(k, v).run();
+}
+let tableReady = false;
+async function ensureCfg(env) {
+  if (tableReady) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS p_studio_cfg (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')))`).run();
+  tableReady = true;
+}
+const b64url = u => btoa(String.fromCharCode(...u)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+export async function frameStatus(env) {
+  await ensureCfg(env);
+  const t = safeJson(await cfgGet(env, K.tokens), null);
+  const c = safeJson(await cfgGet(env, K.client), null);
+  const live = !!t && !t.dead && (!!t.refresh || !!(t.access && t.exp > Date.now()));
+  return { connected: live, since: t?.since || null, has_client: !!c?.id, workspace: t?.workspace || null,
+    ...(t?.fail ? { last_refresh_error: { at: new Date(t.fail.at).toISOString(), status: t.fail.status, why: t.fail.why } } : {}),
+    ...(t?.dead ? { needs: 'Adobe refused the saved sign-in. Locus > Settings > New client > Connect Frame.' } : {}) };
+}
+
+/* ---------------- connect ---------------- */
+async function start(env, origin, b) {
+  await ensureCfg(env);
+  const id = String(b.client_id || '').trim(), secret = String(b.client_secret || '').trim();
+  const prev = safeJson(await cfgGet(env, K.client), null);
+  const c = id && secret ? { id, secret } : prev;
+  if (!c?.id || !c?.secret) throw Object.assign(new Error('Paste the Client ID and the Client Secret from the Adobe Developer Console.'), { status: 400 });
+  const redirect = `${origin}/frame/callback`;
+  await cfgSet(env, K.client, JSON.stringify({ ...c, redirect }));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(24)));
+  await cfgSet(env, K.state, JSON.stringify({ state, at: Date.now() }));
+  const q = new URLSearchParams({ client_id: c.id, redirect_uri: redirect, scope: SCOPE, response_type: 'code', state });
+  return { url: `${IMS}/authorize/v2?${q}` };
+}
+
+function page(ok, msg) {
+  const e = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Frame</title>
+<body style="font:16px system-ui;padding:40px 16px;color:#13202B;max-width:560px;margin:0 auto"><h2>${ok ? 'Frame is connected' : 'Frame did not connect'}</h2><p>${e(msg)}</p>
+<p><a href="https://locus.go-mobius-digital.com/profit/?open=settings">Back to Locus</a>. You can close this tab.</p></body>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+}
+
+export async function frameCallback(env, url) {
+  await ensureCfg(env);
+  const st = safeJson(await cfgGet(env, K.state), null);
+  if (url.searchParams.get('error')) { await cfgSet(env, K.state, null); return page(false, `Adobe said: ${clip(url.searchParams.get('error_description') || url.searchParams.get('error'), 200)}`); }
+  if (!st) return page(false, 'This sign-in link was already used or is out of date. Go back to Locus and click Connect Frame again.');
+  if (Date.now() - st.at > 20 * 60e3) return page(false, 'The sign-in took longer than 20 minutes. Go back to Locus and click Connect Frame again.');
+  if (url.searchParams.get('state') !== st.state) return page(false, 'That sign-in was started from an older click. Click Connect Frame once and finish in the tab it opens.');
+  const code = url.searchParams.get('code');
+  if (!code) return page(false, 'Adobe sent no sign-in code back.');
+  const c = safeJson(await cfgGet(env, K.client), null);
+  if (!c?.id) return page(false, 'Locus lost the Frame client. Click Connect Frame again.');
+  const body = new URLSearchParams({ grant_type: 'authorization_code', client_id: c.id, client_secret: c.secret, code });
+  const r = await F(`${IMS}/token/v3`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  const j = await r.json().catch(() => ({}));
+  await cfgSet(env, K.state, null);
+  if (!r.ok || !j.access_token) return page(false, `Adobe said: ${clip(j.error_description || j.error || r.status, 200)}`);
+  await cfgSet(env, K.tokens, JSON.stringify({ access: j.access_token, refresh: j.refresh_token || '', exp: Date.now() + (j.expires_in || 3600) * 1000, since: new Date().toISOString() }));
+  /* Say what the token can see, so a wrong Adobe account is obvious right away. */
+  let seen = '';
+  try { const ws = await frameWorkspaces(env); seen = ws.length ? ` Workspaces: ${ws.map(w => w.name).join(', ')}.` : ' No workspaces are visible to this login.'; } catch (e) { seen = ` Could not list workspaces yet: ${e.message}`; }
+  return page(true, `New clients get a Frame project automatically.${seen}`);
+}
+
+async function disconnect(env) { await ensureCfg(env); for (const k of Object.values(K)) await cfgSet(env, k, null); }
+
+/** A live access token, refreshed before expiry. Null = not connected.
+ *
+ * 2026-11-06: Frame dropped on its own after Nov 4. The old code DELETED the tokens on any 400/401 from
+ * Adobe's refresh, and several Frame calls run at once (a burst of /api/frame/children), so two of them
+ * could refresh the same token together: Adobe rotates the refresh token, the loser gets invalid_grant
+ * and wiped the row the winner had just saved. Now: one refresh at a time (a 30 s lock row), the loser
+ * waits and reads the winner's token, and a failure NEVER deletes anything. It is written on the row as
+ * `fail` {at, status, why}; after a 400/401 the row is `dead` until a refresh works again (retried at most
+ * every 10 minutes) or Cole reconnects. Status says why, so a drop is never silent again. */
+const LOCK = 'frame_refresh_lock';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+export async function frameToken(env, force = false) {
+  await ensureCfg(env);
+  const t = safeJson(await cfgGet(env, K.tokens), null);
+  if (!t?.access) return null;
+  if (!force && !t.dead && t.exp > Date.now() + 60e3) return t.access;
+  const c = safeJson(await cfgGet(env, K.client), null);
+  if (!t.refresh || !c?.id) return t.exp > Date.now() + 60e3 && !t.dead ? t.access : null;
+  if (t.dead && Date.now() - (t.fail?.at || 0) < 10 * 60e3) return null;
+  /* One refresh at a time. A stale lock (over 30 s) is taken over. */
+  const now0 = Date.now();
+  const got = await env.DB.prepare(`INSERT INTO p_studio_cfg (key, value, updated_at) VALUES (?1, ?2, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at WHERE CAST(p_studio_cfg.value AS INTEGER) < ?3`)
+    .bind(LOCK, String(now0), now0 - 30e3).run().catch(() => null);
+  if (!got?.meta?.changes) {
+    for (let i = 0; i < 8; i++) {
+      await sleep(750);
+      const n = safeJson(await cfgGet(env, K.tokens), null);
+      if (n?.access && n.access !== t.access && !n.dead && n.exp > Date.now() + 60e3) return n.access;
+    }
+    return null;
+  }
+  try {
+    /* Someone may have refreshed between our read and the lock. */
+    const cur = safeJson(await cfgGet(env, K.tokens), null) || t;
+    if (cur.access !== t.access && !cur.dead && cur.exp > Date.now() + 60e3) return cur.access;
+    const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: c.id, client_secret: c.secret, refresh_token: cur.refresh });
+    const r = await F(`${IMS}/token/v3`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body }).catch(e => ({ ok: false, status: 0, _e: e }));
+    const j = r?.json ? await r.json().catch(() => ({})) : {};
+    if (!r?.ok || !j.access_token) {
+      const why = clip(String(j.error_description || j.error || r?._e?.message || `HTTP ${r?.status}`), 200);
+      const dead = [400, 401].includes(r?.status);
+      await cfgSet(env, K.tokens, JSON.stringify({ ...cur, dead: dead || !!cur.dead, fail: { at: Date.now(), status: r?.status || 0, why } }));
+      console.log(`frame refresh failed: ${r?.status} ${why}`);
+      return !dead && cur.exp > Date.now() + 60e3 ? cur.access : null;
+    }
+    const { dead: _d, fail: _f, ...keep } = cur;
+    await cfgSet(env, K.tokens, JSON.stringify({ ...keep, access: j.access_token, refresh: j.refresh_token || cur.refresh, exp: Date.now() + (j.expires_in || 3600) * 1000, refreshed: new Date().toISOString() }));
+    return j.access_token;
+  } finally {
+    await cfgSet(env, LOCK, null).catch(() => {});
+  }
+}
+
+/* ---------------- API ---------------- */
+export const NEEDS_FRAME = 'Frame is not connected. Locus > Settings > New client > Connect Frame (an Adobe Developer Console app, one time). Until then: make the project in Frame by hand.';
+export async function frameApi(env, method, path, body) {
+  const tok = await frameToken(env);
+  if (!tok) throw new Error(NEEDS_FRAME);
+  const run = async t => F(`${API}${path}`, { method, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json', Accept: 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let res = await run(tok);
+  if (res.status === 401) { const t2 = await frameToken(env, true); if (t2) res = await run(t2); }
+  const text = await res.text();
+  const j = safeJson(text, {});
+  if (!res.ok) throw Object.assign(new Error(`Frame (${method} ${path}): ${j.errors?.[0]?.detail || j.errors?.[0]?.title || j.message || `${res.status} ${text.slice(0, 200)}`}`), { status: res.status });
+  return j;
+}
+/* V4 answers are {data: ...}; lists may page with links.next. */
+async function all(env, path) {
+  const out = [];
+  let next = path;
+  for (let i = 0; i < 20 && next; i++) {
+    const j = await frameApi(env, 'GET', next);
+    out.push(...(Array.isArray(j.data) ? j.data : []));
+    const n = j.links?.next;
+    /* links.next comes back as "/v4/accounts/..." (or a full URL): strip down to the path after /v4,
+       or page 2 asked for /v4/v4/... and every folder over 100 items silently stopped at page 1. */
+    next = n ? n.replace(/^https?:\/\/[^/]+/, '').replace(/^\/?v4(?=\/)/, '') : null;
+    if (next && !next.startsWith('/')) next = '/' + next;
+  }
+  return out;
+}
+
+/** A Frame file's original download link (signed, short-lived: hand it on at once), by file id. Every account the
+ *  login sees is tried, so the caller needs only the id frame_list gave. Returns { id, name, url, type }. */
+export async function frameFileDownload(env, fileId) {
+  const id = String(fileId || '').trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error(`"${id}" is not a Frame file id. Read it with frame_list.`);
+  for (const a of await all(env, '/accounts')) {
+    const j = await frameApi(env, 'GET', `/accounts/${a.id}/files/${id}?include=media_links.original`).catch(() => null);
+    if (!j?.data) continue;
+    const url = j.data.media_links?.original?.download_url;
+    if (!url) throw new Error(`Frame has no download for "${j.data.name}" yet (still uploading or processing?).`);
+    return { id, name: j.data.name, url, type: j.data.media_type || j.data.type || '' };
+  }
+  throw new Error(`No Frame file has the id ${id}.`);
+}
+
+export async function frameWorkspaces(env) {
+  const accounts = await all(env, '/accounts');
+  const out = [];
+  for (const a of accounts) {
+    const ws = await all(env, `/accounts/${a.id}/workspaces`).catch(() => []);
+    for (const w of ws) out.push({ id: w.id, name: w.name, account_id: a.id, account: a.display_name || a.name || '' });
+  }
+  return out;
+}
+/** The workspace new client projects go in: the chosen one, else the first. */
+async function pickWorkspace(env) {
+  const ws = await frameWorkspaces(env);
+  if (!ws.length) throw new Error('This Frame login sees no workspace. Connect Frame with the login that owns the Mobius workspace.');
+  const want = safeJson((await env.DB.prepare(`SELECT value FROM settings WHERE key = 'frameWorkspace'`).first().catch(() => null))?.value, null);
+  return (want && ws.find(w => w.id === want)) || ws[0];
+}
+
+/** One project per client, the picked team added. Returns { project, url, notes }. */
+export async function frameProject(env, name, emails, prev = {}) {
+  const notes = [];
+  let project = prev.project || null, url = prev.url || null, account = prev.account || null;
+  if (!project) {
+    const w = await pickWorkspace(env);
+    const p = await frameApi(env, 'POST', `/accounts/${w.account_id}/workspaces/${w.id}/projects`, { data: { name } });
+    project = p.data?.id; account = w.account_id;
+    if (!project) throw new Error('Frame made no project.');
+    url = `https://next.frame.io/project/${project}`;
+    /* Every client project has the same two folders (the 2026-10-03 cleanup: no pods, one project per client). */
+    const root = p.data?.root_folder_id || (await frameApi(env, 'GET', `/accounts/${account}/projects/${project}`).catch(() => null))?.data?.root_folder_id;
+    if (root) for (const f of ['Ad Concepts', 'Clips/B-Roll']) await frameApi(env, 'POST', `/accounts/${account}/folders/${root}/folders`, { data: { name: f } }).catch(e => notes.push(`Folder "${f}" not made: ${e.message}`));
+  }
+  /* The picked team goes on the project (PATCH .../projects/{p}/users/{user}, 2026-10-03). Ahsan and Noma
+     are NOT workspace members, so without this they cannot see a new client at all. People are matched
+     by Frame account email, else first name (Frame emails differ from Asana's for Ravo and William). */
+  if (emails.length && account) {
+    const users = await all(env, `/accounts/${account}/users?page_size=100`).catch(() => []);
+    const roster = safeJson((await env.DB.prepare(`SELECT value FROM settings WHERE key = 'newClientTeam'`).first().catch(() => null))?.value, null) || [];
+    for (const e of emails) {
+      const first = (roster.find(t => String(t.email || '').toLowerCase() === e)?.name || e.split('@')[0]).toLowerCase().split(/\s+/)[0];
+      const u = users.find(x => (x.user?.email || x.email || '').toLowerCase() === e) || users.find(x => (x.user?.name || x.name || '').toLowerCase().split(/\s+/)[0] === first);
+      const uid = u?.user?.id || u?.id;
+      if (!uid) { notes.push(`${e} is not in the Frame account: invite them in Frame, then add them to the project.`); continue; }
+      await frameApi(env, 'PATCH', `/accounts/${account}/projects/${project}/users/${uid}`, { data: { role: 'full_access' } }).catch(err => notes.push(`${e} not added to the Frame project: ${err.message}`));
+    }
+  }
+  return { project, url, account, notes };
+}
+
+/** Everything, read-only: for the audit. depth > 0 also walks folders (names, file counts, newest file). */
+export async function frameTree(env, depth = 0) {
+  const out = [];
+  const walk = async (acct, folderId, level) => {
+    const items = await all(env, `/accounts/${acct}/folders/${folderId}/children?page_size=100`).catch(e => [{ type: 'error', name: e.message }]);
+    const folders = items.filter(i => i.type === 'folder');
+    const files = items.filter(i => i.type !== 'folder');
+    const newest = files.map(f => f.updated_at || f.inserted_at || '').sort().pop() || null;
+    return { files: files.length, newest, folders: level < depth ? await Promise.all(folders.map(async f => ({ id: f.id, name: f.name, updated: f.updated_at, ...(await walk(acct, f.id, level + 1)) }))) : folders.map(f => ({ id: f.id, name: f.name, updated: f.updated_at })) };
+  };
+  for (const w of await frameWorkspaces(env)) {
+    const projects = await all(env, `/accounts/${w.account_id}/workspaces/${w.id}/projects`).catch(e => [{ name: `(could not list: ${e.message})` }]);
+    out.push({ ...w, projects: await Promise.all(projects.map(async p => ({ id: p.id, name: p.name, updated: p.updated_at || p.inserted_at, root: p.root_folder_id || null,
+      ...(depth && p.root_folder_id ? await walk(w.account_id, p.root_folder_id, 1) : {}) }))) });
+  }
+  return out;
+}
+
+/* ---------------- routes ---------------- */
+export async function handleFrame(request, env, url, path, json, isAdmin) {
+  if (path === '/frame/callback' && request.method === 'GET') return frameCallback(env, url);
+  if (!path.startsWith('/api/frame/')) return null;
+  if (!(await isAdmin(request, env))) return json({ error: 'unauthorized' }, 401);
+  const b = request.method === 'GET' ? {} : await request.json().catch(() => ({}));
+  try {
+    if (path === '/api/frame/status') return json(await frameStatus(env));
+    if (path === '/api/frame/start' && request.method === 'POST') return json(await start(env, url.origin, b));
+    if (path === '/api/frame/disconnect' && request.method === 'POST') { await disconnect(env); return json({ ok: true }); }
+    if (path === '/api/frame/tree') return json({ ok: true, workspaces: await frameTree(env, Math.min(4, Number(url.searchParams.get('depth')) || 0)) });
+    if (path === '/api/frame/workspace' && request.method === 'POST') {
+      await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('frameWorkspace', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(JSON.stringify(String(b.id || ''))).run();
+      return json({ ok: true });
+    }
+    /* Tidying (2026-10-03, the pods -> one project per client cleanup). Admin only; nothing here deletes
+       a file. A folder is deleted only when it is empty. Frame allows 10 moves a minute. */
+    const A = String(b.account_id || '');
+    if (path === '/api/frame/project' && request.method === 'POST') {
+      const p = await frameApi(env, 'POST', `/accounts/${A}/workspaces/${b.workspace_id}/projects`, { data: { name: String(b.name || '').slice(0, 120) } });
+      return json({ ok: true, project: p.data });
+    }
+    if (path === '/api/frame/project-update' && request.method === 'POST') {
+      const data = Object.fromEntries(['name', 'status', 'restricted'].filter(k => b[k] !== undefined).map(k => [k, b[k]]));
+      return json({ ok: true, project: (await frameApi(env, 'PATCH', `/accounts/${A}/projects/${b.project_id}`, { data })).data });
+    }
+    if (path === '/api/frame/folder' && request.method === 'POST') {
+      return json({ ok: true, folder: (await frameApi(env, 'POST', `/accounts/${A}/folders/${b.parent_id}/folders`, { data: { name: String(b.name || '').slice(0, 120) } })).data });
+    }
+    if (path === '/api/frame/rename' && request.method === 'POST') {
+      return json({ ok: true, folder: (await frameApi(env, 'PATCH', `/accounts/${A}/folders/${b.folder_id}`, { data: { name: String(b.name || '').slice(0, 120) } })).data });
+    }
+    if (path === '/api/frame/move' && request.method === 'POST') {
+      return json({ ok: true, folder: (await frameApi(env, 'PATCH', `/accounts/${A}/folders/${b.folder_id}/move`, { data: { parent_id: b.parent_id } })).data });
+    }
+    /* No delete routes on purpose: a review link can point at a folder or a project, so even an empty one
+       may be carrying links people use (see the header). */
+    /* Who can see what, read-only: account members, workspace members, and each project's people. */
+    if (path === '/api/frame/access') {
+      const ws = await frameWorkspaces(env);
+      const who = u => ({ id: u.user?.id || u.id, name: u.user?.name || u.name || '', email: (u.user?.email || u.email || '').toLowerCase(), role: u.role });
+      const out = { account: (await all(env, `/accounts/${ws[0].account_id}/users?page_size=100`).catch(e => [{ name: `error: ${e.message}` }])).map(who), workspaces: [] };
+      for (const w of ws) {
+        const projects = await all(env, `/accounts/${w.account_id}/workspaces/${w.id}/projects`);
+        const pu = [];
+        for (const p of projects) pu.push({ id: p.id, name: p.name, restricted: !!p.restricted, users: (await all(env, `/accounts/${w.account_id}/projects/${p.id}/users?page_size=100`).catch(e => [{ name: `error: ${e.message}` }])).map(who) });
+        out.workspaces.push({ name: w.name, users: (await all(env, `/accounts/${w.account_id}/workspaces/${w.id}/users?page_size=100`).catch(e => [{ name: `error: ${e.message}` }])).map(who), projects: pu });
+      }
+      return json({ ok: true, ...out });
+    }
+    /* Does a review link still work? {enabled, short_url, assets} or Frame's error. */
+    if (path === '/api/frame/share' && request.method === 'POST') {
+      const s = await frameApi(env, 'GET', `/accounts/${A}/shares/${b.share_id}`).catch(e => ({ error: e.message }));
+      if (s.error) return json({ ok: false, error: s.error });
+      const assets = await frameApi(env, 'GET', `/accounts/${A}/shares/${b.share_id}/assets?page_size=5`).catch(e => ({ error: e.message }));
+      return json({ ok: true, enabled: s.data?.enabled, name: s.data?.name, url: s.data?.short_url, assets: assets.error ? assets.error : (assets.data || []).length });
+    }
+    /* Put a person on a project (or change their role). Roles: full_access, editor, edit_only, commenter, viewer. */
+    if (path === '/api/frame/project-user' && request.method === 'POST') {
+      return json({ ok: true, ...(await frameApi(env, 'PATCH', `/accounts/${A}/projects/${b.project_id}/users/${b.user_id}`, { data: { role: b.role || 'editor' } })) });
+    }
+    /* The account's audit log (experimental API, needs the api-version header), newest first. */
+    if (path === '/api/frame/audit') {
+      const tok = await frameToken(env);
+      const ws = await frameWorkspaces(env);
+      const r = await F(`${API}/accounts/${ws[0].account_id}/audit_logs?page_size=${Math.min(100, Number(url.searchParams.get('n')) || 100)}${url.searchParams.get('after') ? `&after=${encodeURIComponent(url.searchParams.get('after'))}` : ''}`, { headers: { Authorization: `Bearer ${tok}`, 'api-version': 'experimental', Accept: 'application/json' } });
+      return json({ ok: r.ok, status: r.status, ...safeJson(await r.text(), {}) });
+    }
+    /* Put finished Studio ads into a Frame folder (2026-10-09). Frame fetches each file itself from its
+       public Studio address (remote upload), so nothing passes through this Worker. Studio addresses only. */
+    if (path === '/api/frame/upload' && request.method === 'POST') {
+      const out = [];
+      for (const f of (Array.isArray(b.files) ? b.files : []).slice(0, 30)) {
+        const src = String(f.url || '');
+        if (!/^https:\/\/mobius-profit\.mobius-digital\.workers\.dev\/api\/studio\/img\/[a-f0-9]{24}\/(full|story)$/.test(src)) { out.push({ name: f.name, error: 'not a Studio image' }); continue; }
+        const r = await frameApi(env, 'POST', `/accounts/${A}/folders/${b.folder_id}/files/remote_upload`, { data: { name: String(f.name || 'ad.png').slice(0, 120), source_url: src } }).catch(e => ({ error: e.message }));
+        out.push(r.error ? { name: f.name, error: r.error } : { name: f.name, id: r.data?.id });
+      }
+      return json({ ok: true, files: out });
+    }
+    /* One folder's children (the caller walks the tree; one request per folder keeps under the subrequest cap). */
+    if (path === '/api/frame/children' && request.method === 'POST') {
+      const items = await all(env, `/accounts/${A}/folders/${b.folder_id}/children?page_size=100`);
+      return json({ ok: true, items: items.map(i => ({ id: i.id, name: i.name, type: i.type })) });
+    }
+    return json({ error: 'not found' }, 404);
+  } catch (e) { return json({ error: e.message }, e.status || 500); }
+}

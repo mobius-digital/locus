@@ -1,0 +1,581 @@
+"use client";
+
+import { useBrand } from "./BrandProvider";
+import { useDisplayName } from "./DisplayName";
+import { hub } from "@/hub.config";
+import { usePathname, useRouter } from "next/navigation";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+
+/**
+ * The first-run guided tour.
+ *
+ * Mounted once in the layout rather than inside a page, for two reasons the
+ * previous version got wrong: it now survives navigating between Calendar,
+ * Board and Changelog, so the tour can actually show all three, and it
+ * survives the board switching from its empty state to its populated one, which
+ * used to remount the component and silently restart the tour the moment
+ * somebody created their first event.
+ *
+ * Position is kept in sessionStorage for the same reason: a route change tears
+ * down and rebuilds React state, and the reader should not lose their place.
+ *
+ * Steps read the live page rather than being told about it, so the ones that
+ * ask for an action advance on their own once it happens.
+ */
+
+/**
+ * Per board, not per browser.
+ *
+ * One flag for the whole device meant a person who works across brands saw the
+ * walkthrough once ever — so the next team to be given a board got no
+ * introduction to it, because somebody else had already dismissed the tour
+ * somewhere else entirely. The board is what the tour is about, so the board is
+ * what it is remembered against.
+ */
+const doneKey = (slug: string) => `lc_tour_done:${slug}`;
+const OPEN_KEY = "lc_tour_open";
+const INDEX_KEY = "lc_tour_index";
+
+type TourContext = {
+  path: string;
+  editorOpen: boolean;
+  statusMenuOpen: boolean;
+  filtered: boolean;
+  hasCards: boolean;
+};
+
+type Step = {
+  id: string;
+  /** CSS selector to spotlight. Omit for a centerd, page-level step. */
+  target?: string;
+  title: string;
+  body: string;
+  /** Route this step needs to be on; the tour navigates there itself. */
+  goto?: string;
+  /** Shown instead of "Next" while the step waits on the reader. */
+  action?: string;
+  /** When this becomes true the step completes on its own. */
+  done?: (ctx: TourContext) => boolean;
+  /**
+   * Do not skip this step just because its target is missing at the instant we
+   * arrive — wait for it. Used for anything that appears a beat later than the
+   * step does: the editor fields, and the first card after it is saved.
+   *
+   * If it still has not appeared after the grace period the step is skipped,
+   * so the reader never sits looking at a tip that highlights nothing.
+   */
+  keepIfMissing?: boolean;
+};
+
+const STEPS: Step[] = [
+  {
+    id: "welcome",
+    goto: "/",
+    title: "Welcome to {productName}",
+    body: "This is where your team sees what is launching, when, where each launch is in its prep, and which channels need to care. A few minutes and you will know your way around, including how to add your first launch.",
+  },
+  {
+    id: "views",
+    goto: "/",
+    target: ".topbar__tabs, .tabbar",
+    title: "Three screens",
+    body: "Calendar is when things go live. Board is where each launch is in its prep, one column per stage. Changelog records every edit automatically. We will visit all three.",
+  },
+  {
+    id: "create",
+    goto: "/",
+    target: ".topbar__right .button--primary, .fab, .hello .button",
+    title: "Let's put something on the board",
+    body: "Everything starts here. Open it and we will go through the form together, field by field. On the calendar you can also click any day to start an event on that date.",
+    action: "Open the editor to continue",
+    done: (ctx) => ctx.editorOpen,
+  },
+
+  // ---- inside the editor -------------------------------------------------
+  {
+    id: "f-name",
+    target: "#event-name",
+    keepIfMissing: true,
+    title: "Name: what the team will call it",
+    body: "Use the name people already say out loud, not a campaign code. Good: Spring Collection Restock, Father's Day Sale, LGW02 Wedge Launch. Avoid: Q2-P3-FINAL.",
+  },
+  {
+    id: "f-brief",
+    target: "#event-brief",
+    keepIfMissing: true,
+    title: "Brief: the offer in one sentence",
+    body: "What a media buyer needs to know before writing an ad. Good: 25% off all wedges, sitewide, no code needed. One sentence is plenty.",
+  },
+  {
+    id: "f-owner",
+    target: "#event-owner",
+    keepIfMissing: true,
+    title: "Owner: one name, not a team",
+    body: "The person to ask when a date looks wrong. It starts on you, because whoever adds an event usually owns it, and the list holds everyone on this board. Owner is somebody who never signs in here? Pick Someone else and type them.",
+  },
+  {
+    id: "f-launch",
+    target: "#event-launch_date",
+    keepIfMissing: true,
+    title: "Launch date: the anchor",
+    body: "The day it goes live. Everything else on this form is described in relation to this date, so set it even if it is still a rough guess. You can mark it Tentative below to say so.",
+  },
+  {
+    id: "f-runup",
+    target: ".date-grid:not(.date-grid--single)",
+    keepIfMissing: true,
+    title: "Run-up dates: what makes this useful to everyone else",
+    body: "The deadlines behind the launch, and why other channels care. Assets due: when creative must be finished. Teasers start: when you begin hinting publicly. Inventory: when stock actually lands. Promo ends: when the offer stops. Fill in the ones you know. They show up on the calendar's agenda as their own lines.",
+  },
+  {
+    id: "f-stage",
+    target: "#event-stage",
+    keepIfMissing: true,
+    title: "Stage: what are we waiting on?",
+    body: "Briefed, waiting on assets, built, scheduled. This is the column the launch sits in on the Board and the color of its chip on the calendar. The list is yours to change in Settings, so a photo shoot or a client sign-off can be a stage of its own.",
+  },
+  {
+    id: "f-status",
+    target: "#event-status",
+    keepIfMissing: true,
+    title: "Status: is this date real?",
+    body: "Confirmed: locked, build against it. Tentative: it could still move, so do not book media yet. At risk: it was locked and is now slipping; this is the one that earns a red mark. Completed: it shipped, and it drops off the views unless you tick Show completed. Cancelled: it is off, but the event and its history stay.",
+  },
+  {
+    id: "f-channels",
+    target: ".channel-rows",
+    keepIfMissing: true,
+    title: "Channels: who has work to do",
+    body: "Tick every channel involved, then set how much it matters to each. Primary builds something; it is their main event. Supporting helps, but it is not their headline. FYI just needs to know. Only Primary counts toward clash warnings, so use it honestly. A channel that is not listed? Add it in Settings.",
+  },
+  {
+    id: "f-assets",
+    target: "#event-assets-link",
+    keepIfMissing: true,
+    title: "Assets link: one place for the finished files",
+    body: "Leave it empty until there is something to point at. When the photos, video or copy are ready, paste the folder link here. The moment you save it, every channel on the event is told the assets are in, with a button straight to the folder.",
+  },
+  {
+    id: "f-notes",
+    target: "#event-notes",
+    keepIfMissing: true,
+    title: "Notes: the caveats",
+    body: "Anything that would otherwise live in a DM. Waiting on the factory to confirm shipping. Do not promote before the PR embargo lifts on the 12th. It rides along on every Slack message about the event, so when a date moves, the reason moves with it.",
+  },
+  {
+    id: "save",
+    target: ".sheet__footer",
+    keepIfMissing: true,
+    title: "Save it",
+    body: "Only the starred fields are required. The rest can be filled in later as things firm up. Every change you make from here on is recorded automatically with your name against it.",
+    action: "Save, or close the editor, to continue",
+    done: (ctx) => !ctx.editorOpen,
+  },
+
+  // ---- back on the calendar ----------------------------------------------
+  {
+    id: "chips",
+    goto: "/",
+    target: ".evt, .arow",
+    keepIfMissing: true,
+    title: "A launch on the calendar",
+    body: "Each chip runs from teaser start to the end of the promo, hatched before launch day and solid from it on, in the color of its stage. Drag a chip to another day and the whole launch moves with it, run-up dates included. Tentative reads dashed; at risk carries a red dot.",
+  },
+  {
+    id: "channel-filter",
+    goto: "/",
+    target: ".filters__chips",
+    title: "Filter to your channel",
+    body: "Pick the channel you work in and every view narrows to only what involves you. Your choice is remembered per device, so you land here already filtered.",
+  },
+  {
+    id: "views-switch",
+    goto: "/",
+    target: ".segmented",
+    title: "Month, week, or agenda",
+    body: "Month shows the gaps across a quarter. Week shows what lands on which day. Agenda is the same calendar as a list, launches and their deadlines together, and it is what a phone opens on.",
+  },
+
+  // ---- the board -----------------------------------------------------------
+  {
+    id: "board",
+    goto: "/board",
+    target: ".board, .empty-state",
+    keepIfMissing: true,
+    title: "Board: where each launch is in its prep",
+    body: "One column per stage. Drag a card into the column that says what it is waiting on now; the changelog and Slack are told like any other edit. On a phone, the stage menu on each card does the same.",
+  },
+  {
+    id: "stage-menu",
+    goto: "/board",
+    target: ".bcard .pill-menu",
+    keepIfMissing: true,
+    title: "Change a stage without opening anything",
+    body: "That badge on the card is a menu. The status badge works the same way wherever you see one.",
+  },
+
+  // ---- the other screens ---------------------------------------------------
+  {
+    id: "changelog",
+    goto: "/changelog",
+    target: ".log-day, .empty",
+    title: "Changelog: who changed what, and when",
+    body: "Written automatically on every edit, so nobody has to remember to record anything. If a date moved and you want to know who moved it and when, it is here.",
+  },
+  {
+    id: "settings",
+    goto: "/",
+    target: ".topbar .iconbtn, .tabbar__item[aria-haspopup]",
+    title: "Settings: everything a team can change",
+    body: "One window, sections down the left. Your account: the name stamped on your edits. Walkthrough: replay this any time. Add to your phone: the two taps that put the board on a home screen. Stages: the Board's columns and chip colors. Event types and Channels: the words your team uses. Slack notifications: which channel hears about what. Users: who can open this board.",
+  },
+  {
+    id: "done",
+    goto: "/",
+    title: "That's the whole thing",
+    body: "You can replay this any time from Settings. Now go and put your next launch on the board.",
+  },
+];
+
+// ---------------------------------------------------------------------------
+
+type TourApi = { replay: () => void };
+const TourControls = createContext<TourApi | null>(null);
+
+export function useTour(): TourApi {
+  const context = useContext(TourControls);
+  if (!context) throw new Error("useTour must be used inside <TourProvider>");
+  return context;
+}
+
+export function TourProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const { slug } = useBrand();
+  // On a first visit the name question comes first: two dialogs stacked on
+  // each other is nobody's welcome, and the tour points at a board that is
+  // behind both of them.
+  const { settlingName } = useDisplayName();
+  const DONE_KEY = doneKey(slug);
+  const [open, setOpen] = useState(false);
+  const [index, setIndex] = useState(0);
+  const [ready, setReady] = useState(false);
+
+  // The sign-in screen is not the board: a walkthrough of a board somebody
+  // has not been let into yet is nonsense, and it covers the very button
+  // they came to press.
+  const signedOut = pathname.endsWith("/password");
+
+  // Restore where the reader had got to. Without this a route change — which
+  // the tour now does on purpose — would drop them back at step one.
+  useEffect(() => {
+    if (signedOut) {
+      setReady(true);
+      return;
+    }
+    const resumed = window.sessionStorage.getItem(OPEN_KEY) === "true";
+    if (resumed) {
+      setIndex(Number(window.sessionStorage.getItem(INDEX_KEY) ?? 0) || 0);
+      setOpen(true);
+    } else if (window.localStorage.getItem(DONE_KEY) !== "true") {
+      setOpen(true);
+    }
+    setReady(true);
+  }, [signedOut, DONE_KEY]);
+
+  useEffect(() => {
+    if (!ready) return;
+    window.sessionStorage.setItem(OPEN_KEY, open ? "true" : "false");
+    window.sessionStorage.setItem(INDEX_KEY, String(index));
+  }, [open, index, ready]);
+
+  const replay = useCallback(() => {
+    window.localStorage.removeItem(DONE_KEY);
+    setIndex(0);
+    setOpen(true);
+  }, [DONE_KEY]);
+
+  const finish = useCallback(() => {
+    window.localStorage.setItem(DONE_KEY, "true");
+    window.sessionStorage.setItem(OPEN_KEY, "false");
+    setOpen(false);
+  }, [DONE_KEY]);
+
+  return (
+    <TourControls.Provider value={{ replay }}>
+      {children}
+      {/* Never over the sign-in screen. The provider wraps every route, and a
+          first-time visitor arrives there before anywhere else. The tour would
+          sit on top of the password box and block the way in. */}
+      {ready && open && !signedOut && !settlingName && (
+        <Walkthrough index={index} setIndex={setIndex} finish={finish} />
+      )}
+    </TourControls.Provider>
+  );
+}
+
+function Walkthrough({
+  index,
+  setIndex,
+  finish,
+}: {
+  index: number;
+  setIndex: (value: number | ((current: number) => number)) => void;
+  finish: () => void;
+}) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const brand = useBrand();
+  const { path } = brand;
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  // A dialog — the name prompt, change password, sign-in settings — has to be
+  // usable while the tour is up. The tour paints above everything, so it steps
+  // aside entirely rather than burying the dialog under its own dim.
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [tipHeight, setTipHeight] = useState(0);
+
+  const step = STEPS[index];
+
+  const readContext = useCallback(
+    (): TourContext => ({
+      path: window.location.pathname,
+      editorOpen: Boolean(document.querySelector(".sheet")),
+      statusMenuOpen: Boolean(document.querySelector(".menu__list")),
+      filtered: Boolean(document.querySelector(".chip-filter--active")),
+      hasCards: Boolean(document.querySelector(".bcard, .evt, .arow")),
+    }),
+    [],
+  );
+
+  const next = useCallback(() => {
+    setIndex((current) => {
+      let candidate = current + 1;
+      while (candidate < STEPS.length) {
+        const entry = STEPS[candidate];
+        const onAnotherPage = entry.goto && entry.goto !== window.location.pathname;
+        // Never skip on a missing target when the step lives on a page we have
+        // not navigated to yet, or when it is an editor field that is about to
+        // be rendered — in both cases "missing" only means "not yet".
+        if (
+          !entry.target ||
+          entry.keepIfMissing ||
+          onAnotherPage ||
+          document.querySelector(entry.target)
+        ) {
+          break;
+        }
+        candidate += 1;
+      }
+      return candidate;
+    });
+  }, [setIndex]);
+
+  useEffect(() => {
+    if (index >= STEPS.length) finish();
+  }, [index, finish]);
+
+  // Take the reader to the screen this step is about.
+  useEffect(() => {
+    if (!step?.goto || step.goto === pathname) return;
+    router.push(path(step.goto === "/" ? "/" : step.goto));
+  }, [step, pathname, router]);
+
+  // Watch for a dialog opening or closing.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setDialogOpen(Boolean(document.querySelector(".scrim > .dialog")));
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  /**
+   * A step that waited for its target and never got one is skipped.
+   *
+   * Without this, "keep waiting" turned into "sit here forever pointing at
+   * nothing" whenever the thing genuinely was not on the page — an empty week
+   * has no card, so the status-menu step had nothing to highlight.
+   */
+  useEffect(() => {
+    if (!step?.target || !step.keepIfMissing) return;
+    if (document.querySelector(step.target)) return;
+
+    const deadline = window.setTimeout(() => {
+      if (!document.querySelector(step.target!)) next();
+    }, 1200);
+
+    return () => window.clearTimeout(deadline);
+  }, [step, next]);
+
+  useLayoutEffect(() => {
+    const measured = tipRef.current?.offsetHeight ?? 0;
+    if (measured && measured !== tipHeight) setTipHeight(measured);
+  });
+
+  // Keep the spotlight on the target through scrolling and layout changes.
+  useEffect(() => {
+    if (!step) return;
+    let frame = 0;
+
+    const loop = () => {
+      if (step.target) {
+        const el = document.querySelector(step.target);
+        setRect(el ? el.getBoundingClientRect() : null);
+      } else {
+        setRect(null);
+      }
+      frame = window.requestAnimationFrame(loop);
+    };
+
+    const el = step.target ? document.querySelector(step.target) : null;
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+
+    frame = window.requestAnimationFrame(loop);
+    return () => window.cancelAnimationFrame(frame);
+  }, [step]);
+
+  // Action steps complete themselves.
+  useEffect(() => {
+    if (!step?.done) return;
+    const timer = window.setInterval(() => {
+      if (step.done!(readContext())) next();
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [step, readContext, next]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+
+      // Escape belongs to whatever is on top. While the editor, a dialog or a
+      // status menu is open that keypress is meant for them — ending the tour
+      // too would mean closing the editor mid-tour silently killed it.
+      if (document.querySelector(".sheet, .dialog, .menu__list")) return;
+      finish();
+    };
+
+    // Capture phase, deliberately. React's handlers run first on the way up, so
+    // a bubbling listener would find the editor already closed and the guard
+    // above would let the key through — ending the tour every time.
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [finish]);
+
+  if (!step || index >= STEPS.length) return null;
+  // Yield the screen to a dialog rather than covering it.
+  if (dialogOpen) return null;
+
+  const pad = 8;
+  const spotlight = rect && rect.width > 0
+    ? {
+        top: rect.top - pad,
+        left: rect.left - pad,
+        width: rect.width + pad * 2,
+        height: rect.height + pad * 2,
+      }
+    : null;
+
+  /**
+   * Placed against the tip's measured height rather than a guess.
+   *
+   * The old version assumed 240px was enough room below; the longer steps are
+   * closer to 400, so their buttons ended up under the bottom of the window
+   * with no way to reach them.
+   */
+  const tipStyle: React.CSSProperties = spotlight
+    ? (() => {
+        const margin = 16;
+        const height = tipHeight || 260;
+        const left = Math.max(
+          margin,
+          Math.min(spotlight.left, window.innerWidth - 400),
+        );
+
+        const width = 384; // 24rem, matching .tour__tip
+        const below = spotlight.top + spotlight.height + 14;
+        const above = spotlight.top - height - 14;
+
+        if (below + height + margin <= window.innerHeight) return { top: below, left };
+        if (above >= margin) return { top: above, left };
+
+        // No room above or below — a tall target such as the channel rows.
+        // Sit beside it instead, on whichever side has space, so the tip never
+        // covers the thing it is describing. The editor is a right-hand sheet,
+        // so the left is usually wide open.
+        const besideTop = Math.min(
+          Math.max(margin, spotlight.top),
+          window.innerHeight - height - margin,
+        );
+        if (spotlight.left - width - 14 >= margin) {
+          return { top: besideTop, left: spotlight.left - width - 14 };
+        }
+        if (spotlight.left + spotlight.width + 14 + width <= window.innerWidth - margin) {
+          return { top: besideTop, left: spotlight.left + spotlight.width + 14 };
+        }
+
+        // Nowhere fits — keep it fully visible and accept the overlap.
+        return { top: Math.max(margin, window.innerHeight - height - margin), left };
+      })()
+    : { top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
+
+  return (
+    <div className="tour" role="dialog" aria-modal="false" aria-labelledby="tour-title">
+      {spotlight ? (
+        <div className="tour__spotlight" style={spotlight} aria-hidden />
+      ) : (
+        <div className="tour__dim" aria-hidden />
+      )}
+
+      <div className="tour__tip" style={tipStyle} ref={tipRef}>
+        <div className="tour__progress">
+          <span className="tour__count">
+            {index + 1} of {STEPS.length}
+          </span>
+          <span className="tour__bar" aria-hidden>
+            <span
+              className="tour__bar-fill"
+              style={{ width: `${((index + 1) / STEPS.length) * 100}%` }}
+            />
+          </span>
+        </div>
+
+        <h2 className="tour__title" id="tour-title">
+          {step.title.replace("{productName}", hub.name)}
+        </h2>
+        <p className="tour__body">{step.body}</p>
+
+        <div className="tour__actions">
+          <button type="button" className="button button--quiet" onClick={finish}>
+            Skip tour
+          </button>
+
+          {index > 0 && (
+            <button
+              type="button"
+              className="button button--quiet"
+              onClick={() => setIndex((current) => Math.max(0, current - 1))}
+            >
+              Back
+            </button>
+          )}
+
+          {step.action ? (
+            <span className="tour__waiting">{step.action}</span>
+          ) : (
+            <button type="button" className="button button--primary" onClick={next}>
+              {index === STEPS.length - 1 ? "Finish" : "Next"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
