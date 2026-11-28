@@ -1,0 +1,16 @@
+{
+  "email": "team@agency.test",
+  "prefs": {
+    "morning_dm": true,
+    "nudge": {
+      "card:example": {
+        "state": "snoozed",
+        "until": 1790000000000
+      }
+    },
+    "home_tiles": [
+      "sales",
+      "ad_spend"
+    ]
+  }
+}

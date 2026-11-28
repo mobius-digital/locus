@@ -1,0 +1,59 @@
+{
+ "power": false,
+ "can_power": true,
+ "ok": true,
+ "can_edit": true,
+ "can_all": true,
+ "can_team": true,
+ "role_words": {
+  "owner": "the brand owner",
+  "buyer": "the buyer",
+  "strategist": "the strategist",
+  "maker": "the card's maker",
+  "email_owner": "the email owner",
+  "reviewer": "the reviewer"
+ },
+ "roles": {
+  "all": {
+   "owner": "sam@example.com",
+   "buyer": "jordan@example.com"
+  },
+  "brand_northlake_golf": {
+   "strategist": "riley@example.com",
+   "maker": "casey@example.com"
+  }
+ },
+ "brands": [
+  {
+   "id": "brand_northlake_golf",
+   "name": "Northlake Golf"
+  },
+  {
+   "id": "brand_harbor_and_pine",
+   "name": "Harbor & Pine"
+  }
+ ],
+ "team": [
+  {
+   "email": "casey@example.com",
+   "by_hand": true,
+   "name": "Casey Brooks"
+  },
+  {
+   "email": "jordan@example.com",
+   "by_hand": false,
+   "name": "Jordan Lee"
+  },
+  {
+   "email": "riley@example.com",
+   "by_hand": false,
+   "name": "Riley Chen"
+  },
+  {
+   "email": "sam@example.com",
+   "by_hand": false,
+   "name": "Sam Rivera"
+  }
+ ],
+ "note": "A role nobody holds falls back to the person who made the automation, and the run log says so. \"The whole team\" is everyone on the team list."
+}

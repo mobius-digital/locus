@@ -1,0 +1,74 @@
+# Mobius Ledger — Cloudflare Worker config
+# Deploy:  npx wrangler deploy   (from this folder — NEVER from repo root)
+name = "mobius-ledger"
+account_id = "9de398454c0670e665485f4e4426a630"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Nightly Stripe re-pull at 08:17 UTC (last 10 days; stripe_id dedupe makes
+# overlap free) + a 10-minute poll of Slack #receipts for dropped photos.
+[triggers]
+crons = ["17 8 * * *", "*/10 * * * *"]
+
+# Plaid environment. Production access approved 2026-09-07; the PLAID_SECRET
+# secret is environment-specific and holds the production value, while
+# PLAID_CLIENT_ID is the same everywhere. Flipping this back to "sandbox"
+# without also restoring the sandbox secret will fail every Plaid call.
+[vars]
+PLAID_ENV = "production"
+# Who gets @-mentioned when a receipt needs a decision. The channel carries an
+# email post per forwarded receipt, which is the notification Cole does NOT
+# want; muting the channel kills those, and a mention is what still reaches him
+# through a mute. The Slack user id is looked up once from this address and
+# then cached in settings.ownerUserId. Needs the users:read.email scope.
+OWNER_EMAIL = "cole@go-mobius-digital.com"
+
+# D1: the ledger itself (transactions, vendor rules, clients, months, settings).
+# Schema changes: npx wrangler d1 execute mobius-ledger --remote --file=schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "mobius-ledger"
+database_id = "3b6d3d66-e6b5-4e56-aaa6-3886ca804e5a"
+
+# KV: receipt files (images/PDFs, client-side downscaled before upload).
+# R2 was the plan but is not enabled on this Cloudflare account (code 10042,
+# needs a dashboard opt-in) — KV holds Phase 1 volume (~35 receipts/mo) fine.
+# If R2 is enabled later, add an R2 binding and migrate `rcpt:` keys.
+[[kv_namespaces]]
+binding = "RECEIPTS"
+id = "8f918b1da0084875b718a044d930c924"
+
+# R2 — where receipt files actually live as of 2026-09-07, once R2 was enabled
+# on the account. 10 GB free against roughly 10 MB a month, and unlike KV it is
+# built for files. The KV namespace above stays bound on purpose: receipts
+# written before this still live there and reads fall back to it, so no flag
+# day and no migration. Short-lived "pend:" blobs also stay in KV, which has
+# the expiry TTL R2 lacks.
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "mobius-ledger-receipts"
+
+# Auth delegation: sessions are verified against mobius-account-health over a
+# SERVICE BINDING, not its public URL — Cloudflare blocks a Worker fetching
+# another Worker's *.workers.dev URL on the same account, so the public-URL
+# version failed closed and locked everyone out (found 2026-09-05, day one).
+[[services]]
+binding = "AUTH"
+service = "mobius-account-health"
+
+# Slack: Cashew is its OWN Slack app since 2026-10-14 (api.slack.com/apps/A0C99FUDBA8),
+# one bot in front of SEVERAL separate sets of books. Slack's one Events URL
+# and one Interactivity URL point at the cashew-slack router (../slack), which
+# hands each request to the books its channel belongs to: here for Mobius
+# (/api/slack-events, /api/slack-interact, over a service binding) or the
+# Lucky worker for #lucky-finance. SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET
+# are the Cashew app's (the same values on every books worker), not the
+# "Mobius Digital" app's that Locus and Pulse share.
+
+# Secrets (set once, never committed):
+#   npx wrangler secret put ADMIN_TOKEN         master/recovery key for the API
+#   npx wrangler secret put ANTHROPIC_API_KEY   optional — receipt reading (Claude);
+#                                               without it uploads still work, the
+#                                               fields are just typed by hand
+# Google sign-in needs NO secret here: sessions minted by mobius-account-health
+# are verified by calling its /api/me (see AUTH_WORKER in worker.js).

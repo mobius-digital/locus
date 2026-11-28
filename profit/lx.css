@@ -1,0 +1,1127 @@
+/* ==========================================================================
+   THE LOCUS KIT (2026-10-20, docs/handoffs/locus-ux-audit.md; the audit page:
+   https://claude.ai/artifact/M5QhcBYdD8ueFq8LJPFYWa).
+   Cole: "every new feature looks clunky and out of place", "produced by a very good company, in our own style".
+   One page anatomy, one type scale, one radius scale, one tab style, one strip, one menu. Loaded after v2.css and
+   before phone.css (phone rules stay in phone.css, which is loaded last). Tokens only. No em dashes.
+
+   Page anatomy, every page:
+     header row   crumb above a 22px title (one serif accent word), the page's actions on the right, then "..."
+                  (Tour, Metrics, Help and the page's purpose line live in that menu, not on the page)
+     tabs row     .v2tabs under the title (one style)
+     control bar  .v2jobs is a segmented control, beside the period and attribution pills
+     strip        .lx-strip: one line that needs attention (the biggest leak, the next date), folds, never stacks
+     content      the answer first (hero or tiles), chart, table, secondary cards
+     side panel   #v2panel (V2.panel) for any ad, task, post, leak; a full-height sheet on a phone
+   ========================================================================== */
+
+/* ---------- tokens: radius, motion, type ---------- */
+:root[data-ui="v2"]{
+  --r-xs:4px; --r-sm:6px; --r-md:6px; --r-lg:8px; --r-xl:12px; --r-pill:999px;
+  --t-fast:120ms; --t:160ms; --t-panel:200ms; --t-sheet:240ms;
+  --fs-micro:11px; --fs-meta:12px; --fs-cell:13px; --fs-body:14px; --fs-h3:15px; --fs-kpi:22px; --fs-title:22px; --fs-hero:36px;
+  --ctl-h:32px; --row-h:40px;
+}
+[data-ui="v2"] body{font-size:var(--fs-body);line-height:1.5}
+
+/* ---------- the page header ---------- */
+[data-ui="v2"] main .ph{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 16px;flex-wrap:wrap;
+  padding:0 0 12px;margin:6px 0 16px;border-bottom:1px solid var(--line)}
+[data-ui="v2"] main .ph > div:first-child{min-width:0;flex:1 1 320px}
+[data-ui="v2"] main .ph .ph-crumb{font-size:var(--fs-meta);color:var(--muted);margin-bottom:2px;line-height:1.3}
+[data-ui="v2"] main .ph .ph-crumb b{font-weight:500;color:var(--ink-2)}
+[data-ui="v2"] main .ph-t,[data-ui="v2"] main h2.ph-t{font-family:var(--sans);font-size:var(--fs-title);font-weight:650;line-height:1.25;letter-spacing:-.015em;color:var(--ink);text-wrap:balance}
+[data-ui="v2"] main .ph-t .lx-acc,[data-ui="v2"] main .ph-t em.lx-acc{font-style:italic;font-weight:400;letter-spacing:0}
+/* The purpose paragraph under every title (the lecture) moved into the "..." menu. Only the one inside .ph goes:
+   a renderer's own `extra` line (outside .ph) still shows. */
+[data-ui="v2"] main .ph > div > .ph-sub{display:none}
+[data-ui="v2"] main .ph-r{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px}
+[data-ui="v2"] main .ph-r .ph-acts{display:contents}
+[data-ui="v2"] main .ph-r .ph-acts:empty{display:none}
+[data-ui="v2"] main .ph-r .ph-acts .btn,[data-ui="v2"] main .ph-r .ph-acts .v2btn{margin:0;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);font-size:13px;font-weight:550;display:inline-flex;align-items:center;gap:6px}
+/* the "..." button and its menu */
+[data-ui="v2"] .ph-menu-w{position:relative;display:inline-flex}
+[data-ui="v2"] .ph-more{width:var(--ctl-h);height:var(--ctl-h);border-radius:var(--r-sm);border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-2);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0;font:inherit;transition:border-color var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+[data-ui="v2"] .ph-more:hover,[data-ui="v2"] .ph-menu-w.open .ph-more{border-color:var(--ink-2);color:var(--ink)}
+[data-ui="v2"] .ph-more svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round}
+[data-ui="v2"] .ph-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:30;min-width:240px;max-width:320px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:6px;box-shadow:var(--sh-pop);animation:lx-pop var(--t-fast) var(--ease) both}
+[data-ui="v2"] .ph-menu-w.open .ph-menu{display:block}
+[data-ui="v2"] .ph-menu .ph-why{font-size:12.5px;color:var(--ink-2);line-height:1.5;padding:8px 10px 10px;margin:0;border-bottom:1px solid var(--line);margin-bottom:4px}
+[data-ui="v2"] .ph-menu .ph-ico{display:flex;width:100%;height:36px;justify-content:flex-start;gap:9px;padding:0 10px!important;border:0;border-radius:var(--r-sm);background:transparent;color:var(--ink);font-size:13.5px;font-weight:500;text-align:left}
+[data-ui="v2"] .ph-menu .ph-ico:hover{background:var(--surface-2);color:var(--ink)}
+[data-ui="v2"] .ph-menu .ph-ico small{margin-left:auto;color:var(--muted);font-size:11.5px;font-weight:400}
+/* A page that still carries its own Tour, Metrics, Help row (older markup) keeps working; the pills just match the kit. */
+[data-ui="v2"] main .ph-r > .ph-ico{height:var(--ctl-h);border-radius:var(--r-sm);font-size:12.5px;font-weight:550}
+
+/* ---------- tabs and the control bar ---------- */
+[data-ui="v2"] .v2seg{gap:10px}
+[data-ui="v2"] .v2tabs{gap:2px}
+[data-ui="v2"] .v2tabs button{font-size:14px;font-weight:550;padding:9px 11px 10px;border-radius:var(--r-sm) var(--r-sm) 0 0}
+[data-ui="v2"] .v2tabs button:hover{background:var(--surface-2)}
+[data-ui="v2"] .v2tabs button.on{font-weight:600}
+/* The platform jobs (Overview, Campaigns, Ads, Changes) are one segmented control, not a second row of pills. */
+[data-ui="v2"] .v2jobs{display:inline-flex;gap:2px;padding:3px;background:var(--surface-2);border-radius:var(--r-lg);flex-wrap:nowrap;max-width:100%;overflow-x:auto;scrollbar-width:none}
+[data-ui="v2"] .v2jobs::-webkit-scrollbar{display:none}
+[data-ui="v2"] .v2jobs button{height:28px;padding:0 12px;border:0;border-radius:var(--r-sm);background:transparent;color:var(--muted);font-size:13px;font-weight:550;white-space:nowrap;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+[data-ui="v2"] .v2jobs button:hover{color:var(--ink);border-color:transparent}
+[data-ui="v2"] .v2jobs button.on{background:var(--surface);color:var(--ink);border-color:transparent;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+[data-theme="light"] .v2jobs button.on{box-shadow:0 1px 2px rgba(15,15,20,.1)}
+
+/* ---------- the strip: one line that needs attention ---------- */
+.lx-strip{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:44px;padding:8px 14px;margin:0 0 4px;
+  background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:var(--r-lg);font-size:13.5px;color:var(--ink-2);line-height:1.4}
+.lx-strip[data-tone="bad"]{border-left-color:var(--bad)}
+.lx-strip[data-tone="good"]{border-left-color:var(--good)}
+.lx-strip[data-tone="brand"]{border-left-color:var(--brand)}
+.lx-strip[data-tone="quiet"]{border-left-color:var(--line-strong)}
+.lx-strip b{color:var(--ink);font-weight:600}
+.lx-strip .n{font-weight:650;color:var(--warn);white-space:nowrap;font-variant-numeric:tabular-nums}
+.lx-strip[data-tone="bad"] .n{color:var(--bad)}
+.lx-strip .d{color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 200px}
+.lx-strip .go,.lx-strip .lx-fold{margin-left:auto;font:inherit;font-size:13px;font-weight:600;color:var(--brand);background:none;border:0;padding:0;cursor:pointer;white-space:nowrap}
+.lx-strip .go + .lx-fold,.lx-strip .lx-fold + .go{margin-left:0}
+.lx-strip .go:hover,.lx-strip .lx-fold:hover{text-decoration:underline}
+.lx-strip-body{margin:0 0 8px}
+.lx-strip-body[hidden]{display:none}
+.lx-strip-body > .v2card{margin-top:0}
+.lx-leaks:empty{display:none}
+
+/* ---------- tiles, cards, captions on the scale ---------- */
+[data-ui="v2"] .card,[data-ui="v2"] .v2card{border-radius:var(--r-lg);padding:16px 18px}
+[data-ui="v2"] .v2h h3,[data-ui="v2"] .card h3{font-size:var(--fs-h3);font-weight:600}
+[data-ui="v2"] .v2h .cap{font-size:var(--fs-meta)}
+[data-ui="v2"] .v2tile{border-radius:var(--r-lg);padding:14px 16px 12px;gap:6px}
+[data-ui="v2"] .v2tile .l{font-size:var(--fs-meta);font-weight:500}
+[data-ui="v2"] .v2tile .v{font-size:var(--fs-kpi);font-weight:650;letter-spacing:-.02em}
+[data-ui="v2"] .v2tile.c .v{font-size:20px}
+[data-ui="v2"] .v2tile.hero .v{font-size:var(--fs-hero);font-weight:650;letter-spacing:-.02em}
+[data-ui="v2"] .v2tile .sub{font-size:var(--fs-meta)}
+/* The source chip on a tile (SHOPIFY, TW, BLENDED) is a hover, not a label: the tile's title attribute carries it. */
+[data-ui="v2"] .v2tile .v2src{display:none}
+[data-ui="v2"] .v2say.lead{font-size:15px}
+[data-ui="v2"] .v2foot{font-size:var(--fs-meta)}
+[data-ui="v2"] .v2tbl table{font-size:var(--fs-cell)}
+/* 2026-11-03 Cole: wrapped rows sat on the lines. Rows keep the 40px floor; a cell that wraps gets 10px above and below. */
+[data-ui="v2"] .v2tbl td{height:var(--row-h);padding:10px 9px}
+[data-ui="v2"] .v2tbl th{padding:6px 10px}
+[data-ui="v2"] .v2d{font-size:11.5px}
+[data-ui="v2"] .btn{border-radius:var(--r-sm);font-weight:550}
+[data-ui="v2"] .v2btn{border-radius:var(--r-sm)}
+[data-ui="v2"] .v2pill,[data-ui="v2"] .pill{border-radius:var(--r-pill)}
+[data-ui="v2"] .hd-per-btn,[data-ui="v2"] .hd-today{height:var(--ctl-h)}
+[data-ui="v2"] .hd-per-menu,[data-ui="v2"] .v2ask-pop,[data-ui="v2"] .lc-pick-menu,[data-ui="v2"] .lc-me-menu{border-radius:var(--r-lg)}
+[data-ui="v2"] .hd-per-menu button{border-radius:var(--r-sm)}
+[data-ui="v2"] #v2panel{border-radius:0;transition:transform var(--t-panel) var(--ease)}
+[data-ui="v2"] .modal{border-radius:var(--r-xl)}
+
+/* ---------- the rail never scrolls: it tightens on a short window ---------- */
+@media (max-height:780px){
+  [data-ui="v2"] .side{padding:10px 10px 10px}
+  [data-ui="v2"] .side-brand{padding:2px 8px 8px}
+  [data-ui="v2"] .side-client{padding:0 0 8px;margin-bottom:0}
+  [data-ui="v2"] nav.tabs .v2nav button[data-t]{min-height:31px;font-size:13.5px;gap:10px}
+  [data-ui="v2"] nav.tabs .v2nav button[data-t] .ic{width:16px;height:16px}
+  [data-ui="v2"] .v2settings{min-height:31px;font-size:13.5px}
+  [data-ui="v2"] .v2theme{margin:4px 0}
+  [data-ui="v2"] .v2theme button{padding:3px 0}
+  [data-ui="v2"] .side-foot{padding-top:6px}
+}
+@media (max-height:640px){
+  [data-ui="v2"] .v2theme,[data-ui="v2"] .side-brand .by{display:none}
+  [data-ui="v2"] nav.tabs .v2nav button[data-t]{min-height:28px;font-size:13px}
+}
+
+/* ---------- motion: short, eased out, transform and opacity only ---------- */
+@keyframes lx-pop{from{opacity:0;transform:translateY(-4px) scale(.985)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){[data-ui="v2"] .ph-menu{animation:none}}
+
+/* the Leaks page: the brand table wraps its leak column instead of running past the card (2026-10-20) */
+[data-ui="v2"] .lx-leaks-page .v2tbl td{white-space:normal}
+[data-ui="v2"] .lx-leaks-page .v2tbl td.n{white-space:nowrap}
+[data-ui="v2"] .lx-leaks-page .lk-btbl td:last-child{white-space:nowrap}
+
+/* ---------- Reports on the kit (2026-10-20): four numbers, the sentence, This week, the ads as cards, the rest folded ---------- */
+[data-ui="v2"] .rp-kpis.rp-four{grid-template-columns:repeat(4,minmax(0,1fr))}
+[data-ui="v2"] .rp-pick.lx-bar{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:0 0 14px}
+[data-ui="v2"] .rp-pick .rp-st{font-size:12.5px;color:var(--muted)}
+[data-ui="v2"] .rp-ads .rp-cap{margin:0 0 10px;font-size:12px;font-weight:500;color:var(--muted)}
+[data-ui="v2"] .rp-adc-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:10px;align-items:stretch}
+[data-ui="v2"] .rp-adc-gap{display:none}
+[data-ui="v2"] .rp-adc{display:flex;flex-direction:column;align-items:flex-start;gap:4px;width:auto;min-width:0;padding:0;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);color:var(--ink);font:inherit;text-align:left;cursor:pointer;overflow:hidden;transition:border-color var(--t-fast) var(--ease)}
+[data-ui="v2"] .rp-adc:hover{border-color:var(--ink-2)}
+[data-ui="v2"] .rp-adc-m{display:block;width:100%;aspect-ratio:4/5;background:var(--surface-2) center/cover no-repeat;color:var(--faint);font-size:22px;text-align:center;line-height:1}
+[data-ui="v2"] .rp-adc-m i{display:block;padding-top:60px;font-style:normal}
+[data-ui="v2"] .rp-adc-r{font-size:18px;font-weight:600;letter-spacing:-.01em;padding:6px 10px 0;font-variant-numeric:tabular-nums}
+[data-ui="v2"] .rp-adc-r.good{color:var(--good)}[data-ui="v2"] .rp-adc-r.bad{color:var(--bad)}[data-ui="v2"] .rp-adc-r.none{color:var(--muted);font-size:14px}
+[data-ui="v2"] .rp-adc-n{font-size:12.5px;font-weight:500;padding:0 10px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+[data-ui="v2"] .rp-adc-s{font-size:11.5px;color:var(--muted);padding:0 10px 10px}
+[data-ui="v2"] details.rp-more{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);margin:16px 0}
+[data-ui="v2"] details.rp-more > summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;font-size:14px;font-weight:550;cursor:pointer;color:var(--ink-2)}
+[data-ui="v2"] details.rp-more > summary::-webkit-details-marker{display:none}
+[data-ui="v2"] details.rp-more > summary svg{transition:transform var(--t-fast) var(--ease)}
+[data-ui="v2"] details.rp-more[open] > summary{border-bottom:1px solid var(--line);color:var(--ink)}
+[data-ui="v2"] details.rp-more[open] > summary svg{transform:rotate(180deg)}
+[data-ui="v2"] .rp-more-b{padding:14px 16px 4px}
+[data-ui="v2"] .rp-more-b .rp-jump{position:static;margin-bottom:12px}
+@media (max-width:720px){[data-ui="v2"] .rp-kpis.rp-four{grid-template-columns:repeat(2,minmax(0,1fr))}[data-ui="v2"] .rp-adc-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* ==========================================================================
+   PHASE 5 (2026-10-20): page actions live in the page header. A page whose buttons moved up keeps them in the DOM
+   (the handlers are untouched) inside .lx-tohead, which never shows; a bar that still has live controls (the
+   Brief's Save / Cancel / message) hides only the moved buttons (.lx-tohead-bar).
+   ========================================================================== */
+.lx .lx-tohead,[data-ui="v2"] .lx-tohead{display:none!important}
+.lx .lx-tohead-bar>#bfPost,.lx .lx-tohead-bar>#bfEditBtn,.lx .lx-tohead-bar>#bfWrite,.lx .lx-tohead-bar>#bfCopy,.lx .lx-tohead-bar>#bfSkip,.lx .lx-tohead-bar>.sp{display:none!important}
+.lx .lx-tohead-bar:empty{display:none}
+
+/* ==========================================================================
+   THE ICON RAIL (2026-10-20, phase 2 of the UX audit, the iPad band). Between 721 and 1180px the rail stays docked as a
+   56px column of icons (their title attributes are the labels); the hamburger drawer is gone in this band. A tap on the
+   logo, the client picker or the account button expands the rail over the page (body.nav-open, the same class and scrim
+   the old drawer used, so index.html's close-on-pick and Escape handling carry over). lx.js sets html.lx-irail.
+   ========================================================================== */
+html.lx-irail[data-ui="v2"] .app{grid-template-columns:56px minmax(0,1fr)}
+/* No rail at all when chrome is off (the sign-in gate, an invite link, client share links): without this the page sat
+   in the 56px icon column on every screen 721 to 1180px wide (found 2026-11-13 walking a client invite on an iPad width). */
+html.lx-irail[data-ui="v2"] body.nochrome .app{grid-template-columns:minmax(0,1fr)}
+html.lx-irail[data-ui="v2"] .nav-toggle{display:none}
+html.lx-irail[data-ui="v2"] .side{position:sticky;top:0;left:auto;bottom:auto;width:56px;height:100vh;transform:none;transition:width var(--t-panel) var(--ease),box-shadow var(--t-panel) var(--ease);padding:10px 8px 10px;z-index:40;overflow:hidden}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-brand{padding:4px 0 10px;justify-content:center}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-brand>span,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-cap,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-one,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .v2theme,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-pick-btn svg,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-me-btn svg,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-me-t,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) nav.tabs .v2nav button[data-t]>span,
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .v2settings>span{display:none}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-pick-btn{width:40px;height:40px;padding:0;justify-content:center;margin:0 auto;font-size:15px}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-pick-btn #pfPickLbl{display:block;width:.8em;overflow:hidden;white-space:nowrap;text-overflow:clip;text-align:left}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-client{padding:0 0 8px}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) nav.tabs .v2nav button[data-t]{justify-content:center;padding:0;min-height:40px;gap:0}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) nav.tabs .v2nav button[data-t] .ic{width:20px;height:20px}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .v2settings{justify-content:center;padding:0;min-height:36px;gap:0}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-me{margin:4px 0 0}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .lc-me-btn{width:40px;height:40px;padding:0;justify-content:center;margin:0 auto}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-scroll{scrollbar-width:none}
+/* expanded over the page */
+html.lx-irail[data-ui="v2"] body.nav-open .side{position:fixed;left:0;top:0;bottom:0;width:248px;height:100dvh;padding:14px 12px 12px;z-index:55;box-shadow:var(--sh-pop)}
+html.lx-irail[data-ui="v2"] body.nav-open .nav-scrim{display:block}
+@media (prefers-reduced-motion:reduce){html.lx-irail[data-ui="v2"] .side{transition:none}}
+
+/* ==========================================================================
+   PHASE 7 (2026-10-20): THE CONTENT PASS. Every card, table, chart and control inside a page on the kit.
+   Cole: "it reads as a few small changes, not the whole new app". The chrome was on the kit; the content was not.
+   One card anatomy: 15px/600 title, ONE 12px/500 caption UNDER it (never a sentence beside the title), the
+   card's own controls on the title row's right, a "..." per card for any explanation (the same .ph-menu-w the
+   page header uses, so lx.js's one delegated listener serves it), then the body.
+   ========================================================================== */
+[data-ui="v2"] .v2h{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-auto-rows:auto;align-items:center;column-gap:12px;row-gap:3px;margin-bottom:12px;flex-wrap:nowrap}
+[data-ui="v2"] .v2h > h3{grid-column:1;grid-row:1;margin:0;min-width:0;font-size:var(--fs-h3);font-weight:600;line-height:1.35}
+[data-ui="v2"] .v2h > .find{grid-column:1;grid-row:2;margin:0;min-width:0;font-size:var(--fs-meta);font-weight:500;line-height:1.45;color:var(--muted);flex:none}
+[data-ui="v2"] .v2h > .find b{font-weight:600;color:var(--ink-2)}
+[data-ui="v2"] .v2h > .find:empty{display:none}
+[data-ui="v2"] .v2h > .cap{grid-column:2;grid-row:1;margin:0;justify-self:end;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;font-size:var(--fs-meta);font-weight:500;color:var(--muted);white-space:nowrap}
+[data-ui="v2"] .v2h > .cap:empty{display:none}
+[data-ui="v2"] .v2h > .cap .v2btn,[data-ui="v2"] .v2h > .cap .btn{height:28px;padding:0 10px;font-size:12.5px}
+[data-ui="v2"] .v2h > .cap .v2link{font-size:12.5px;font-weight:600}
+[data-ui="v2"] .v2h > .v2h-m{grid-column:3;grid-row:1}
+[data-ui="v2"] .v2h:has(> .v2h-m){grid-template-columns:minmax(0,1fr) auto auto}
+[data-ui="v2"] .v2h .v2h-m .ph-more{width:28px;height:28px;border-color:transparent;color:var(--muted)}
+[data-ui="v2"] .v2h .v2h-m .ph-more:hover,[data-ui="v2"] .v2h .v2h-m.open .ph-more{border-color:var(--line-strong);color:var(--ink)}
+[data-ui="v2"] .v2h .v2h-m .ph-menu{min-width:280px;max-width:360px}
+[data-ui="v2"] .v2h .v2h-m .ph-menu .ph-why{border-bottom:0;margin:0;padding:8px 10px}
+[data-ui="v2"] .v2h .v2h-m .ph-menu .ph-why + .ph-why{border-top:1px solid var(--line)}
+/* a renderer that still carries its explanation as a block (the older markup) hides it: the "..." holds it */
+[data-ui="v2"] .v2card > .v2what,[data-ui="v2"] .v2card > .v2rule{display:none}
+[data-ui="v2"] .v2concl{margin:-4px 0 12px;font-size:13px;line-height:1.5;color:var(--ink-2)}
+[data-ui="v2"] .v2sortbar{margin:0 0 10px;font-size:var(--fs-meta);font-weight:500;color:var(--muted)}
+[data-ui="v2"] .v2hint{font-size:13px;line-height:1.5}
+[data-ui="v2"] .v2card > .v2hint:last-child,[data-ui="v2"] .v2card > p.v2hint:last-child{font-size:var(--fs-meta);margin-top:8px}
+/* the older `.card h3 + .hint` anatomy (Settings, Brand, the Plan) reads the same way */
+[data-ui="v2"] .card > h3,[data-ui="v2"] .set-card > h3{margin:0 0 2px;font-size:var(--fs-h3);font-weight:600}
+[data-ui="v2"] .card > h3 + .hint,[data-ui="v2"] .set-card > h3 + .hint,[data-ui="v2"] .card > h3 + p.hint,[data-ui="v2"] .card > .hint:first-child{font-size:var(--fs-meta);font-weight:500;color:var(--muted);margin:0 0 12px;line-height:1.45}
+
+/* ---------- tables: they fit; names wrap, numbers never; one "..." per row; cards on a phone (phone.css) ---------- */
+[data-ui="v2"] .v2tbl table{table-layout:auto;width:100%}
+[data-ui="v2"] .v2tbl td{font-variant-numeric:tabular-nums}
+[data-ui="v2"] .v2tbl td:first-child,[data-ui="v2"] .v2tbl.wide td:first-child{white-space:normal;overflow-wrap:normal;word-break:normal;min-width:140px;max-width:none;line-height:1.35}
+[data-ui="v2"] .v2tbl .nm{display:inline;max-width:none;white-space:normal;overflow:visible;text-overflow:clip;vertical-align:baseline}
+[data-ui="v2"] .v2tbl td:first-child b{font-weight:600}
+[data-ui="v2"] .v2tbl th{white-space:nowrap}
+[data-ui="v2"] .v2tbl td.txt,[data-ui="v2"] .v2tbl th.txt{text-align:left;white-space:normal}
+[data-ui="v2"] .v2tbl td.txt .nm{display:inline-block;max-width:100%}
+[data-ui="v2"] .v2tbl tr.tot td{font-weight:600}
+/* the row menu: one quiet "..." at the row's end, its buttons in a popover (lx.js wires .ph-menu-w anywhere) */
+[data-ui="v2"] .v2tbl td.lx-rm{width:36px;padding:0 4px;text-align:right}
+[data-ui="v2"] .v2tbl .lx-rm .ph-more{width:28px;height:28px;border-color:transparent;color:var(--muted);opacity:.7}
+[data-ui="v2"] .v2tbl tr:hover .lx-rm .ph-more,[data-ui="v2"] .v2tbl .lx-rm .ph-menu-w.open .ph-more{opacity:1;border-color:var(--line-strong);color:var(--ink)}
+[data-ui="v2"] .v2tbl .lx-rm .ph-menu{min-width:200px;text-align:left}
+
+/* ---------- the kit bar list: label, bar, value on one row (replaces every column chart) ---------- */
+.lx-bars{display:grid;gap:6px;margin:0}
+.lx-bar{display:grid;grid-template-columns:minmax(90px,160px) minmax(0,1fr) auto;align-items:center;gap:12px;min-height:28px;font-size:13px;color:var(--ink)}
+.lx-bar .l{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2);font-weight:500}
+.lx-bar .l small{display:block;font-size:11.5px;color:var(--muted);font-weight:400;line-height:1.3}
+.lx-bar .t{position:relative;height:8px;border-radius:var(--r-pill);background:var(--surface-2);overflow:visible}
+.lx-bar .t i{position:absolute;left:0;top:0;bottom:0;border-radius:var(--r-pill);background:var(--brand);transition:width var(--t) var(--ease)}
+.lx-bar .t i.g{background:var(--line-strong);opacity:.75}
+.lx-bar .t b{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);opacity:.8}
+.lx-bar.good .t i{background:var(--good)}.lx-bar.warn .t i{background:var(--warn)}.lx-bar.bad .t i{background:var(--bad)}.lx-bar.quiet .t i{background:var(--line-strong)}
+.lx-bar.good .t i.g,.lx-bar.warn .t i.g,.lx-bar.bad .t i.g{background:var(--line-strong)}
+.lx-bar .v{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap;text-align:right;min-width:52px}
+.lx-bar .v small{font-weight:400;color:var(--muted);margin-left:6px;font-size:11.5px}
+.lx-bars.rows .lx-bar{min-height:36px;padding:0 0 6px;border-bottom:1px solid var(--line)}
+.lx-bars.rows .lx-bar:last-child{border-bottom:0}
+.lx-bars-foot{margin:8px 0 0;font-size:var(--fs-meta);color:var(--muted)}
+
+/* ---------- controls: a native select reads as a pill (the menu is the system's, a sheet on a phone) ---------- */
+[data-ui="v2"] main select:not([multiple]):not(.lx-raw),[data-ui="v2"] #v2panel select:not([multiple]):not(.lx-raw){
+  appearance:none;-webkit-appearance:none;height:var(--ctl-h);padding:0 30px 0 12px;border:1px solid var(--line-strong);border-radius:var(--r-pill);
+  background-color:var(--surface);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 11px center;
+  color:var(--ink);font:inherit;font-size:13px;font-weight:550;line-height:1;cursor:pointer;max-width:100%}
+[data-ui="v2"] main select:not([multiple]):not(.lx-raw):hover,[data-ui="v2"] #v2panel select:not([multiple]):not(.lx-raw):hover{border-color:var(--ink-2)}
+[data-ui="v2"] main select:not([multiple]):not(.lx-raw):focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+/* a select that sits in a form (a label above it, full width) stays a field, 6px corners */
+[data-ui="v2"] main .spx-f select,[data-ui="v2"] main .set-form select,[data-ui="v2"] main label > select,[data-ui="v2"] main .field select,[data-ui="v2"] main .set-row select,[data-ui="v2"] main .set-card select{border-radius:var(--r-sm);height:36px}
+/* empty states: one line, one verb, never a dashed box */
+[data-ui="v2"] main .empty,[data-ui="v2"] main .lx-empty{border:0!important;background:transparent!important;padding:10px 0!important;text-align:left!important;font-size:13px;color:var(--muted);line-height:1.5}
+[data-ui="v2"] main .empty .btn,[data-ui="v2"] main .lx-empty .btn,[data-ui="v2"] main .lx-empty .v2link{margin-left:8px;vertical-align:middle}
+
+/* ---------- media cards (ads, posts, library, creators): the cover, one status chip, the name, one metric row ---------- */
+[data-ui="v2"] .v2gal .g{border-radius:var(--r-lg)}
+[data-ui="v2"] .v2gal .b{padding:10px 12px 11px;gap:5px}
+[data-ui="v2"] .v2gal .b > b{font-size:13px;font-weight:600;line-height:1.3;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+[data-ui="v2"] .v2gal .kv{display:flex;flex-wrap:nowrap;gap:0;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:2px}
+[data-ui="v2"] .v2gal .kv > span{display:flex;flex-direction:column;gap:1px;align-items:flex-start;min-width:0}
+[data-ui="v2"] .v2gal .kv > span > b{font-size:13.5px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+[data-ui="v2"] .v2gal .kv > span > b.good{color:var(--good)}[data-ui="v2"] .v2gal .kv > span > b.bad{color:var(--bad)}
+[data-ui="v2"] .v2gal .kv > span + span{align-items:flex-end;text-align:right}
+[data-ui="v2"] .v2gal .v2one{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- the chart style: one legend line, the series and the compare, nothing boxed ---------- */
+[data-ui="v2"] .v2lg{font-size:var(--fs-meta);font-weight:500;gap:12px}
+[data-ui="v2"] .v2lgline{font-size:var(--fs-meta);font-weight:500}
+
+/* Today's calls (phase 7): the kinds are one segmented control with a count per kind */
+[data-ui="v2"] .dk-counts.v2jobs{margin:0 0 14px}
+[data-ui="v2"] .dk-counts.v2jobs button b{font-weight:650;margin-right:5px;font-variant-numeric:tabular-nums}
+[data-ui="v2"] .dk-counts.v2jobs button.on b{color:var(--brand)}
+
+/* the older .tbl-wrap tables (P&L, Costs, Customers) fit the same way: names wrap, no sideways scroll on desktop */
+[data-ui="v2"] .tbl-wrap{overflow:visible}
+[data-ui="v2"] .tbl-wrap table{width:100%;table-layout:auto}
+[data-ui="v2"] .tbl-wrap td:first-child,[data-ui="v2"] .tbl-wrap th:first-child{white-space:normal;overflow-wrap:normal}
+[data-ui="v2"] .tbl-wrap td,[data-ui="v2"] .tbl-wrap th{padding:8px 8px;font-variant-numeric:tabular-nums}
+@media (max-width:600px){[data-ui="v2"] .tbl-wrap{overflow-x:auto}}
+/* PHASE 7 (2026-10-20): sortable headers were padded twice (the th and its button), which alone pushed wide tables
+   into sideways scroll; headers may wrap to two lines, a running-total note wraps too */
+[data-ui="v2"] .v2tbl th.v2srt{padding:0 4px}
+[data-ui="v2"] .v2tbl th.v2srt button{padding:6px 6px;white-space:normal;text-align:right;line-height:1.25}
+[data-ui="v2"] .v2tbl th{white-space:normal;overflow-wrap:normal;hyphens:none}
+[data-ui="v2"] .v2tbl .lx-aft{flex-direction:column;align-items:flex-end;gap:2px}
+[data-ui="v2"] .v2tbl .lx-aft em{white-space:nowrap;line-height:1.2;font-size:11px}
+
+/* Website > Who visits: two half-width tables, the first column needs no 140px floor */
+[data-ui="v2"] .lx-who .v2tbl td:first-child,[data-ui="v2"] .v2two .v2tbl td:first-child{min-width:0}
+/* Settings > Social (phase 7, Cole saw it scroll sideways): the section grid is one fitted column, the following
+   table's handles wrap instead of forcing the width */
+[data-ui="v2"] .soc-set{grid-template-columns:minmax(0,1fr)}
+[data-ui="v2"] .soc-set .soc-tbl td:first-child,[data-ui="v2"] .soc-set .soc-tbl td:first-child *{white-space:normal}
+[data-ui="v2"] .soc-set .soc-tbl td:first-child{min-width:0}
+/* two small fits (phase 7): the ingredient tables and a card caption never push their card wider */
+[data-ui="v2"] .v2tgrid{grid-template-columns:repeat(auto-fill,minmax(min(400px,100%),1fr))}
+[data-ui="v2"] .v2tg{min-width:0;overflow:hidden}
+[data-ui="v2"] .v2h > .cap{min-width:0;max-width:100%}
+
+/* iPad (phase 7): tables tighten before they would scroll sideways; the bars inside cells give first */
+@media (max-width:1100px){
+  [data-ui="v2"] .v2tbl td,[data-ui="v2"] .v2tbl th{padding:8px 6px;font-size:12.5px}
+  [data-ui="v2"] .v2tbl th.v2srt button{padding:6px 4px;font-size:10.5px}
+  [data-ui="v2"] .v2tbl .v2ib{grid-template-columns:36px auto;gap:6px}
+  [data-ui="v2"] .v2tbl .v2ib span{min-width:40px}
+  [data-ui="v2"] .v2tbl td:first-child{min-width:110px}
+  [data-ui="v2"] .dk .dk-row .why{white-space:normal}
+  [data-ui="v2"] .v2tbl .lx-aft .v2spark{width:64px}
+  [data-ui="v2"] .v2tbl table,[data-ui="v2"] .v2tg table{font-size:12px}
+  [data-ui="v2"] .v2tg td,[data-ui="v2"] .v2tg th{padding:7px 4px;white-space:normal}
+  [data-ui="v2"] .dk .dk-row .why,[data-ui="v2"] .dk .dk-row .why *{white-space:normal;overflow-wrap:anywhere}
+  [data-ui="v2"] .v2tbl .v2ib span{min-width:0}
+}
+
+/* ===== LOCUS v4, phase 1 (2026-10-20): Today > Morning. Tokens only. ===== */
+.v4 .v4-top{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,2fr) minmax(0,3fr);gap:14px;margin:0 0 14px}
+.v4 .v4-top > .v2card{margin:0;display:flex;flex-direction:column;min-width:0}
+.v4 .v4-hero{font-size:var(--fs-28,28px);font-weight:600;letter-spacing:-.02em;line-height:1.15;margin:4px 0 14px;color:var(--ink)}
+.v4 .v4-hero b{font-weight:700;color:var(--good)}
+.v4 .v4-hero.is-lost b,.v4 .v4-hero b.lost{color:var(--bad)}
+.v4 .v4-river{display:block;width:100%;height:40px}
+.v4 .v4-river-l{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;font-size:12.5px;color:var(--ink-2)}
+.v4 .v4-river-l span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.v4 .v4-river-l i{width:9px;height:9px;border-radius:2px;flex:none}
+.v4 .v4-river-l b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.v4 .v4-river-l .v4-norm{color:var(--ink-3,var(--ink-2));margin-left:auto}
+.v4 .v4-line{display:flex;align-items:flex-start;gap:8px;margin:14px 0 0;font-size:13.5px;line-height:1.45;color:var(--ink-2)}
+.v4 .v4-line .lx-face{margin-top:5px}
+.v4 .v4-ring{position:relative;width:var(--rs,132px);height:var(--rs,132px);margin:6px auto 0}
+.v4 .v4-ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.v4 .v4-ring .c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.v4 .v4-ring .c b{font-size:calc(var(--rs,132px) * .17);font-weight:600;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums;line-height:1}
+.v4 .v4-ring .c small{font-size:11px;color:var(--ink-2);margin-top:4px}
+.v4 .v4-ring.sm{margin:0}.v4 .v4-ring.sm .c small{display:none}.v4 .v4-ring.sm .c b{font-size:12.5px;letter-spacing:0}.v4 .v4-ring.sm svg circle{stroke-width:12}
+.v4 .v4-ring-cap{font-size:12.5px;color:var(--ink-2);text-align:center;margin:12px 0 0;line-height:1.45}
+.v4 .v4-ring-cap b{color:var(--ink);font-weight:600}
+.v4 .v4-ring-go{margin:auto auto 0;padding-top:10px;display:block;text-align:center}
+.v4 .v4-queue{display:flex;flex-direction:column;gap:6px;flex:1}
+.v4 .v4-q{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:"c t" "s s";align-items:start;gap:6px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-lg,8px);background:var(--surface-2)}
+.v4 .v4-q .v4-chip{grid-area:c;margin-top:1px}
+.v4 .v4-q .t{grid-area:t;min-width:0}
+.v4 .v4-q .t b{display:block;font-size:13.5px;font-weight:600;color:var(--ink);line-height:1.3}
+.v4 .v4-q .t small{display:block;font-size:12px;color:var(--ink-2);margin-top:2px;line-height:1.35}
+.v4 .v4-q .v2btn{grid-area:s;justify-self:end}
+.v4 .v4-chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;background:var(--surface-3,var(--surface));border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.v4 .v4-chip.cut,.v4 .v4-chip.trim{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent);background:color-mix(in srgb,var(--bad) 10%,transparent)}
+.v4 .v4-chip.scale{color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent);background:color-mix(in srgb,var(--good) 10%,transparent)}
+.v4 .v4-chip.call,.v4 .v4-chip.refresh,.v4 .v4-chip.fix{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.v4 .v4-chip.date{text-transform:none;color:var(--brand-ink,var(--brand));border-color:color-mix(in srgb,var(--brand) 40%,transparent);background:var(--brand-soft)}
+.v4 .v4-q .v2btn{height:28px;padding:0 10px;font-size:12.5px;white-space:nowrap}
+.v4 .v4-share{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;margin-top:12px}
+.v4 .v4-sh{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-areas:"i l" "i v" "i s";column-gap:8px;align-items:center;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-lg,8px);background:var(--surface-2);font:inherit;color:var(--ink);cursor:default;min-height:0}
+.v4 .v4-sh[data-go]{cursor:pointer}
+.v4 .v4-sh[data-go]:hover{border-color:var(--line-strong)}
+.v4 .v4-sh i{grid-area:i;width:4px;height:100%;min-height:34px;border-radius:2px;align-self:stretch}
+.v4 .v4-sh .l{grid-area:l;font-size:12px;color:var(--ink-2)}
+.v4 .v4-sh b{grid-area:v;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+.v4 .v4-sh small{grid-area:s;font-size:11.5px;color:var(--ink-2);line-height:1.35}
+.v4 .v4-two > :empty{display:none}
+#v4strip:empty,#v4cal:empty{display:none}
+@media (max-width:1100px){.v4 .v4-top{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.v4 .v4-top > .v4-r{grid-column:1 / -1}}
+@media (max-width:720px){.v4 .v4-top{grid-template-columns:minmax(0,1fr)}.v4 .v4-hero{font-size:24px}.v4 .v4-river-l .v4-norm{margin-left:0;flex-basis:100%}}
+
+/* v4 phase 2: Ads > Calls additions (the Google negatives call and the ad set panel) */
+.dk .dk-k.neg{background:var(--brand-soft);color:var(--brand-ink,var(--brand))}
+.dk .nm[data-set]{cursor:pointer}.dk .nm[data-set]:hover{text-decoration:underline;text-decoration-color:var(--line-strong);text-underline-offset:3px}
+.v4-pan{display:flex;flex-direction:column;gap:12px}
+.v4-pan-top{display:flex;align-items:center;gap:10px}.v4-pan-brand{font-size:12.5px;color:var(--ink-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v4-why{margin:0;font-size:14px;line-height:1.5;color:var(--ink)}.v4-why .faint{color:var(--ink-2)}
+.v4-nums{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.v4-nums > div{padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-lg,8px);background:var(--surface-2)}
+.v4-nums small{display:block;font-size:11px;color:var(--ink-2);letter-spacing:.02em}.v4-nums b{display:block;font-size:17px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums}
+.v4-nums > div.good b{color:var(--good)}.v4-nums > div.warn b{color:var(--warn)}.v4-nums > div.bad b{color:var(--bad)}
+.v4-pacts{display:flex;flex-wrap:wrap;gap:8px}.v4-pacts .v2btn{min-height:0}
+.v4-pan-h{margin:6px 0 0;font-size:13px;font-weight:600;color:var(--ink)}
+.v4-adstrip{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
+.v4-ad{display:block;text-align:left;padding:0;border:0;background:none;font:inherit;color:var(--ink);cursor:pointer;min-width:0;min-height:0}
+.v4-ad .v4-ad-t{display:flex;align-items:center;justify-content:center;aspect-ratio:4/5;border-radius:var(--r-lg,8px);background:var(--surface-2) center/cover no-repeat;border:1px solid var(--line);margin-bottom:6px}
+.v4-ad.is-call .v4-ad-t{box-shadow:0 0 0 2px var(--warn)}
+.v4-ad .v4-ad-t i{width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.9);color:#111;display:flex;align-items:center;justify-content:center;font-size:11px;font-style:normal}
+.v4-ad b{display:block;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.v4-ad small{display:block;font-size:11.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* v4 phase 3: Money > Month */
+.v4 .v4-top.v4-mo{grid-template-columns:minmax(0,2fr) minmax(0,3fr) minmax(0,3fr)}
+.v4 .v4-land{align-items:center;text-align:center}.v4 .v4-land .v2h{align-self:stretch;text-align:left}
+/* the three paths: label, number, distance from the goal. Rows, never a wrapped sentence. */
+.v4 .v4-paths{display:flex;flex-direction:column;align-self:stretch;margin:12px 0 10px;text-align:left}
+.v4 .v4-pr{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"l v" "l s";column-gap:10px;align-items:baseline;padding:7px 0;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-2)}
+.v4 .v4-pr:first-child{border-top:0}
+.v4 .v4-pr span{grid-area:l;min-width:0}.v4 .v4-pr b{grid-area:v;color:var(--ink);font-weight:600;font-size:13.5px;font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+.v4 .v4-pr small{grid-area:s;font-size:11.5px;color:var(--ink-2);text-align:right;white-space:nowrap}.v4 .v4-pr small.good{color:var(--good)}.v4 .v4-pr small.bad{color:var(--bad)}
+.v4 .v4-ring-cap.v4-left{text-align:left;margin-top:10px}
+/* the month's five numbers under the week bars: a stat strip, label over value */
+.v4 .v4-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:8px 12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.v4 .v4-facts span{display:flex;flex-direction:column;min-width:0}.v4 .v4-facts small{font-size:11px;color:var(--ink-2);letter-spacing:.01em}.v4 .v4-facts b{color:var(--ink);font-weight:600;font-size:14px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+/* the customer dial sits on top, the four facts in a strip under it */
+.v4 .v4-dialrow{display:flex;flex-direction:column;gap:6px;align-items:center;margin-top:4px}.v4 .v4-dial{width:180px;height:114px;flex:none}
+.v4 .v4-cfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px 12px;align-self:stretch;padding-top:10px;border-top:1px solid var(--line)}
+.v4 .v4-cfacts div{min-width:0}.v4 .v4-cfacts b{display:block;font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums;letter-spacing:-.01em}.v4 .v4-cfacts small{display:block;font-size:11px;color:var(--ink-2);line-height:1.35}
+.v4 .v4-fall{display:block;width:100%;height:auto;max-height:200px;overflow:visible}
+.v4 .v4-gap{margin-top:14px}.v4 .v4-foot{margin:8px 0 0}
+@media (max-width:1360px){.v4 .v4-top.v4-mo{grid-template-columns:minmax(0,2fr) minmax(0,3fr)}.v4 .v4-top.v4-mo > .v4-land{grid-column:auto}.v4 .v4-top.v4-mo > section:nth-child(3){grid-column:1 / -1}.v4 .v4-top.v4-mo > section:nth-child(3) .v4-dialrow{flex-direction:row;gap:22px;align-items:center}.v4 .v4-top.v4-mo > section:nth-child(3) .v4-cfacts{padding-top:0;border-top:0;flex:1}}
+@media (max-width:720px){.v4 .v4-top.v4-mo{grid-template-columns:minmax(0,1fr)}.v4 .v4-top.v4-mo > section:nth-child(3) .v4-dialrow{flex-direction:column}.v4 .v4-top.v4-mo > section:nth-child(3) .v4-cfacts{padding-top:10px;border-top:1px solid var(--line)}}
+
+/* v4 phase 4: the agency rows */
+.v4 .v4-book{display:flex;align-items:center;gap:28px;flex-wrap:wrap}
+.v4 .v4-book-l{font-size:12px;color:var(--ink-2);font-weight:500}
+.v4 .v4-book .v4-hero{margin:4px 0 0;font-size:24px}.v4 .v4-book .v4-hero small{font-size:13.5px;color:var(--ink-2);font-weight:500;letter-spacing:0}
+.v4 .v4-counts{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.v4 .v4-cnt{display:flex;align-items:baseline;gap:6px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-lg,8px);background:var(--surface-2);font:inherit;font-size:12.5px;color:var(--ink-2);cursor:pointer;min-height:0}
+.v4 .v4-cnt b{font-size:18px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums}.v4 .v4-cnt:hover{border-color:var(--line-strong)}
+.v4 .v4-boardc{padding-top:4px}
+.v4 .v4-bhead,.v4 .v4-brow{display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(190px,1.6fr) 72px minmax(220px,2.6fr) minmax(130px,.9fr);gap:14px;align-items:center}
+.v4 .v4-bhead{padding:8px 0;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);font-weight:600;border-bottom:1px solid var(--line-strong)}
+.v4 .v4-brow{padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}.v4 .v4-brow:last-of-type{border-bottom:0}
+.v4 .v4-brow > div > b{display:block;font-weight:600;font-variant-numeric:tabular-nums}.v4 .v4-brow > div > small{display:block;font-size:11.5px;color:var(--ink-2);margin-top:2px}
+.v4 .v4-brow b.good{color:var(--good)}.v4 .v4-brow b.warn{color:var(--warn)}.v4 .v4-brow b.bad{color:var(--bad)}
+.v4 .v4-bname{display:inline-flex;align-items:center;gap:8px;padding:0;border:0;background:none;font:inherit;font-weight:600;color:var(--ink);cursor:pointer;min-height:0;text-align:left}.v4 .v4-bname:hover{text-decoration:underline;text-underline-offset:3px}
+.v4 .v4-dot{width:8px;height:8px;border-radius:50%;background:var(--good);flex:none}.v4 .v4-dot.warn{background:var(--warn)}.v4 .v4-dot.bad{background:var(--bad)}.v4 .v4-dot.info{background:var(--line-strong)}
+.v4 .v4-gaps{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}.v4 .v4-gap-c{font-size:10.5px;padding:1px 6px;border-radius:999px;border:1px dashed var(--line-strong);color:var(--ink-2)}
+.v4 .v4-kb{display:flex;align-items:center;gap:8px}.v4 .v4-kb .tr{flex:1;height:12px;background:var(--surface-2);border-radius:4px;position:relative}
+.v4 .v4-kb .tr i{position:absolute;left:0;top:0;height:100%;border-radius:4px;background:var(--brand);min-width:2px}.v4 .v4-kb .tr i.bad{background:var(--bad);width:3%!important}
+.v4 .v4-kb .tr b{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);opacity:.7}
+.v4 .v4-kb > b{width:60px;text-align:right;font-weight:650;font-variant-numeric:tabular-nums}.v4 .v4-kb > b.bad{color:var(--bad)}
+.v4 .v4-brow small{font-size:11.5px;color:var(--ink-2)}.v4 .v4-quiet{color:var(--ink-2);font-size:12px}
+.v4 .v4-why{display:flex;gap:8px;align-items:flex-start;color:var(--ink-2);min-width:0}.v4 .v4-why .v4-chip{flex:none;margin-top:1px}
+.v4 .v4-whyt{display:flex;flex-direction:column;gap:2px;min-width:0}.v4 .v4-whyt .v2link.q{text-align:left;color:var(--ink-2);font-size:12.5px;line-height:1.4;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.v4 .v4-whyt .v2link.q:hover{color:var(--ink)}
+.v4 .v4-ok{color:var(--ink-2);font-size:12.5px}
+.v4 .v4-wk{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}.v4 .v4-wk > b{font-size:15px;font-weight:650;font-variant-numeric:tabular-nums}
+.v4 .v4-paused{margin:10px 0 0;font-size:12.5px;color:var(--ink-2)}
+.v4 .v4-mhead,.v4 .v4-mrow{grid-template-columns:minmax(150px,1.3fr) 72px minmax(120px,1fr) minmax(140px,1.2fr) minmax(110px,1fr) minmax(90px,.8fr)}
+@media (max-width:980px){.v4 .v4-bhead{display:none}.v4 .v4-brow{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 14px}.v4 .v4-brow > .v4-bn{grid-column:1 / -1}.v4 .v4-why{grid-column:1 / -1}}
+@media (max-width:600px){.v4 .v4-book{gap:12px}.v4 .v4-counts{margin-left:0}.v4 .v4-brow{grid-template-columns:minmax(0,1fr)}}
+
+/* v4 phase 5: the report story's Done and From you cards */
+.v4-rep2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0 0 12px}
+.v4-rep2 .v2card{margin:0}
+.v4 .v4-rows{display:flex;flex-direction:column;gap:4px}
+.v4 .v4-row{display:flex;align-items:flex-start;gap:10px;padding:6px 0;border:0;background:none;font:inherit;color:var(--ink);text-align:left;min-height:0;width:100%}
+.v4 button.v4-row{cursor:pointer;border-radius:var(--r-md,6px)}.v4 button.v4-row:hover{background:var(--surface-2)}
+.v4 .v4-row .t{min-width:0}.v4 .v4-row .t b{display:block;font-size:13px;font-weight:600;line-height:1.35}.v4 .v4-row .t small{display:block;font-size:11.5px;color:var(--ink-2);margin-top:1px}
+.v4 .v4-tick{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--line-strong);flex:none;margin-top:2px}.v4 .v4-tick.on{background:var(--good);border-color:var(--good);position:relative}
+.v4 .v4-tick.on::after{content:"";position:absolute;left:5px;top:2px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+@media (max-width:720px){.v4-rep2{grid-template-columns:minmax(0,1fr)}}
+
+/* v4 phase 6: the Ideas column on the Pipeline board */
+.pd-col.v4-ideas{border-style:dashed}
+.v4-ic{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg,8px);padding:10px 11px;margin:0 0 7px}
+.v4-ic img,.v4-ic .v4-ic-t{display:block;width:100%;aspect-ratio:16/10;max-height:150px;object-fit:cover;border-radius:var(--r-md,6px);background:var(--surface-2) center/cover no-repeat;margin:0 0 8px}
+.v4-ic b{display:block;font-size:13px;font-weight:600;line-height:1.35;color:var(--ink)}.v4-ic small{display:block;font-size:11.5px;color:var(--ink-2);margin-top:2px}
+.v4-ic-a{display:flex;gap:6px;margin-top:8px}.v4-ic-a .pd-btn{min-height:0;height:26px;padding:0 10px;font-size:12px}
+/* the loop: a leak whose task is done */
+.lk-link.lk-done{color:var(--good);opacity:1}
+
+/* a client reads: header actions are the team's unless a page flags one data-client-ok (2026-10-21) */
+body.is-client #main .ph .ph-acts > :not([data-client-ok]), body.is-client #hdActions > :not([data-client-ok]), body.is-client .v4-ring-go:not([data-client-ok]){display:none}
+/* 2026-10-27 client audit: the team's wiring and buttons that only 403 for a client (New client, Studio's key and Connections, Check Drive, Remove from an Atria board, Something else on a call) */
+body.is-client .lc-pick-add, body.is-client .st-key, body.is-client [data-mconn], body.is-client #libSync, body.is-client [data-unsave], body.is-client [data-else]{display:none!important}
+
+/* ==========================================================================
+   THE INSTRUMENT KIT (2026-10-21, review round one, pass A; lx.js LxKit.ring / spark / river / funnel / scale /
+   waterfall / chip, row panels). Premium SaaS habits (Linear, Stripe, Vercel, Triple Whale): thin strokes, 2 to 4px
+   radius, the brand blue plus greys, numbers inside the chart, a visible scale, one legend line with hover detail,
+   a 400ms grow on first paint. Status is a chip, never the colour of a wide stroke. Tokens only.
+   ========================================================================== */
+:root[data-ui="v2"]{--lx-track:color-mix(in srgb,var(--ink) 9%,transparent);--lx-ease-out:cubic-bezier(.2,.7,.2,1)}
+@keyframes lx-grow-x{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes lx-grow-y{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@keyframes lx-ring{from{stroke-dasharray:0 var(--rc,400)}}
+@keyframes lx-draw{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+
+/* status chip: small, words, a dot */
+.lx-st{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:var(--r-xs,4px);font-size:11.5px;font-weight:600;white-space:nowrap;
+  color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
+.lx-st::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.lx-st.good{color:var(--good);background:color-mix(in srgb,var(--good) 9%,transparent);border-color:color-mix(in srgb,var(--good) 28%,transparent)}
+.lx-st.warn{color:var(--warn);background:color-mix(in srgb,var(--warn) 10%,transparent);border-color:color-mix(in srgb,var(--warn) 30%,transparent)}
+.lx-st.bad{color:var(--bad);background:color-mix(in srgb,var(--bad) 9%,transparent);border-color:color-mix(in srgb,var(--bad) 28%,transparent)}
+.lx-st.brand{color:var(--brand-ink,var(--brand));background:var(--brand-soft);border-color:color-mix(in srgb,var(--brand) 30%,transparent)}
+
+/* the ring */
+.lx-ring{position:relative;width:var(--rs,132px);height:var(--rs,132px);margin:6px auto 0;flex:none}
+.lx-ring svg{width:100%;height:100%;transform:rotate(-90deg);overflow:visible}
+.lx-ring .lx-ring-p{animation:lx-ring .4s var(--lx-ease-out) both}
+.lx-ring .c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 14%}
+.lx-ring .c b{font-size:calc(var(--rs,132px) * .165);font-weight:600;letter-spacing:-.02em;color:var(--ink);font-variant-numeric:tabular-nums;line-height:1}
+.lx-ring .c small{font-size:11px;color:var(--muted);margin-top:5px;line-height:1.25}
+.lx-ring.sm{margin:0}.lx-ring.sm .c{padding:0}.lx-ring.sm .c b{font-size:12px;letter-spacing:0;font-weight:600}
+.lx-ring-chip{display:flex;justify-content:center;margin-top:10px}
+
+/* the sparkline: a 56px line with its scale on the right */
+.lx-spk{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;column-gap:8px;margin-top:auto;padding-top:6px;align-items:stretch}
+.lx-spk .v2spark,[data-ui="v2"] .lx-spk .v2spark{grid-row:1 / 3;height:56px;margin:0;width:100%}
+.lx-spk .lx-spk-l{animation:lx-draw .4s var(--lx-ease-out) both}
+.lx-spk .mx,.lx-spk .mn{font-size:10.5px;line-height:1;color:var(--faint);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.lx-spk .mx{align-self:start;padding-top:1px}.lx-spk .mn{align-self:end}
+
+/* the river: a thin segmented bar on a baseline */
+.lx-river{margin:4px 0 0}
+.lx-river-t{position:relative;display:flex;gap:2px;height:22px;align-items:stretch}
+.lx-river-t > i{position:relative;display:flex;align-items:center;justify-content:center;min-width:2px;border-radius:3px;overflow:hidden;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both;cursor:default}
+.lx-river-t > i span{font-size:11px;font-weight:600;font-style:normal;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;text-shadow:0 1px 1px rgba(0,0,0,.18)}
+.lx-river-m{position:absolute;top:-5px;bottom:-5px;width:2px;margin-left:-1px;background:var(--ink);border-radius:1px}
+.lx-river-m::after{content:"";position:absolute;top:-3px;left:-3px;width:8px;height:8px;border-radius:50%;background:var(--ink)}
+.lx-river-base{display:flex;justify-content:space-between;border-top:1px solid var(--line-strong);margin-top:6px;padding-top:4px;font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.lx-legend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12px;color:var(--muted)}
+.lx-legend span{display:inline-flex;align-items:center;gap:6px;flex:none}
+.lx-legend i{width:8px;height:8px;border-radius:2px;flex:none}
+.lx-legend b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+@media (max-width:900px){.lx-legend{flex-wrap:wrap;white-space:normal}}
+
+/* the funnel: stepped bars, the carry-on rate between them */
+.lx-fun{display:flex;flex-direction:column}
+.lx-fun-s{display:grid;grid-template-columns:minmax(84px,120px) minmax(0,1fr) minmax(56px,auto);align-items:center;gap:12px;min-height:30px}
+.lx-fun-s .l{font-size:12.5px;color:var(--ink-2);font-weight:500}
+.lx-fun-s .t{position:relative;height:14px;background:var(--lx-track);border-radius:3px;display:flex;justify-content:center;overflow:hidden}
+.lx-fun-s .t i{display:block;height:100%;background:var(--brand);border-radius:3px;transform-origin:center;animation:lx-grow-x .4s var(--lx-ease-out) both}
+.lx-fun-s .v{font-size:13.5px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+.lx-fun-d{display:flex;align-items:center;gap:10px;padding:3px 0 3px 132px;font-size:11.5px;color:var(--faint)}
+.lx-fun-d small{font-size:11px;color:var(--faint)}
+@media (max-width:520px){.lx-fun-d{padding-left:0;flex-wrap:wrap}.lx-fun-s{grid-template-columns:76px minmax(0,1fr) auto;gap:8px}}
+
+/* the marked bar (where a dial was) */
+.lx-scale{position:relative;padding-top:22px;margin:4px 8px 2px}
+.lx-scale-v{position:absolute;top:0;transform:translateX(-50%);font-size:13px;white-space:nowrap}
+.lx-scale-v b{font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums}
+.lx-scale-t{position:relative;height:8px;border-radius:3px;background:var(--lx-track)}
+.lx-scale-t i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--brand);transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+.lx-scale-t em{position:absolute;top:-4px;bottom:-4px;width:1.5px;margin-left:-.75px;background:var(--ink-2)}
+.lx-scale-m{position:relative;height:16px;margin-top:6px;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.lx-scale-m span{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap}
+.lx-scale-m span:first-child{transform:none}
+
+/* the waterfall: columns, connectors, labels in the bars */
+.lx-wf{display:grid;grid-template-columns:repeat(var(--n,6),minmax(0,1fr));gap:10px;align-items:end;margin-top:6px}
+.lx-wf-c{display:flex;flex-direction:column;min-width:0}
+.lx-wf-a{position:relative;height:150px;border-bottom:1px solid var(--line-strong)}
+.lx-wf-a > i{position:absolute;left:0;right:0;border-radius:3px;display:flex;align-items:center;justify-content:center;transform-origin:bottom;animation:lx-grow-y .4s var(--lx-ease-out) both;min-height:2px}
+.lx-wf-a > i span{font-size:11px;font-weight:600;color:#fff;font-variant-numeric:tabular-nums;white-space:nowrap;text-shadow:0 1px 1px rgba(0,0,0,.18)}
+.lx-wf-a > .o{position:absolute;left:-6px;right:-6px;text-align:center;margin-bottom:3px;font-size:11px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.lx-wf-a > .cn{position:absolute;left:100%;width:10px;height:0;border-top:1px dashed var(--ink-2);opacity:.6}
+.lx-wf-c > .l{font-size:11.5px;color:var(--muted);text-align:center;margin-top:6px;line-height:1.25;min-height:2.5em}
+.lx-wf-c.tot > .l,.lx-wf-c.sub > .l{color:var(--ink);font-weight:600}
+@media (max-width:600px){.lx-wf{gap:4px}.lx-wf-a{height:130px}.lx-wf-a > .cn{width:4px}.lx-wf-a > i span,.lx-wf-a > .o{font-size:9.5px}.lx-wf-c > .l{font-size:10px}}
+
+/* bar lists: thin bars, the target as an outlined track with a tick */
+.lx-bar .t{height:6px;border-radius:2px;background:var(--lx-track)}
+.lx-bar .t i{border-radius:2px;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+.lx-bar .t i.g{background:transparent!important;opacity:1;border:1px dashed var(--line-strong);top:-2px;bottom:-2px;animation:none}
+.lx-bar .t b{top:-5px;bottom:-5px;width:1.5px;background:var(--ink-2);opacity:1}
+
+/* the money bar used for new vs returning and channel share (one thin line) */
+[data-ui="v2"] .v4 .v2stackbar,[data-ui="v2"] .v2drill .v2stackbar{height:10px;border-radius:3px;gap:2px;background:transparent}
+[data-ui="v2"] .v4 .v2stackbar i,[data-ui="v2"] .v2drill .v2stackbar i{border-radius:2px;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+
+/* the table standard: inline bars sit on a visible track (the scale), numbers tabular, a row with no action of its own
+   opens the row panel (lx.js) */
+[data-ui="v2"] .v2tbl td,[data-ui="v2"] .v2tbl th{font-variant-numeric:tabular-nums}
+[data-ui="v2"] .v2ib > i{grid-column:1;grid-row:1;height:4px;border-radius:2px;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+[data-ui="v2"] .v2ib::before{content:"";grid-column:1;grid-row:1;align-self:center;height:4px;border-radius:2px;background:var(--lx-track)}
+[data-ui="v2"] .v2ib > span{grid-column:2;grid-row:1}
+[data-ui="v2"] .v2tbl tbody tr.lx-rp{cursor:pointer}
+[data-ui="v2"] .v2tbl tbody tr.lx-rp:hover td{background:var(--surface-2)}
+.lx-rowp-from{margin:0 0 10px;font-size:12px;color:var(--muted)}
+.lx-rowp dl{margin:0;border-top:1px solid var(--line)}
+.lx-rowp dl > div{display:grid;grid-template-columns:minmax(110px,40%) minmax(0,1fr);gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.lx-rowp dt{font-size:12px;color:var(--muted)}
+.lx-rowp dd{margin:0;text-align:right;font-size:13.5px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.lx-rowp dd .v2ib{grid-template-columns:90px auto}
+
+@media (prefers-reduced-motion:reduce){
+  .lx-ring .lx-ring-p,.lx-spk .lx-spk-l,.lx-river-t > i,.lx-fun-s .t i,.lx-scale-t i,.lx-wf-a > i,.lx-bar .t i,[data-ui="v2"] .v2ib > i,[data-ui="v2"] .v4 .v2stackbar i{animation:none}
+}
+
+/* v4 pages on the instrument kit (2026-10-21, pass A) */
+.v4 .v4-herorow{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 14px;margin:4px 0 12px}.v4 .v4-herorow .v4-hero{margin:0}
+.v4 .v4-norm2{font-size:13px;color:var(--muted);white-space:nowrap}.v4 .v4-norm2 b{color:var(--ink-2);font-weight:600;font-variant-numeric:tabular-nums}
+.v4 .v4-ring-cap.v4-sub2{margin-top:4px;color:var(--muted)}
+.v4 .v4-top.v4-mo{align-items:start}
+.v4 .v4-cusay{margin:6px 0 4px;font-size:13.5px;line-height:1.5;color:var(--ink-2)}.v4 .v4-cusay b{color:var(--ink);font-weight:650}
+.v4 .v4-cfacts{margin-top:12px}.v4 .v4-cu-go{margin-top:10px;align-self:flex-start}
+.v4 .v4-facts em{font-style:normal;font-size:11px;color:var(--muted);white-space:nowrap}
+.v4 .v4-top.v4-mo > section:nth-child(3){display:flex;flex-direction:column}
+.lx-fun-d small{white-space:nowrap}
+[data-ui="v2"] .v2bul .trk{height:4px;border-radius:2px;background:var(--lx-track)}[data-ui="v2"] .v2bul .trk i{border-radius:2px;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}[data-ui="v2"] .v2bul .trk b{top:-4px;height:12px;width:1.5px;background:var(--ink-2)}
+.lx-wf-a > i,.lx-river-t > i,.lx-fun-s .t i,.lx-scale-t i{font-style:normal}
+:root[data-ui="v2"]:not([data-theme="light"]) .lx-wf-a > i span,:root[data-ui="v2"]:not([data-theme="light"]) .lx-river-t > i span{color:#111114;text-shadow:none}
+.lx-wf-a > .o.dup{display:none}
+@media (max-width:600px){.lx-wf-a > i span{display:none}.lx-wf-a > .o.dup{display:block}.lx-wf-a > .o{font-size:9px;left:-3px;right:-3px}.lx-wf-c > .l{font-size:9.5px;overflow-wrap:anywhere}}
+
+/* pass B (2026-10-21): Today words, layout and panels */
+.v4 .v4-top.v4-two-top{grid-template-columns:minmax(0,5fr) minmax(0,2fr)}
+@media (max-width:720px){.v4 .v4-top.v4-two-top{grid-template-columns:minmax(0,1fr)}}
+.v4 .v4-qstrip{margin:0 0 14px}
+.v4 .v4-queue{max-height:260px;overflow:auto;overscroll-behavior:contain}
+.v4 button.v4-line{width:100%;text-align:left;background:none;border:1px solid transparent;border-radius:var(--r-lg,8px);padding:8px 10px;margin:10px -10px 0;width:calc(100% + 20px);font:inherit;font-size:13.5px;color:var(--ink-2);cursor:pointer;min-height:0;align-items:center}
+.v4 button.v4-line:hover{border-color:var(--line);background:var(--surface-2);color:var(--ink)}
+.v4 .v4-line-go{margin-left:auto;flex:none;font-size:12px;font-weight:600;color:var(--brand-ink,var(--brand));opacity:0;transition:opacity var(--t-fast)}.v4 button.v4-line:hover .v4-line-go,.v4 button.v4-line:focus-visible .v4-line-go{opacity:1}
+.cal-more{display:block;width:100%;text-align:left;padding:6px 0;border:0;background:none;font:inherit;font-size:12.5px;font-weight:600;color:var(--brand-ink,var(--brand));cursor:pointer;min-height:0}
+
+/* the brief as it reads (index.html briefCardHtml) and the small date control */
+.bfc{padding:4px 2px}.bfc-when{margin:0 0 6px;font-size:12px;color:var(--muted)}
+.bfc-h{margin:0 0 14px;font-size:20px;line-height:1.3;font-weight:650;letter-spacing:-.01em;color:var(--ink)}
+.bfc-blk{margin:0 0 14px}.bfc-t{font-size:12px;font-weight:600;color:var(--muted);margin:0 0 6px;text-transform:none}.bfc-t b{font-weight:600}
+.bfc-nums{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r-lg,8px);overflow:hidden}
+.bfc-nums > div{background:var(--surface);padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.bfc-nums small{font-size:11.5px;color:var(--muted)}.bfc-nums b{font-size:17px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums}
+.bfc-nums em{font-style:normal;font-size:11.5px;color:var(--muted);line-height:1.35}.bfc-nums em.good{color:var(--good)}.bfc-nums em.bad{color:var(--bad)}
+.bfc-txt{white-space:pre-line;font-size:14px;line-height:1.6;color:var(--ink-2);margin:0 0 12px}.bfc-txt b{color:var(--ink)}
+.bf-head .bf-datec{justify-self:start;width:max-content}
+.bf-datec{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 4px 0 10px;border:1px solid var(--line);border-radius:var(--r-pill,999px);background:var(--surface);font-size:12.5px;color:var(--muted)}
+.bf-datec input[type=date]{border:0!important;background:transparent!important;padding:0 4px!important;height:28px!important;min-height:0!important;width:auto!important;font:inherit;font-size:12.5px!important;color:var(--ink);box-shadow:none!important}
+.ph-menu-w.flip .ph-menu,.hd-period.flip .hd-per-menu{left:auto!important;right:0!important}
+.ph-menu-w.flipl .ph-menu,.hd-period.flipl .hd-per-menu{right:auto!important;left:0!important}
+.pnl-wide{margin:0 0 16px}.pnl-wide > .v2card,.pnl-wide > section{margin:0}
+.v2two.pnl-bal{align-items:start}
+.jr2{display:flex;flex-direction:column}.jr2-h{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;padding:0 0 6px;border-bottom:1px solid var(--line-strong);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.jr2-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;padding:10px 0;border-bottom:1px solid var(--line)}.jr2-row:last-child{border-bottom:0}
+.jr2-a b{display:block;font-size:13.5px;font-weight:600;color:var(--ink)}.jr2-a small{display:block;font-size:12px;color:var(--muted);margin-top:2px}
+.jr2-b{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}.jr2-b li{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--ink-2)}.jr2-b li b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}.jr2-b li.none{color:var(--muted)}
+@media (max-width:600px){.jr2-h{display:none}.jr2-row{grid-template-columns:minmax(0,1fr);gap:6px}}
+
+/* the model menu on a credited card: a small pill in the card head */
+.v2h .lx-cmodel{display:inline-flex}.v2h .lx-cmodel .hd-per-btn{height:26px;padding:0 9px;font-size:12px}.v2h .lx-cmodel .hd-per-l{color:var(--muted);font-weight:500}.v2h .lx-cmodel .hd-per-d{display:inline!important}
+#railMin[aria-pressed="true"] svg{transform:rotate(180deg)}
+
+/* review fixes (2026-10-21, round two) */
+[data-ui="v2"] main#main{overflow-x:clip}
+.pnl-stack{display:flex;flex-direction:column;gap:16px}.pnl-stack > *{margin:0}
+.fc-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start;margin-top:12px}.fc-grid .notice{margin-top:0!important}
+@media (max-width:900px){.fc-grid{grid-template-columns:minmax(0,1fr)}}
+.jr2-more > summary{cursor:pointer;padding:10px 0 4px;font-size:12.5px;font-weight:600;color:var(--brand-ink,var(--brand))}
+[data-ui="v2"] .v2tbl td:has(> .v2rm){position:relative;padding-right:30px}
+[data-ui="v2"] .v2tbl td > .v2rm{position:absolute!important;right:4px;top:50%;transform:translateY(-50%);margin:0!important}
+[data-ui="v2"] .v2tbl td > .v2ex + .nm + .v2rm + .sub,[data-ui="v2"] .v2tbl td > .nm ~ .sub{margin-top:1px;padding-left:24px}
+.lx-fun2{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);gap:10px;align-items:center;margin-top:6px}
+.lx-fun-st{display:flex;flex-direction:column;gap:3px;min-width:0}.lx-fun-st small{font-size:12px;color:var(--muted)}.lx-fun-st b{font-size:20px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.lx-fun-st .t{display:block;height:4px;border-radius:2px;background:var(--lx-track);margin-top:4px;overflow:hidden}.lx-fun-st .t i{display:block;height:100%;border-radius:2px;background:var(--brand);transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+.lx-fun-ar{display:flex;flex-direction:column;align-items:center;gap:3px;text-align:center;min-width:76px;color:var(--faint)}.lx-fun-ar svg{width:18px;height:18px}.lx-fun-ar small{font-size:11px;color:var(--muted);white-space:nowrap}.lx-fun-ar small.f{color:var(--faint)}
+@media (max-width:560px){.lx-fun2{grid-template-columns:minmax(0,1fr)}.lx-fun-ar{flex-direction:row;justify-content:flex-start;gap:8px}.lx-fun-ar svg{transform:rotate(90deg)}}
+.v4 .v4-stack{display:flex;flex-direction:column;gap:14px;margin:0 0 14px}.v4 .v4-stack > *{margin:0}.v4 .v4-stack > :empty{display:none}
+.lx-fun2{max-width:860px}
+[data-ui="v2"] #v2campwrap td:first-child,[data-ui="v2"] #v2gcwrap td:first-child{min-width:220px}
+
+/* the collapse button sits in the brand row (round three, 2026-10-21); the logo no longer links anywhere */
+[data-ui="v2"] .side-brand{cursor:default}
+.rail-min{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;min-height:0;padding:0;border:0;border-radius:var(--r-sm,6px);background:transparent;color:var(--rail-muted,var(--muted));cursor:pointer;flex:none}
+.rail-min:hover{background:var(--surface-2);color:var(--ink)}.rail-min svg{width:16px;height:16px}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .side-brand{flex-direction:column;gap:8px}
+html.lx-irail[data-ui="v2"] body:not(.nav-open) .rail-min{margin:0}
+
+/* ==========================================================================
+   THE v5 LOOK (round three, 2026-10-21, Cole: "it doesn't look modern, futuristic, like a professional SaaS").
+   What premium analytics products (Stripe, Linear, Vercel, Triple Whale, Northbeam) actually do, applied app-wide:
+   1. Surfaces have depth, not lines: cards float on a slightly cooler page with a two-layer soft shadow (light) or a
+      faint top highlight and inner border (dark). 12px radius, generous padding.
+   2. Numbers lead: big, 600 weight, tight tracking, tabular. Labels are small and quiet.
+   3. ONE hue for data (the brand blue), drawn as a gradient with a soft glow on lines. Judgement (good / bad) lives in
+      words, chips and coloured notes, never in a wall of red or green bars.
+   4. Light chart furniture: dashed hairline grids, faint axis text, no boxes.
+   5. Motion on first paint only (pass A), hover lifts a card a hair.
+   Tokens only; both themes.
+   ========================================================================== */
+:root[data-ui="v2"]{
+  --v5-r:12px;
+  --v5-sh:0 1px 2px rgba(16,24,40,.04),0 2px 6px -1px rgba(16,24,40,.06);
+  --v5-sh-hi:0 2px 4px rgba(16,24,40,.05),0 10px 24px -6px rgba(16,24,40,.12);
+  --v5-grad:linear-gradient(90deg,color-mix(in srgb,var(--brand) 55%,transparent),var(--brand));
+  --v5-grad-y:linear-gradient(180deg,var(--brand),color-mix(in srgb,var(--brand) 62%,transparent));
+  --v5-glow:drop-shadow(0 2px 6px color-mix(in srgb,var(--brand) 35%,transparent));
+}
+:root[data-ui="v2"]:not([data-theme="light"]){
+  --v5-sh:0 0 0 1px rgba(255,255,255,.035) inset,0 1px 0 rgba(255,255,255,.04) inset,0 8px 24px -12px rgba(0,0,0,.6);
+  --v5-sh-hi:0 0 0 1px rgba(255,255,255,.06) inset,0 1px 0 rgba(255,255,255,.06) inset,0 16px 32px -14px rgba(0,0,0,.7);
+  --v5-glow:drop-shadow(0 0 8px color-mix(in srgb,var(--brand) 55%,transparent));
+}
+:root[data-ui="v2"][data-theme="light"] body,:root[data-ui="v2"][data-theme="light"] .content{background:#F4F5F8}
+
+/* 1. surfaces */
+[data-ui="v2"] #main .v2card,[data-ui="v2"] #main .card,[data-ui="v2"] #main .v2tile{border-radius:var(--v5-r);box-shadow:var(--v5-sh);border-color:color-mix(in srgb,var(--line) 75%,transparent)}
+[data-ui="v2"]:not([data-theme="light"]) #main .v2card,[data-ui="v2"]:not([data-theme="light"]) #main .v2tile{background:linear-gradient(180deg,rgba(255,255,255,.028),rgba(255,255,255,0) 120px),var(--surface)}
+[data-ui="v2"] #main .v2card{padding:22px 24px}
+[data-ui="v2"] #main .v2tile{padding:18px 20px 16px;transition:box-shadow var(--t) var(--ease),transform var(--t) var(--ease)}
+[data-ui="v2"] #main .v2tile:hover{box-shadow:var(--v5-sh-hi);transform:translateY(-1px)}
+
+/* 2. numbers lead */
+[data-ui="v2"] #main .v2tile .l{font-size:12.5px;font-weight:500;color:var(--muted);letter-spacing:0}
+[data-ui="v2"] #main .v2tile .v{font-size:28px;font-weight:600;letter-spacing:-.03em;font-variant-numeric:tabular-nums;gap:8px}
+[data-ui="v2"] #main .v2tile .sub{font-size:12px;color:var(--muted)}
+[data-ui="v2"] #main .v2h h3{font-size:14.5px;font-weight:600;letter-spacing:-.005em}
+[data-ui="v2"] .v2d{border-radius:6px;padding:2px 6px;font-weight:600}
+.v4 .v4-hero{letter-spacing:-.03em}
+
+/* 3. one hue for data, a gradient, a soft glow on lines */
+.lx-spk .lx-spk-l,[data-ui="v2"] .v2chart svg > path[stroke="var(--brand)"]{filter:var(--v5-glow)}
+.lx-ring .lx-ring-main{filter:var(--v5-glow)}
+.lx-bar .t i:not(.g){background:var(--v5-grad)!important}
+.lx-bar.good .v small{color:var(--good)}.lx-bar.warn .v small{color:var(--warn)}.lx-bar.bad .v small{color:var(--bad)}
+.lx-bar .v small{font-weight:600}
+.lx-fun-st .t i,.lx-scale-t i,[data-ui="v2"] .v2ib > i:not([style*="background"]){background:var(--v5-grad)}
+.lx-fun-st .t,.lx-scale-t{height:6px;border-radius:3px}.lx-fun-st .t i,.lx-scale-t i{border-radius:3px}
+.lx-river-t > i{box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
+.lx-wf-a > i{box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
+.lx-wf-c.tot .lx-wf-a > i{background:var(--v5-grad-y)!important}
+.v4 .v4-kb .tr i{background:var(--v5-grad)}
+.v4 .v4-sh{border-radius:10px;background:var(--surface);box-shadow:var(--v5-sh)}
+
+/* 4. light chart furniture */
+[data-ui="v2"] .v2chart svg line[stroke="var(--v2-grid)"]{stroke-dasharray:2 4;opacity:.8}
+[data-ui="v2"] .v2chart svg text{fill:var(--faint)}
+.lx-spk .mx,.lx-spk .mn{color:var(--faint)}
+
+/* tables read like a product, not a spreadsheet */
+[data-ui="v2"] #main .v2tbl th{font-size:11px;letter-spacing:.05em;color:var(--faint)}
+[data-ui="v2"] #main .v2tbl td{border-bottom-color:color-mix(in srgb,var(--line) 70%,transparent)}
+[data-ui="v2"] #main .v2tbl tbody tr:hover td{background:color-mix(in srgb,var(--brand) 4%,transparent)}
+
+/* chips and the hero strip */
+.lx-st{border-radius:6px}
+.lx-strip{border-radius:var(--v5-r)!important;box-shadow:var(--v5-sh)}
+.v4 .v4-nodata{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:baseline;padding:12px 0 2px;color:var(--muted)}
+
+/* ==========================================================================
+   RECEIPT ROWS (round four, 2026-10-21). Cole: "anytime there's a horizontal filled bar, it doesn't look good"; he picked
+   receipt rows. No filled bars anywhere: a row is the label and the number, the share or note in small grey, and a 2px
+   hairline sized to the value under it. The target is a tick on the hairline. Applies to every LxKit.bars list (weeks,
+   channels, first orders), yesterday's receipt (v4.js river), the Agency board, table inline bars and the share bar.
+   ========================================================================== */
+.lx-bars{gap:0}
+.lx-bar{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"l v" "t t";gap:4px 12px;min-height:0;padding:9px 0 8px;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.lx-bar:last-child{border-bottom:0}
+.lx-bar .l{grid-area:l;color:var(--ink);font-weight:500;white-space:normal}
+.lx-bar .v{grid-area:v;font-size:13.5px}
+.lx-bar .t{grid-area:t;height:2px!important;border-radius:1px;background:color-mix(in srgb,var(--line) 70%,transparent);overflow:visible}
+.lx-bar .t i{border-radius:1px!important;background:var(--brand)!important;opacity:.9}
+.lx-bar .t i.g{display:none}
+.lx-bar .t b{top:-4px!important;bottom:-4px!important;width:1.5px;background:var(--ink-2)}
+.lx-bars.rows .lx-bar{min-height:0;padding:9px 0 8px}
+
+/* yesterday's receipt */
+.lx-rc{display:flex;flex-direction:column;margin-top:2px}
+.lx-rc-r{display:grid;grid-template-columns:minmax(0,1fr) auto 44px;grid-template-areas:"l v s" "h h h";column-gap:12px;row-gap:5px;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent);align-items:baseline}
+.lx-rc-r .l{grid-area:l;display:inline-flex;align-items:center;gap:8px;font-size:13.5px;color:var(--ink-2)}
+.lx-rc-r .l i{width:7px;height:7px;border-radius:2px;flex:none}
+.lx-rc-r b{grid-area:v;font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums;text-align:right}
+.lx-rc-r small{grid-area:s;font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.lx-rc-r .h{grid-area:h;height:2px;border-radius:1px;background:color-mix(in srgb,var(--line) 60%,transparent);overflow:hidden}
+.lx-rc-r .h em{display:block;height:100%;border-radius:1px;transform-origin:left;animation:lx-grow-x .4s var(--lx-ease-out) both}
+.lx-rc-r.top .l{color:var(--ink);font-weight:600}
+.lx-rc-r.tot{border-bottom:0;border-top:1px solid var(--line-strong);margin-top:2px;padding-top:10px}
+.lx-rc-r.tot .l{color:var(--ink);font-weight:600}.lx-rc-r.tot b{font-size:16px;color:var(--good)}.lx-rc-r.tot.neg b{color:var(--bad)}
+.lx-rc-n{margin-top:6px;font-size:12.5px;color:var(--muted)}.lx-rc-n b{color:var(--ink-2);font-weight:600}
+
+/* the Agency board's kept bar, table inline bars, the share bar: hairlines too */
+.v4 .v4-kb .tr{height:2px;border-radius:1px;background:color-mix(in srgb,var(--line) 70%,transparent)}
+.v4 .v4-kb .tr i{border-radius:1px;background:var(--brand)!important}.v4 .v4-kb .tr b{top:-4px;bottom:-4px;width:1.5px}
+[data-ui="v2"] .v2ib > i,[data-ui="v2"] .v2ib::before{height:2px!important;border-radius:1px!important}
+[data-ui="v2"] .v4 .v2stackbar,[data-ui="v2"] .v2drill .v2stackbar,[data-ui="v2"] #main .v2stackbar{height:4px!important;border-radius:2px;gap:3px;background:transparent}
+[data-ui="v2"] #main .v2stackbar i{border-radius:2px}
+.lx-fun-st .t,.lx-scale-t{height:2px!important;border-radius:1px}.lx-fun-st .t i,.lx-scale-t i{border-radius:1px!important}
+
+/* ==========================================================================
+   THE AD SHEET (round four, 2026-10-21, Cole: "when I click into an ad the pop-up can be a lot better; show the other ads in
+   the set and how they compare; the landing page stats under the page"). Reading order: results against the goal, the call,
+   every ad in its set (spend share, cost per purchase, ROAS, CTR, hook; tap one to open it), funnel, landing page, delivery,
+   watch time, where it ran, copy, next steps. v2.js previewAd.
+   ========================================================================== */
+#v2panel .adt-stat{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+#v2panel .adt-stat > div{display:flex;flex-direction:column;gap:2px;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface)}
+#v2panel .adt-stat span{font-size:12px;color:var(--muted)}
+#v2panel .adt-stat b{font-size:20px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+#v2panel .adt-stat b .v2cell{font:inherit;color:var(--ink)}
+#v2panel .adt-stat small{font-size:11.5px;color:var(--muted)}
+@media (max-width:720px){#v2panel .adt-stat{grid-template-columns:repeat(2,minmax(0,1fr))}}
+#v2panel .adt{display:flex;flex-direction:column;gap:10px}
+#v2panel .adt-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+#v2panel .adt-h b{font-size:14px}#v2panel .adt-h > span:not(.v2pill){font-size:12.5px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
+#v2panel .adt .v2tbl{border:1px solid var(--line);border-radius:10px;overflow-x:auto}
+#v2panel .adt table{font-size:12.5px;min-width:0;width:100%}
+#v2panel .adt th,#v2panel .adt td{padding:8px 10px}
+#v2panel .adt td:first-child{display:flex;align-items:center;gap:10px;min-width:0;max-width:240px}
+#v2panel .adt-th{width:34px;height:42px;flex:none;border-radius:6px;background:var(--surface-2) center/cover no-repeat;border:1px solid var(--line)}
+#v2panel .adt-n{display:flex;flex-direction:column;gap:3px;min-width:0}
+#v2panel .adt-n b{font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+#v2panel .adt-n em{font-style:normal;align-self:flex-start;font-size:10.5px;padding:1px 6px}
+#v2panel .adt td small{display:block;font-size:11px;color:var(--muted)}
+#v2panel .adt-sh{display:block;height:2px;border-radius:1px;background:color-mix(in srgb,var(--line) 70%,transparent);margin-bottom:5px;overflow:hidden}
+#v2panel .adt-sh i{display:block;height:100%;background:var(--brand)}
+#v2panel .adt tr.me td{background:color-mix(in srgb,var(--brand) 7%,transparent)}
+#v2panel .adt tr.me td:first-child{box-shadow:inset 3px 0 0 var(--brand)}
+#v2panel .adt tr.link{cursor:pointer}#v2panel .adt tr.link:hover td{background:var(--surface-2)}
+#v2panel .adt-f{margin:0;font-size:12.5px;color:var(--muted)}
+#v2panel .adt-sec{display:flex;flex-direction:column;gap:8px}
+#v2panel .adt-sec h4{margin:4px 0 0;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#v2panel .v2lp{display:flex;flex-direction:column;gap:6px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+#v2panel .v2lp-p a{font-weight:600;font-size:14px;color:var(--ink);overflow-wrap:anywhere}
+#v2panel .v2lp-s{font-size:13px;color:var(--ink-2);line-height:1.5}
+#v2panel .v2lp-a{display:flex;gap:14px;flex-wrap:wrap}
+#v2panel .adt-all{align-self:flex-start}#v2panel .adt th{white-space:nowrap}
+#v2panel .adt th,#v2panel .adt td{padding:7px 8px}#v2panel .adt td:first-child{max-width:190px;gap:8px}#v2panel .adt-th{width:28px;height:35px}#v2panel .adt th{font-size:10.5px;letter-spacing:.04em}
+
+/* ==========================================================================
+   GOALS AND AD CALLS (2026-10-21, Cole approved docs/locus-v4/goals-and-ad-calls.html). Ads > Calls: the MIXED chip (amber,
+   the trim chip's look) and the small "Feeds the funnel" tag under it. The ad set panel (v4.js setPanel): every number
+   against its goal or the account as receipt rows, the two evidence boxes, the funnel line.
+   ========================================================================== */
+.dk .dk-k.mixed{background:var(--warn-bg);color:var(--warn)}
+.dk .dk-fnl{display:inline-block;max-width:72px;font-size:10px;font-weight:600;line-height:1.25;letter-spacing:.02em;text-align:center;padding:2px 5px;border-radius:5px;background:var(--brand-soft);color:var(--brand);cursor:help}
+.v4-chip.mixed{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.v4-chip.fnl{text-transform:none;color:var(--brand);border-color:color-mix(in srgb,var(--brand) 40%,transparent);background:var(--brand-soft)}
+.v4-ck{display:flex;flex-direction:column}
+.v4-ck-r{display:grid;grid-template-columns:minmax(0,1fr) auto 150px;column-gap:12px;padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent);align-items:baseline;font-size:13.5px}
+.v4-ck-r:last-child{border-bottom:0}
+.v4-ck-r .l{color:var(--ink-2);min-width:0}
+.v4-ck-r b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums;text-align:right}
+.v4-ck-r small{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.v4-ck-r small.good{color:var(--good)}.v4-ck-r small.bad{color:var(--bad)}
+.v4-evs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.v4-ev{border:1px solid var(--line);border-radius:var(--r-lg,10px);padding:10px 12px;min-width:0}
+.v4-ev h4{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.v4-ev.for h4{color:var(--good)}.v4-ev.against h4{color:var(--bad)}
+.v4-ev ul{margin:0;padding-left:16px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--ink-2)}
+.v4-ev .v2hint{margin:0;font-size:12.5px}
+.v4-fnl{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+.v4-fnl .v4-chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid;white-space:nowrap}
+@media (max-width:600px){.v4-evs{grid-template-columns:1fr}.v4-ck-r{grid-template-columns:minmax(0,1fr) auto}.v4-ck-r small{grid-column:1 / -1;text-align:left}}
+
+/* the call chip inside the ad set panel (it sits outside .v4, so the page chip rules did not reach it) */
+#v2panel .v4-chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;font-size:11px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+#v2panel .v4-chip.cut,#v2panel .v4-chip.trim{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent);background:color-mix(in srgb,var(--bad) 10%,transparent)}
+#v2panel .v4-chip.scale{color:var(--good);border-color:color-mix(in srgb,var(--good) 40%,transparent);background:color-mix(in srgb,var(--good) 10%,transparent)}
+#v2panel .v4-chip.mixed,#v2panel .v4-chip.refresh,#v2panel .v4-chip.call,#v2panel .v4-chip.fix{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+
+/* ==========================================================================
+   AD SHEET, round two (2026-10-21, Cole: the set table "not uniform", the top boxes "constrained, no padding", the
+   funnel spacing). Plus the Ads page ingredients card (one group at a time) and the look-alike card (picture cards).
+   ========================================================================== */
+/* the four numbers on top: separate cards with room inside, the section box itself has none */
+#v2panel .v2pv.sheet-2 .v2pv-main > .v2pstat.adt-stat{background:transparent;border:0;padding:0;overflow:visible;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+#v2panel .v2pv.sheet-2 .v2pstat.adt-stat > div{border:1px solid var(--line)!important;border-radius:10px!important;padding:14px 16px!important;background:var(--surface);box-shadow:var(--v5-sh)}
+@media (max-width:720px){#v2panel .v2pv.sheet-2 .v2pv-main > .v2pstat.adt-stat{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* the set table: every row the same height, numbers right-aligned, the share as a hairline with its % */
+#v2panel .adt table{table-layout:fixed;width:100%}
+#v2panel .adt th:nth-child(1),#v2panel .adt td:nth-child(1){width:38%}
+#v2panel .adt td{height:56px;vertical-align:middle;white-space:nowrap;text-align:right}
+#v2panel .adt td:first-child{text-align:left;max-width:none;display:table-cell}
+#v2panel .adt td:first-child > *{vertical-align:middle}
+#v2panel .adt-th{display:inline-block;width:30px;height:38px;margin-right:10px}
+#v2panel .adt-n{display:inline-flex;flex-direction:column;gap:3px;max-width:calc(100% - 44px);vertical-align:middle}
+#v2panel .adt-n b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#v2panel .adt-c{font-style:normal;font-size:11px;font-weight:600;color:var(--muted);height:14px;line-height:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#v2panel .adt-c.good{color:var(--good)}#v2panel .adt-c.bad{color:var(--bad)}#v2panel .adt-c.warn{color:var(--warn)}
+#v2panel .adt-shr{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end;width:100%}
+#v2panel .adt-shr .adt-sh{flex:1;max-width:60px;margin:0}#v2panel .adt-shr small{min-width:30px;text-align:right}
+#v2panel .adt tr.tot td{height:auto;font-weight:600}
+/* the funnel: one row per step, the grade as a letter chip, the weakest step called out under it */
+#v2panel .adf{display:flex;flex-direction:column}
+#v2panel .adf-r{display:grid;grid-template-columns:minmax(0,1fr) 84px 110px 34px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
+#v2panel .adf-r:last-child{border-bottom:0}
+#v2panel .adf-l b{display:block;font-size:13.5px;font-weight:600;color:var(--ink)}#v2panel .adf-l small{display:block;font-size:12px;color:var(--muted)}
+#v2panel .adf-v{font-size:14px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+#v2panel .adf-m{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+#v2panel .adf-g{display:inline-flex;align-items:center;justify-content:center;width:30px;height:24px;border-radius:6px;font-weight:700;font-size:13px;background:var(--surface-2);color:var(--ink-2)}
+#v2panel .adf-g.gA,#v2panel .adf-g.gB{color:var(--good);background:color-mix(in srgb,var(--good) 12%,transparent)}
+#v2panel .adf-g.gD{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
+#v2panel .adf-g.gF{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+#v2panel .adf-r.weak .adf-l b::after{content:"weakest";margin-left:8px;font-size:10.5px;font-weight:600;color:var(--warn);text-transform:uppercase;letter-spacing:.05em}
+#v2panel .adf-fix{margin-top:12px;padding:12px 14px;border-radius:10px;background:color-mix(in srgb,var(--warn) 9%,transparent);border:1px solid color-mix(in srgb,var(--warn) 25%,transparent);font-size:13.5px;line-height:1.5;color:var(--ink-2)}
+#v2panel .adf-fix b{color:var(--ink)}
+@media (max-width:600px){#v2panel .adf-r{grid-template-columns:minmax(0,1fr) auto 30px}#v2panel .adf-m{display:none}}
+/* the landing page numbers */
+#v2panel .lp-rows{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:4px}
+#v2panel .lp-r{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:8px;background:var(--surface-2)}
+#v2panel .lp-r > span{font-size:12px;color:var(--muted)}#v2panel .lp-r b{font-size:17px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
+#v2panel .lp-r b.good{color:var(--good)}#v2panel .lp-r b.warn{color:var(--warn)}#v2panel .lp-r b.bad{color:var(--bad)}
+#v2panel .lp-r small{font-size:11.5px;color:var(--muted)}
+@media (max-width:600px){#v2panel .lp-rows{grid-template-columns:minmax(0,1fr)}}
+
+/* Ads page: Which ingredients work, one group at a time */
+.ingr-seg{display:flex;flex-wrap:wrap;gap:4px;padding:3px;border-radius:10px;background:var(--surface-2);margin:2px 0 14px;width:max-content;max-width:100%}
+.ingr-seg button{min-height:0;height:30px;padding:0 12px;border:0;border-radius:8px;background:transparent;font:inherit;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer}
+.ingr-seg button[aria-selected="true"]{background:var(--surface);color:var(--ink);box-shadow:var(--v5-sh)}
+.v2tgrid.ingr-one{display:block!important}
+.v2tgrid.ingr-one .v2tg{border:0!important;padding:0!important;background:none!important}
+.v2tgrid.ingr-one .v2tg > h4{display:none}
+.v2tgrid.ingr-one table{width:100%;border-collapse:collapse;font-size:13.5px}
+.v2tgrid.ingr-one th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:8px 10px;border-bottom:1px solid var(--line)}
+.v2tgrid.ingr-one th:first-child,.v2tgrid.ingr-one td:first-child{text-align:left;padding-left:0}
+.v2tgrid.ingr-one td{padding:12px 10px;text-align:right;border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent);vertical-align:middle;font-variant-numeric:tabular-nums}
+.v2tgrid.ingr-one td:first-child b{font-weight:600;color:var(--ink)}
+.v2tgrid.ingr-one td:first-child small{display:block;font-size:12px;color:var(--muted);margin-top:2px}
+.v2tgrid.ingr-one td .v2pill{margin-left:8px;font-size:10.5px}
+.v2tgrid.ingr-one tr[data-tag]{cursor:pointer}.v2tgrid.ingr-one tr[data-tag]:hover td{background:color-mix(in srgb,var(--brand) 4%,transparent)}
+.v2tgrid.ingr-one .v2share{display:inline-block;width:70px;height:2px;border-radius:1px;background:color-mix(in srgb,var(--line) 70%,transparent);vertical-align:middle;margin-right:8px;overflow:hidden}
+.v2tgrid.ingr-one .v2share i{display:block;height:100%;background:var(--brand)}
+.v2tgrid.ingr-one .v2vs{display:block;font-size:11.5px;font-weight:600}
+.v2tgrid.ingr-one .v2vs.good{color:var(--good)}.v2tgrid.ingr-one .v2vs.bad{color:var(--bad)}.v2tgrid.ingr-one .v2vs.flat{color:var(--muted)}
+
+/* Ads page: ads Meta likely counts as one, as picture cards */
+.alk-list{display:flex;flex-direction:column;gap:12px}
+.alk{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--surface)}
+.alk-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.alk-h b{font-size:14px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}
+.alk-s{margin-left:auto;font-weight:600;font-variant-numeric:tabular-nums}
+.alk-ads{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.alk-ad{display:flex;align-items:center;gap:10px;padding:6px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);font:inherit;text-align:left;cursor:pointer;min-height:0;min-width:0}
+.alk-ad:hover{border-color:var(--line-strong)}
+.alk-ad .adt-th{width:34px;height:42px;flex:none;border-radius:6px;background:var(--surface) center/cover no-repeat;border:1px solid var(--line)}
+.alk-n{font-size:12.5px;font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.alk-why{margin:10px 0 0;font-size:12.5px;color:var(--muted)}
+#v2panel .adt th{white-space:normal!important;line-height:1.2;vertical-align:bottom}
+#v2panel .adt th:nth-child(1),#v2panel .adt td:nth-child(1){width:34%}
+#v2panel .adt-shr .adt-sh{flex:none;width:40px;max-width:none}
+#v2panel .adt.nohook th:last-child,#v2panel .adt.nohook td:last-child{display:none}
+#v2panel .adf-fix.ok{background:color-mix(in srgb,var(--good) 8%,transparent);border-color:color-mix(in srgb,var(--good) 25%,transparent)}
+
+/* ==========================================================================
+   AD SHEET, round six (2026-10-21, Cole: plain words, CPA, which dates, "what was last week, when did it start", trends).
+   ========================================================================== */
+#v2panel .adt-when{margin:-4px 0 0;padding:0 2px;font-size:12.5px;color:var(--muted);background:none!important;border:0!important}
+/* the trend section */
+#v2panel .adtr{display:flex;flex-direction:column;gap:12px}
+#v2panel .adtr-h{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+#v2panel .adtr-h b{font-size:14.5px}
+#v2panel .adtr-seg{margin:0}
+#v2panel .adtr-cap{margin:0;font-size:12.5px;color:var(--muted)}
+#v2panel .adtr-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+#v2panel .adtr-c{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:8px;background:var(--surface-2);min-width:0}
+#v2panel .adtr-c > span{font-size:12px;color:var(--muted)}
+#v2panel .adtr-c b{font-size:17px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
+#v2panel .adtr-c small{font-size:11.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+#v2panel .adtr-c small .v2d{margin-left:0}
+#v2panel .adtr-c small i{font-style:normal}#v2panel .adtr-c small em{font-style:normal;color:var(--muted)}
+#v2panel .adtr-t{margin:6px 0 0;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#v2panel .adtr-sp{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+#v2panel .adtr-s{display:flex;flex-direction:column;gap:2px;padding:10px 12px 8px;border:1px solid var(--line);border-radius:8px;min-width:0}
+#v2panel .adtr-s > span{font-size:12px;font-weight:600;color:var(--ink-2)}
+#v2panel .adtr-w table{width:100%;font-size:12.5px}
+#v2panel .adtr-w th,#v2panel .adtr-w td{padding:8px 8px;text-align:right;white-space:nowrap}
+#v2panel .adtr-w th:first-child,#v2panel .adtr-w td:first-child{text-align:left}
+@media (max-width:720px){#v2panel .adtr-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#v2panel .adtr-sp{grid-template-columns:repeat(2,minmax(0,1fr))}#v2panel .adtr-w{overflow-x:auto}}
+/* the funnel in plain words */
+#v2panel .adf-r{grid-template-columns:minmax(0,1fr) 90px 90px 110px!important}
+#v2panel .adf-hd{padding:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint)}
+#v2panel .adf-hd span:not(:first-child){text-align:right}
+#v2panel .adf-m{font-size:13px!important;color:var(--ink-2)!important}
+#v2panel .adf-w{text-align:right;font-size:13px;font-weight:600}
+#v2panel .adf-w.good{color:var(--good)}#v2panel .adf-w.bad{color:var(--bad)}#v2panel .adf-w.same{color:var(--muted)}
+#v2panel .adf-r.weak .adf-l b::after{content:none}
+#v2panel .adf-r.weak{background:color-mix(in srgb,var(--bad) 5%,transparent)}
+#v2panel .adf-note{margin:8px 0 0;font-size:12px;color:var(--muted)}
+@media (max-width:600px){#v2panel .adf-r{grid-template-columns:minmax(0,1fr) auto auto!important}#v2panel .adf-m{display:none}}
+/* landing page footnote, "Where it ran" tables */
+#v2panel .lp-rows{grid-template-columns:repeat(2,minmax(0,1fr))}
+#v2panel .lp-foot{display:block;margin-top:8px;font-size:12px;color:var(--muted)}
+#v2panel .brk-t table{width:100%;font-size:12.5px;table-layout:auto}
+#v2panel .brk-t th,#v2panel .brk-t td{padding:8px 8px;text-align:right;white-space:nowrap}
+#v2panel .brk-t th:first-child,#v2panel .brk-t td:first-child{text-align:left;white-space:normal}
+#v2panel .adtr-w{overflow-x:auto}#v2panel .adtr-w th,#v2panel .adtr-w td{padding:7px 6px}#v2panel .adtr-w th{font-size:10.5px}
+
+/* ==========================================================================
+   AD SHEET, round seven (2026-10-21, Cole: trend cards squished, week table scrolls, headers merge, delivery on one line,
+   the AI description outside its box, unlabelled ad copy, change the credit model in the sheet).
+   ========================================================================== */
+#v2panel .adt-model{display:inline-flex;vertical-align:middle;margin-left:4px}
+#v2panel .adt-model .hd-per-btn{height:26px;padding:0 9px;font-size:12px}
+/* the period's numbers: roomier cards */
+#v2panel .adtr-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+#v2panel .adtr-c{padding:12px 14px;gap:4px;border-radius:10px}
+#v2panel .adtr-c b{font-size:19px}
+#v2panel .adtr-c small{gap:6px}
+/* day by day: two wide charts a row with room to read them */
+#v2panel .adtr-sp{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+#v2panel .adtr-s{padding:12px 14px 10px;border-radius:10px}
+#v2panel .adtr-s .lx-spk .v2spark{height:70px}
+@media (max-width:600px){#v2panel .adtr-sp{grid-template-columns:minmax(0,1fr)}}
+/* week by week: fits the panel, short headers, the date on two lines */
+#v2panel .adtr-w{overflow-x:visible}
+#v2panel .adtr-w table{table-layout:fixed;width:100%;font-size:12.5px}
+#v2panel .adtr-w th,#v2panel .adtr-w td{padding:8px 6px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#v2panel .adtr-w th:first-child,#v2panel .adtr-w td:first-child{text-align:left;width:22%}
+#v2panel .adtr-w td:first-child small{display:block;font-size:11px;color:var(--muted)}
+#v2panel .adtr-w th{font-size:10.5px;letter-spacing:.04em}
+/* the set table: plain share number, the call explained on hover */
+#v2panel .adt th:nth-child(1),#v2panel .adt td:nth-child(1){width:36%}
+#v2panel .adt-c[title]{cursor:help;text-decoration:underline dotted;text-underline-offset:3px}
+/* the funnel header */
+#v2panel .adf-hd span[data-v2tip]{cursor:help;text-decoration:underline dotted;text-underline-offset:3px}
+/* the creative, as the AI reads it */
+#v2panel .adt-tags{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0}
+#v2panel .adt-tags > div{padding:8px 10px;border-radius:8px;background:var(--surface-2);min-width:0}
+#v2panel .adt-tags dt{font-size:11px;color:var(--muted)}#v2panel .adt-tags dd{margin:2px 0 0;font-size:13px;font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+#v2panel .adt-notes{margin:10px 0 0;font-size:13px;line-height:1.5;color:var(--ink-2)}
+/* ad copy, labelled */
+#v2panel .v2copy .cp-k{display:block;margin:10px 0 2px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#v2panel .v2copy .cp-k:first-child{margin-top:0}
+/* where it ran: fits without a sideways scroll */
+#v2panel .brk-t{overflow-x:visible}
+#v2panel .brk-t table{table-layout:fixed}
+#v2panel .brk-t th,#v2panel .brk-t td{padding:7px 5px;font-size:12px;overflow:hidden;text-overflow:ellipsis}
+#v2panel .brk-t th:first-child,#v2panel .brk-t td:first-child{width:30%}
+
+/* ==========================================================================
+   AD SHEET, round eight (2026-10-21, Cole: Dates and Credit at the top, days live, the funnel table, the orders pop-up,
+   no blank space at the end).
+   ========================================================================== */
+#v2panel .ph .pacts .hd-period{position:relative}
+#v2panel .ph .pacts .hd-per-btn{height:30px;padding:0 10px;font-size:12.5px;gap:6px}
+#v2panel .ph .pacts .hd-per-l{color:var(--muted);font-weight:500}
+#v2panel .ph .pacts .hd-per-menu{right:0;left:auto;min-width:240px}
+#v2panel .pb.adt-busy{opacity:.45;pointer-events:none;transition:opacity .15s}
+/* the funnel: padded rows, one-line headers */
+#v2panel .adf-r{grid-template-columns:minmax(0,1fr) 84px 84px 104px!important;padding:10px 12px!important;border-radius:8px}
+#v2panel .adf-hd{padding:0 12px 6px!important}
+#v2panel .adf-hd span{white-space:nowrap}
+#v2panel .adf-hd span[data-v2tip]{text-decoration:none;cursor:help}
+#v2panel .adf-l small{display:block}
+@media (max-width:600px){#v2panel .adf-r{grid-template-columns:minmax(0,1fr) auto auto!important}}
+/* the orders behind an ad */
+#v2panel .od{display:flex;flex-direction:column;gap:12px}
+#v2panel .od-cap{margin:0;font-size:12.5px;color:var(--muted)}
+#v2panel .od-t table{width:100%;font-size:13px}
+#v2panel .od-t th,#v2panel .od-t td{padding:9px 10px;text-align:left}
+#v2panel .od-t th:nth-child(2),#v2panel .od-t td:nth-child(2){text-align:right}
+#v2panel .od-t th:nth-child(3),#v2panel .od-t td:nth-child(3){text-align:right}
+#v2panel .od-t tr.link{cursor:pointer}
+#v2panel .od-t tr.link:hover td{background:var(--surface-2)}
+#v2panel .od .adt-stat{grid-template-columns:repeat(3,minmax(0,1fr))}
+
+/* ==============================================================================================
+   POP-UPS, NOT SIDE DRAWERS (2026-10-24, Cole: "instead of it coming off the right, can it just be a straight up
+   pop-up in the window, like a normal pop-up... this goes for all things that go from the right side").
+   On a desktop or tablet every panel that used to slide in from the right is a pop-up in the middle of the window:
+   fixed to the window (scroll position never matters), sized to what it holds, scrolls inside itself when tall,
+   the dimmed layer behind, and Esc / the dimmed layer / X close it (each caller already wires those). Phones keep
+   their bottom sheets (phone.css, under 721px), so all of this is min-width 721px.
+     #v2panel        V2.panel: every side panel in Locus (ads, tasks, posts, leaks, orders, the day, Tests...)
+     .cn-drawer      Brand / Agency settings > Integrations, a card's steps
+     .lb-drawer      the Tests fallback when v2.js is missing
+     #amDrawer       the creator-link idea editor: a wide editor, so a big fixed-height window (its jump row and
+                     scrolling body need a set height), still centred
+     #ask            Ask Locus: a chat, so a tall fixed-height window
+   The card sheet (#v2panel.sheet) was already a centred window and is left as it is.
+   ============================================================================================== */
+@keyframes lx-pop{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+@media (min-width:721px){
+  [data-ui="v2"] #v2panel:not(.sheet){top:0;right:0;bottom:0;left:0;margin:auto;height:fit-content;max-height:calc(100dvh - 48px);
+    width:min(600px,calc(100vw - 48px));border:1px solid var(--line);border-radius:var(--r-xl);box-shadow:var(--sh-sheet);
+    transform:translateY(8px) scale(.985);opacity:0;transition:transform 200ms var(--ease-out,ease),opacity 160ms var(--ease,ease)}
+  [data-ui="v2"] #v2panel:not(.sheet).on{transform:none;opacity:1}
+  [data-ui="v2"] #v2panel.wide:not(.sheet){width:min(980px,calc(100vw - 48px))}
+  [data-ui="v2"] #v2panel:not(.sheet):not(.on){transition:transform 160ms var(--ease,ease),opacity 160ms var(--ease,ease),visibility 0s linear 160ms}
+  [data-ui="v2"] #v2panel:not(.sheet) .sbody{flex:1 1 auto;min-height:0}
+  [data-ui="v2"] #v2panel:not(.sheet) .pb{min-height:0}
+
+  [data-ui="v2"] .cn-drawer,[data-ui="v2"] .lb-drawer{top:0;right:0;bottom:0;left:0;margin:auto;height:fit-content;max-height:calc(100dvh - 48px);
+    width:min(560px,calc(100vw - 48px));border:1px solid var(--line);border-radius:var(--r-xl);box-shadow:var(--sh-sheet);
+    overflow-y:auto;overscroll-behavior:contain;animation:lx-pop 200ms var(--ease-out,ease) both}
+  [data-ui="v2"] .cn-drawer[hidden]{display:none}
+  [data-ui="v2"] .cn-scrim,[data-ui="v2"] .lb-scrim{background:rgba(17,17,20,.36)}
+  [data-theme="dark"] .cn-scrim,[data-theme="dark"] .lb-scrim{background:rgba(0,0,0,.55)}
+
+  [data-ui="v2"] #amDrawer{top:24px;bottom:24px;left:0;right:0;margin:0 auto;width:min(880px,calc(100vw - 48px));
+    border:1px solid var(--line);border-radius:var(--r-xl);box-shadow:var(--sh-sheet);overflow:hidden;animation:lx-pop 200ms var(--ease-out,ease) both}
+
+  [data-ui="v2"] #ask{top:0;right:0;bottom:0;left:0;margin:auto;width:min(680px,calc(100vw - 48px));height:min(820px,calc(100dvh - 48px));
+    border:1px solid var(--line);border-radius:var(--r-xl);box-shadow:var(--sh-sheet);overflow:hidden;
+    transform:translateY(8px) scale(.985);opacity:0;visibility:hidden;
+    transition:transform 200ms var(--ease-out,ease),opacity 160ms var(--ease,ease),visibility 0s linear 200ms}
+  [data-ui="v2"] #ask.on{transform:none;opacity:1;visibility:visible;transition:transform 200ms var(--ease-out,ease),opacity 160ms var(--ease,ease)}
+}
+@media (min-width:721px) and (prefers-reduced-motion:reduce){
+  [data-ui="v2"] #v2panel:not(.sheet),[data-ui="v2"] #ask{transition:none}
+  [data-ui="v2"] .cn-drawer,[data-ui="v2"] .lb-drawer,[data-ui="v2"] #amDrawer{animation:none}
+}
+
+/* NO PAGE SITS BLANK (2026-11-13, index.html loadingState / emptyState): the loading line on a first paint and the
+   empty state for a brand with no data or a page with nothing to show. Tokens only. */
+.lx-state{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;margin:24px auto;padding:36px 20px;max-width:560px;background:var(--surface);border:1px solid var(--line);border-radius:12px;color:var(--ink-2)}
+.lx-state.lx-loading{flex-direction:row;gap:10px;background:transparent;border-color:transparent;padding:28px 16px;font-size:13.5px}
+.lx-state .lx-spin{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--brand);animation:lx-spin .8s linear infinite;flex:none}
+@keyframes lx-spin{to{transform:rotate(360deg)}}
+.lx-state-i{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--brand-soft);color:var(--brand)}
+.lx-state-i svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5}
+.lx-state b{font-size:15px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.lx-state p{margin:0;font-size:13.5px;line-height:1.55;max-width:46ch}
+.lx-state-acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:8px}
+@media (prefers-reduced-motion:reduce){.lx-state .lx-spin{animation-duration:2.4s}}

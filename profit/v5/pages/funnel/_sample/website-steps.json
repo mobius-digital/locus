@@ -1,0 +1,288 @@
+{
+ "connected": true,
+ "range": {
+  "from": "2026-11-01",
+  "to": "2026-11-22"
+ },
+ "example": [],
+ "steps": {
+  "visits": 28414,
+  "engaged": 16622,
+  "carts": 2256,
+  "checkouts": 1243,
+  "orders": 693
+ },
+ "prev": {
+  "visits": 25857,
+  "carts": 2168,
+  "checkouts": 1130,
+  "orders": 644
+ },
+ "days": [
+  {
+   "date": "2026-11-01",
+   "visits": 1725,
+   "orders": 42,
+   "carts": 137,
+   "checkouts": 81
+  },
+  {
+   "date": "2026-11-02",
+   "visits": 1183,
+   "orders": 30,
+   "carts": 100,
+   "checkouts": 53
+  },
+  {
+   "date": "2026-11-03",
+   "visits": 1149,
+   "orders": 32,
+   "carts": 90,
+   "checkouts": 47
+  },
+  {
+   "date": "2026-11-04",
+   "visits": 1346,
+   "orders": 32,
+   "carts": 101,
+   "checkouts": 56
+  },
+  {
+   "date": "2026-11-05",
+   "visits": 1864,
+   "orders": 45,
+   "carts": 152,
+   "checkouts": 84
+  },
+  {
+   "date": "2026-11-06",
+   "visits": 1463,
+   "orders": 33,
+   "carts": 122,
+   "checkouts": 68
+  },
+  {
+   "date": "2026-11-07",
+   "visits": 1506,
+   "orders": 42,
+   "carts": 115,
+   "checkouts": 66
+  },
+  {
+   "date": "2026-11-08",
+   "visits": 1939,
+   "orders": 41,
+   "carts": 148,
+   "checkouts": 79
+  },
+  {
+   "date": "2026-11-09",
+   "visits": 1715,
+   "orders": 41,
+   "carts": 143,
+   "checkouts": 72
+  },
+  {
+   "date": "2026-11-10",
+   "visits": 1417,
+   "orders": 39,
+   "carts": 115,
+   "checkouts": 65
+  },
+  {
+   "date": "2026-11-11",
+   "visits": 1250,
+   "orders": 27,
+   "carts": 94,
+   "checkouts": 58
+  },
+  {
+   "date": "2026-11-12",
+   "visits": 1156,
+   "orders": 28,
+   "carts": 91,
+   "checkouts": 50
+  },
+  {
+   "date": "2026-11-13",
+   "visits": 1878,
+   "orders": 42,
+   "carts": 158,
+   "checkouts": 76
+  },
+  {
+   "date": "2026-11-14",
+   "visits": 1848,
+   "orders": 50,
+   "carts": 146,
+   "checkouts": 79
+  },
+  {
+   "date": "2026-11-15",
+   "visits": 1354,
+   "orders": 32,
+   "carts": 101,
+   "checkouts": 63
+  },
+  {
+   "date": "2026-11-16",
+   "visits": 1227,
+   "orders": 27,
+   "carts": 100,
+   "checkouts": 57
+  },
+  {
+   "date": "2026-11-17",
+   "visits": 845,
+   "orders": 20,
+   "carts": 71,
+   "checkouts": 36
+  },
+  {
+   "date": "2026-11-18",
+   "visits": 979,
+   "orders": 27,
+   "carts": 75,
+   "checkouts": 40
+  },
+  {
+   "date": "2026-11-19",
+   "visits": 666,
+   "orders": 18,
+   "carts": 51,
+   "checkouts": 29
+  },
+  {
+   "date": "2026-11-20",
+   "visits": 672,
+   "orders": 16,
+   "carts": 56,
+   "checkouts": 31
+  },
+  {
+   "date": "2026-11-21",
+   "visits": 525,
+   "orders": 12,
+   "carts": 43,
+   "checkouts": 24
+  },
+  {
+   "date": "2026-11-22",
+   "visits": 707,
+   "orders": 17,
+   "carts": 53,
+   "checkouts": 30
+  }
+ ],
+ "devices": [
+  {
+   "name": "Phone",
+   "visits": 20741,
+   "carts": 1494,
+   "checkouts": 786,
+   "orders": 408
+  },
+  {
+   "name": "Computer",
+   "visits": 6534,
+   "carts": 668,
+   "checkouts": 404,
+   "orders": 257
+  },
+  {
+   "name": "Tablet",
+   "visits": 1139,
+   "carts": 94,
+   "checkouts": 53,
+   "orders": 28
+  }
+ ],
+ "channels": [
+  {
+   "name": "Paid social",
+   "visits": 15277,
+   "carts": 1010,
+   "checkouts": 512,
+   "orders": 264
+  },
+  {
+   "name": "Paid search",
+   "visits": 5104,
+   "carts": 512,
+   "checkouts": 301,
+   "orders": 175
+  },
+  {
+   "name": "Email",
+   "visits": 2064,
+   "carts": 286,
+   "checkouts": 178,
+   "orders": 109
+  },
+  {
+   "name": "Organic search",
+   "visits": 2672,
+   "carts": 232,
+   "checkouts": 133,
+   "orders": 77
+  },
+  {
+   "name": "Direct",
+   "visits": 2475,
+   "carts": 176,
+   "checkouts": 97,
+   "orders": 56
+  },
+  {
+   "name": "Other",
+   "visits": 822,
+   "carts": 40,
+   "checkouts": 22,
+   "orders": 12
+  }
+ ],
+ "pages": [
+  {
+   "name": "/products/classic-golf-belt",
+   "visits": 8427,
+   "carts": 866,
+   "orders": 274
+  },
+  {
+   "name": "/",
+   "visits": 6174,
+   "carts": 389,
+   "orders": 117
+  },
+  {
+   "name": "/pages/holiday-sale",
+   "visits": 4821,
+   "carts": 462,
+   "orders": 149
+  },
+  {
+   "name": "/collections/belts",
+   "visits": 3528,
+   "carts": 301,
+   "orders": 86
+  },
+  {
+   "name": "/products/ball-marker-set",
+   "visits": 1935,
+   "carts": 122,
+   "orders": 36
+  },
+  {
+   "name": "/pages/how-it-fits",
+   "visits": 1267,
+   "carts": 43,
+   "orders": 10
+  },
+  {
+   "name": "/collections/gift-sets",
+   "visits": 1019,
+   "carts": 52,
+   "orders": 16
+  }
+ ]
+}
